@@ -1,9 +1,12 @@
+import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import '../models/worker.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
+import 'dart:io' show Platform; // Only show Platform for non-web logic
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -19,6 +22,44 @@ class _LoginScreenState extends State<LoginScreen> {
   final LocationService _locationService = LocationService();
   bool _isLoading = false;
 
+  Future<void> _recordOwnerLogin() async {
+    final deviceInfo = DeviceInfoPlugin();
+    String deviceName = 'Unknown Device';
+    String osVersion = 'Unknown OS';
+
+    try {
+      if (kIsWeb) {
+        final webInfo = await deviceInfo.webBrowserInfo;
+        deviceName = '${webInfo.browserName.name} on ${webInfo.platform}';
+        osVersion = webInfo.userAgent ?? 'Unknown Web UserAgent';
+      } else if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        deviceName = '${androidInfo.manufacturer} ${androidInfo.model}';
+        osVersion = 'Android ${androidInfo.version.release}';
+      } else if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+        deviceName = '${iosInfo.name} ${iosInfo.systemName}';
+        osVersion = iosInfo.systemVersion;
+      } else if (Platform.isMacOS) {
+        final macInfo = await deviceInfo.macOsInfo;
+        deviceName = '${macInfo.model}';
+        osVersion = 'macOS ${macInfo.osRelease}';
+      } else if (Platform.isWindows) {
+        final winInfo = await deviceInfo.windowsInfo;
+        deviceName = winInfo.computerName;
+        osVersion = 'Windows';
+      }
+      
+      await Supabase.instance.client.from('owner_logs').insert({
+        'login_time': DateTime.now().toIso8601String(),
+        'device_name': deviceName,
+        'os_version': osVersion,
+      });
+    } catch (e) {
+      debugPrint('Error logging owner login: $e');
+    }
+  }
+
   void _login() async {
     if (_formKey.currentState!.validate()) {
       setState(() {
@@ -31,6 +72,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
         // 1. Check for Admin Login
         if (username == 'admin' && password == 'admin123') {
+           await _recordOwnerLogin();
+           if (!mounted) return;
            Navigator.pushReplacement(
              context,
              MaterialPageRoute(builder: (context) => const AdminDashboardScreen()),
