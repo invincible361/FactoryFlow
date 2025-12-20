@@ -12,6 +12,7 @@ class ProductionLog {
   final double longitude;
   final String? shiftName;
   final int performanceDiff;
+  final String? organizationCode;
 
   ProductionLog({
     required this.id,
@@ -27,6 +28,7 @@ class ProductionLog {
     required this.longitude,
     this.shiftName,
     this.performanceDiff = 0,
+    this.organizationCode,
   });
 
   Map<String, dynamic> toJson() {
@@ -44,6 +46,7 @@ class ProductionLog {
       'longitude': longitude,
       'shiftName': shiftName,
       'performanceDiff': performanceDiff,
+      'organizationCode': organizationCode,
     };
   }
 
@@ -62,6 +65,7 @@ class ProductionLog {
       longitude: json['longitude'],
       shiftName: json['shiftName'],
       performanceDiff: json['performanceDiff'] ?? 0,
+      organizationCode: json['organizationCode'],
     );
   }
 }

@@ -1,23 +1,26 @@
 import 'package:flutter/foundation.dart'; // For kIsWeb
-  import 'package:flutter/material.dart';
-  import 'package:flutter/services.dart';
-  import 'package:supabase_flutter/supabase_flutter.dart';
-  import 'package:image_picker/image_picker.dart';
-  import 'package:excel/excel.dart' hide Border;
-  import 'package:path_provider/path_provider.dart';
-  import 'package:share_plus/share_plus.dart';
-  import 'package:intl/intl.dart';
-  import '../models/item.dart';
-  import 'dart:io' show File; // Show File only for non-web logic if strictly needed
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:excel/excel.dart' hide Border;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:intl/intl.dart';
+import '../models/item.dart';
+import 'dart:io'
+    show File; // Show File only for non-web logic if strictly needed
 
 class AdminDashboardScreen extends StatefulWidget {
-  const AdminDashboardScreen({super.key});
+  final String organizationCode;
+  const AdminDashboardScreen({super.key, required this.organizationCode});
 
   @override
   State<AdminDashboardScreen> createState() => _AdminDashboardScreenState();
 }
 
-class _AdminDashboardScreenState extends State<AdminDashboardScreen> with SingleTickerProviderStateMixin {
+class _AdminDashboardScreenState extends State<AdminDashboardScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
@@ -41,7 +44,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Single
             Image.asset(
               'assets/images/logo.png',
               height: 30,
-              errorBuilder: (context, error, stackTrace) => const Icon(Icons.factory),
+              errorBuilder: (context, error, stackTrace) =>
+                  const Icon(Icons.factory),
             ),
             const SizedBox(width: 10),
             const Text('Admin Dashboard'),
@@ -52,7 +56,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Single
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
             onPressed: () {
-              Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+              Navigator.of(
+                context,
+              ).pushNamedAndRemoveUntil('/', (route) => false);
             },
           ),
         ],
@@ -71,13 +77,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Single
       ),
       body: TabBarView(
         controller: _tabController,
-        children: const [
-          ReportsTab(),
-          WorkersTab(),
-          MachinesTab(),
-          ItemsTab(),
-          ShiftsTab(),
-          SecurityTab(),
+        children: [
+          ReportsTab(organizationCode: widget.organizationCode),
+          WorkersTab(organizationCode: widget.organizationCode),
+          MachinesTab(organizationCode: widget.organizationCode),
+          ItemsTab(organizationCode: widget.organizationCode),
+          ShiftsTab(organizationCode: widget.organizationCode),
+          const SecurityTab(),
         ],
       ),
     );
@@ -88,7 +94,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Single
 // 1. REPORTS TAB
 // ---------------------------------------------------------------------------
 class ReportsTab extends StatefulWidget {
-  const ReportsTab({super.key});
+  final String organizationCode;
+  const ReportsTab({super.key, required this.organizationCode});
 
   @override
   State<ReportsTab> createState() => _ReportsTabState();
@@ -111,39 +118,45 @@ class _ReportsTabState extends State<ReportsTab> {
     setState(() => _isLoading = true);
     try {
       final response = await _buildQuery(isExport: false);
-      
+      final rawLogs = List<Map<String, dynamic>>.from(response);
+      final enriched = await _enrichLogsWithNames(rawLogs);
       if (mounted) {
         setState(() {
-          _logs = List<Map<String, dynamic>>.from(response);
+          _logs = enriched;
           _isLoading = false;
         });
       }
     } catch (e) {
       // Fallback if relationship fails
-      if (e.toString().contains('relationship') || e.toString().contains('foreign') || e.toString().contains('PGRST200')) {
-         try {
-           final fallbackResponse = await _supabase
+      if (e.toString().contains('relationship') ||
+          e.toString().contains('foreign') ||
+          e.toString().contains('PGRST200')) {
+        try {
+          final fallbackResponse = await _supabase
               .from('production_logs')
               .select()
-              .order('timestamp', ascending: false)
+              .eq('organization_code', widget.organizationCode)
+              .order('created_at', ascending: false)
               .limit(50);
-           
-           if (mounted) {
-             setState(() {
-               _logs = List<Map<String, dynamic>>.from(fallbackResponse);
-               _isLoading = false;
-             });
-           }
-           // Successfully loaded fallback, so return without showing error
-           return;
-         } catch (_) {}
+          final enriched = await _enrichLogsWithNames(
+            List<Map<String, dynamic>>.from(fallbackResponse),
+          );
+          if (mounted) {
+            setState(() {
+              _logs = enriched;
+              _isLoading = false;
+            });
+          }
+          // Successfully loaded fallback, so return without showing error
+          return;
+        } catch (_) {}
       }
 
       if (mounted) {
         // Suppress error if it's just empty/missing table, user prefers "No work done"
         // Only print debug info if it's NOT the relationship error we just tried to handle
         if (!e.toString().contains('PGRST200')) {
-           debugPrint('Fetch logs error: $e');
+          debugPrint('Fetch logs error: $e');
         }
         setState(() => _isLoading = false);
       }
@@ -154,42 +167,81 @@ class _ReportsTabState extends State<ReportsTab> {
   Future<dynamic> _buildQuery({required bool isExport}) {
     var query = _supabase
         .from('production_logs')
-        .select('*, workers(name), items(name)');
-    
+        .select()
+        .eq('organization_code', widget.organizationCode);
+
     // Apply Date Filters
     final now = DateTime.now();
     if (_filter == 'Today') {
       final start = DateTime(now.year, now.month, now.day);
       final end = start.add(const Duration(days: 1));
-      query = query.gte('timestamp', start.toIso8601String()).lt('timestamp', end.toIso8601String());
+      query = query
+          .gte('created_at', start.toIso8601String())
+          .lt('created_at', end.toIso8601String());
     } else if (_filter == 'Week') {
       // Last 7 days
       final start = now.subtract(const Duration(days: 7));
-      query = query.gte('timestamp', start.toIso8601String());
+      query = query.gte('created_at', start.toIso8601String());
     } else if (_filter == 'Month') {
       final start = DateTime(now.year, now.month, 1);
-      query = query.gte('timestamp', start.toIso8601String());
+      query = query.gte('created_at', start.toIso8601String());
     }
 
     if (!isExport) {
       // Limit for display
-      return query.order('timestamp', ascending: false).limit(50);
+      return query.order('created_at', ascending: false).limit(50);
     }
     // No limit for export
-    return query.order('timestamp', ascending: false);
+    return query.order('created_at', ascending: false);
+  }
+
+  Future<List<Map<String, dynamic>>> _enrichLogsWithNames(
+    List<Map<String, dynamic>> rawLogs,
+  ) async {
+    try {
+      final workersResp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final itemsResp = await _supabase
+          .from('items')
+          .select('item_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final workerMap = <String, String>{};
+      final itemMap = <String, String>{};
+      for (final w in List<Map<String, dynamic>>.from(workersResp)) {
+        final id = w['worker_id']?.toString() ?? '';
+        final name = w['name']?.toString() ?? '';
+        if (id.isNotEmpty) workerMap[id] = name;
+      }
+      for (final it in List<Map<String, dynamic>>.from(itemsResp)) {
+        final id = it['item_id']?.toString() ?? '';
+        final name = it['name']?.toString() ?? '';
+        if (id.isNotEmpty) itemMap[id] = name;
+      }
+      return rawLogs.map((log) {
+        final wid = log['worker_id']?.toString() ?? '';
+        final iid = log['item_id']?.toString() ?? '';
+        return {
+          ...log,
+          'workerName': workerMap[wid] ?? 'Unknown',
+          'itemName': itemMap[iid] ?? 'Unknown',
+        };
+      }).toList();
+    } catch (_) {
+      return rawLogs;
+    }
   }
 
   // Aggregate logs: Worker -> Item -> Operation -> {qty, diff, workerName}
-  Map<String, Map<String, Map<String, Map<String, dynamic>>>> _getAggregatedData() {
+  Map<String, Map<String, Map<String, Map<String, dynamic>>>>
+  _getAggregatedData() {
     final Map<String, Map<String, Map<String, Map<String, dynamic>>>> data = {};
 
     for (var log in _logs) {
       final worker = log['worker_id'] as String;
-      // Extract worker name from the joined table
-      final workerName = (log['workers'] != null && log['workers']['name'] != null) 
-          ? log['workers']['name'] 
-          : 'Unknown';
-          
+      final workerName = (log['workerName'] ?? 'Unknown') as String;
+
       final item = log['item_id'] as String;
       final op = log['operation'] as String;
       final qty = log['quantity'] as int;
@@ -197,8 +249,11 @@ class _ReportsTabState extends State<ReportsTab> {
 
       data.putIfAbsent(worker, () => {});
       data[worker]!.putIfAbsent(item, () => {});
-      data[worker]![item]!.putIfAbsent(op, () => {'qty': 0, 'diff': 0, 'workerName': workerName});
-      
+      data[worker]![item]!.putIfAbsent(
+        op,
+        () => {'qty': 0, 'diff': 0, 'workerName': workerName},
+      );
+
       final current = data[worker]![item]![op]!;
       data[worker]![item]![op] = {
         'qty': current['qty'] + qty,
@@ -214,7 +269,8 @@ class _ReportsTabState extends State<ReportsTab> {
     try {
       // 1. Fetch ALL data based on current filter
       final response = await _buildQuery(isExport: true);
-      final allLogs = List<Map<String, dynamic>>.from(response);
+      final allLogsRaw = List<Map<String, dynamic>>.from(response);
+      final allLogs = await _enrichLogsWithNames(allLogsRaw);
 
       if (allLogs.isEmpty) {
         throw Exception('No data to export for this period');
@@ -223,7 +279,7 @@ class _ReportsTabState extends State<ReportsTab> {
       // 2. Create Excel
       var excel = Excel.createExcel();
       Sheet sheetObject = excel['Production Report'];
-      
+
       // Headers
       sheetObject.appendRow([
         TextCellValue('Worker Name'),
@@ -247,42 +303,48 @@ class _ReportsTabState extends State<ReportsTab> {
       aggregated.forEach((workerId, items) {
         items.forEach((itemId, ops) {
           ops.forEach((opName, data) {
-             final qty = data['qty'];
-             final diff = data['diff'];
-             final wName = data['workerName'];
-             String status = diff >= 0 ? 'Surplus' : 'Deficit';
+            final qty = data['qty'];
+            final diff = data['diff'];
+            final wName = data['workerName'];
+            String status = diff >= 0 ? 'Surplus' : 'Deficit';
 
-             sheetObject.appendRow([
-               TextCellValue(wName),
-               TextCellValue(workerId),
-               TextCellValue(itemId),
-               TextCellValue(opName),
-               IntCellValue(qty),
-               IntCellValue(diff),
-               TextCellValue(status),
-             ]);
+            sheetObject.appendRow([
+              TextCellValue(wName),
+              TextCellValue(workerId),
+              TextCellValue(itemId),
+              TextCellValue(opName),
+              IntCellValue(qty),
+              IntCellValue(diff),
+              TextCellValue(status),
+            ]);
           });
         });
       });
 
       // 5. Save & Share
       final directory = await getTemporaryDirectory();
-      final path = '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+      final path =
+          '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
       final file = File(path);
       final bytes = excel.save();
-      
+
       if (bytes != null) {
         await file.writeAsBytes(bytes);
-        await Share.shareXFiles([XFile(path)], text: 'Production Report ($_filter)');
+        await Share.shareXFiles([
+          XFile(path),
+        ], text: 'Production Report ($_filter)');
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Export successful!')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Export successful!')));
       }
-
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _isExporting = false);
@@ -298,7 +360,10 @@ class _ReportsTabState extends State<ReportsTab> {
           padding: const EdgeInsets.all(8.0),
           child: Row(
             children: [
-              const Text('Filter: ', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text(
+                'Filter: ',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               DropdownButton<String>(
                 value: _filter,
                 items: ['All', 'Today', 'Week', 'Month'].map((String value) {
@@ -322,30 +387,41 @@ class _ReportsTabState extends State<ReportsTab> {
                 onPressed: _isExporting ? null : _exportToExcel,
                 tooltip: 'Export to Excel',
               ),
-              if (_isExporting) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              if (_isExporting)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
             ],
           ),
         ),
         Expanded(
-          child: _isLoading 
-            ? const Center(child: CircularProgressIndicator()) 
-            : _logs.isEmpty 
-               ? const Center(child: Text('No work done.'))
-               : ListView.builder(
-                   itemCount: _logs.length,
-                   itemBuilder: (context, index) {
-                     final log = _logs[index];
-                     final timestamp = DateTime.parse(log['timestamp']).toLocal();
-                     final workerName = log['workers']?['name'] ?? 'Unknown';
-                     final itemName = log['items']?['name'] ?? 'Unknown';
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _logs.isEmpty
+              ? const Center(child: Text('No work done.'))
+              : ListView.builder(
+                  itemCount: _logs.length,
+                  itemBuilder: (context, index) {
+                    final log = _logs[index];
+                    final timestamp = DateTime.parse(
+                      log['created_at'],
+                    ).toLocal();
+                    final workerName = log['workerName'] ?? 'Unknown';
+                    final itemName = log['itemName'] ?? 'Unknown';
 
-                     return ListTile(
-                       title: Text('$workerName - $itemName'),
-                       subtitle: Text('${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}'),
-                       trailing: Text(DateFormat('MM/dd HH:mm').format(timestamp)),
-                     );
-                   },
-                 ),
+                    return ListTile(
+                      title: Text('$workerName - $itemName'),
+                      subtitle: Text(
+                        '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+                      ),
+                      trailing: Text(
+                        DateFormat('MM/dd HH:mm').format(timestamp),
+                      ),
+                    );
+                  },
+                ),
         ),
       ],
     );
@@ -356,7 +432,8 @@ class _ReportsTabState extends State<ReportsTab> {
 // 2. WORKERS TAB
 // ---------------------------------------------------------------------------
 class WorkersTab extends StatefulWidget {
-  const WorkersTab({super.key});
+  final String organizationCode;
+  const WorkersTab({super.key, required this.organizationCode});
 
   @override
   State<WorkersTab> createState() => _WorkersTabState();
@@ -385,7 +462,10 @@ class _WorkersTabState extends State<WorkersTab> {
   Future<void> _fetchWorkers() async {
     setState(() => _isLoading = true);
     try {
-      final response = await _supabase.from('workers').select();
+      final response = await _supabase
+          .from('workers')
+          .select()
+          .eq('organization_code', widget.organizationCode);
       if (mounted) {
         setState(() {
           _workers = List<Map<String, dynamic>>.from(response);
@@ -394,7 +474,9 @@ class _WorkersTabState extends State<WorkersTab> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
         setState(() => _isLoading = false);
       }
     }
@@ -403,18 +485,25 @@ class _WorkersTabState extends State<WorkersTab> {
   Future<void> _deleteWorker(String workerId) async {
     try {
       // First delete associated production logs
-      await _supabase.from('production_logs').delete().eq('worker_id', workerId);
+      await _supabase
+          .from('production_logs')
+          .delete()
+          .eq('worker_id', workerId);
 
       // Then delete the worker
       await _supabase.from('workers').delete().eq('worker_id', workerId);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Worker and associated logs deleted')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Worker and associated logs deleted')),
+        );
         _fetchWorkers();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -425,12 +514,20 @@ class _WorkersTabState extends State<WorkersTab> {
     final aadharRegex = RegExp(r'^[0-9]{12}$');
 
     if (!_panController.text.contains(panRegex)) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invalid PAN Card Format')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid PAN Card Format')),
+        );
       return;
     }
 
     if (!_aadharController.text.contains(aadharRegex)) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invalid Aadhar Card Format (must be 12 digits)')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid Aadhar Card Format (must be 12 digits)'),
+          ),
+        );
       return;
     }
 
@@ -444,15 +541,20 @@ class _WorkersTabState extends State<WorkersTab> {
         'mobile_number': _mobileController.text,
         'username': _usernameController.text,
         'password': _passwordController.text, // Note: Should hash in real app
+        'organization_code': widget.organizationCode,
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Worker added!')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Worker added!')));
         _clearControllers();
         _fetchWorkers();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -477,16 +579,45 @@ class _WorkersTabState extends State<WorkersTab> {
           ExpansionTile(
             title: const Text('Add New Worker'),
             children: [
-              TextField(controller: _workerIdController, decoration: const InputDecoration(labelText: 'Worker ID')),
-              TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'Name')),
-              TextField(controller: _panController, decoration: const InputDecoration(labelText: 'PAN Card')),
-              TextField(controller: _aadharController, decoration: const InputDecoration(labelText: 'Aadhar Card')),
-              TextField(controller: _ageController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Age')),
-              TextField(controller: _mobileController, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Mobile Number')),
-              TextField(controller: _usernameController, decoration: const InputDecoration(labelText: 'Username')),
-              TextField(controller: _passwordController, decoration: const InputDecoration(labelText: 'Password')),
+              TextField(
+                controller: _workerIdController,
+                decoration: const InputDecoration(labelText: 'Worker ID'),
+              ),
+              TextField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: 'Name'),
+              ),
+              TextField(
+                controller: _panController,
+                decoration: const InputDecoration(labelText: 'PAN Card'),
+              ),
+              TextField(
+                controller: _aadharController,
+                decoration: const InputDecoration(labelText: 'Aadhar Card'),
+              ),
+              TextField(
+                controller: _ageController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Age'),
+              ),
+              TextField(
+                controller: _mobileController,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Mobile Number'),
+              ),
+              TextField(
+                controller: _usernameController,
+                decoration: const InputDecoration(labelText: 'Username'),
+              ),
+              TextField(
+                controller: _passwordController,
+                decoration: const InputDecoration(labelText: 'Password'),
+              ),
               const SizedBox(height: 10),
-              ElevatedButton(onPressed: _addWorker, child: const Text('Add Worker')),
+              ElevatedButton(
+                onPressed: _addWorker,
+                child: const Text('Add Worker'),
+              ),
             ],
           ),
           const SizedBox(height: 20),
@@ -499,7 +630,9 @@ class _WorkersTabState extends State<WorkersTab> {
                       final worker = _workers[index];
                       return Card(
                         child: ListTile(
-                          title: Text('${worker['name']} (${worker['worker_id']})'),
+                          title: Text(
+                            '${worker['name']} (${worker['worker_id']})',
+                          ),
                           subtitle: Text('Mobile: ${worker['mobile_number']}'),
                           trailing: IconButton(
                             icon: const Icon(Icons.delete, color: Colors.red),
@@ -520,7 +653,8 @@ class _WorkersTabState extends State<WorkersTab> {
 // 3. MACHINES TAB
 // ---------------------------------------------------------------------------
 class MachinesTab extends StatefulWidget {
-  const MachinesTab({super.key});
+  final String organizationCode;
+  const MachinesTab({super.key, required this.organizationCode});
 
   @override
   State<MachinesTab> createState() => _MachinesTabState();
@@ -533,7 +667,7 @@ class _MachinesTabState extends State<MachinesTab> {
 
   final _idController = TextEditingController();
   final _nameController = TextEditingController();
-  String _type = 'Cutting';
+  String _type = 'CNC';
 
   @override
   void initState() {
@@ -544,7 +678,10 @@ class _MachinesTabState extends State<MachinesTab> {
   Future<void> _fetchMachines() async {
     setState(() => _isLoading = true);
     try {
-      final response = await _supabase.from('machines').select();
+      final response = await _supabase
+          .from('machines')
+          .select()
+          .eq('organization_code', widget.organizationCode);
       if (mounted) {
         setState(() {
           _machines = List<Map<String, dynamic>>.from(response);
@@ -553,7 +690,9 @@ class _MachinesTabState extends State<MachinesTab> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
         setState(() => _isLoading = false);
       }
     }
@@ -561,13 +700,22 @@ class _MachinesTabState extends State<MachinesTab> {
 
   Future<void> _deleteMachine(String id) async {
     try {
-      await _supabase.from('machines').delete().eq('machine_id', id);
+      await _supabase
+          .from('machines')
+          .delete()
+          .eq('machine_id', id)
+          .eq('organization_code', widget.organizationCode);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Machine deleted')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Machine deleted')));
         _fetchMachines();
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -577,16 +725,21 @@ class _MachinesTabState extends State<MachinesTab> {
         'machine_id': _idController.text,
         'name': _nameController.text,
         'type': _type,
+        'organization_code': widget.organizationCode,
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Machine added!')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Machine added!')));
         _idController.clear();
         _nameController.clear();
         _fetchMachines();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -600,18 +753,27 @@ class _MachinesTabState extends State<MachinesTab> {
           ExpansionTile(
             title: const Text('Add New Machine'),
             children: [
-              TextField(controller: _idController, decoration: const InputDecoration(labelText: 'Machine ID')),
-              TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'Machine Name')),
+              TextField(
+                controller: _idController,
+                decoration: const InputDecoration(labelText: 'Machine ID'),
+              ),
+              TextField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: 'Machine Name'),
+              ),
               DropdownButtonFormField<String>(
-                value: _type,
-                items: ['Cutting', 'Sewing', 'Finishing', 'Packing']
+                initialValue: _type,
+                items: ['CNC', 'VMC']
                     .map((t) => DropdownMenuItem(value: t, child: Text(t)))
                     .toList(),
                 onChanged: (val) => setState(() => _type = val!),
                 decoration: const InputDecoration(labelText: 'Type'),
               ),
               const SizedBox(height: 10),
-              ElevatedButton(onPressed: _addMachine, child: const Text('Add Machine')),
+              ElevatedButton(
+                onPressed: _addMachine,
+                child: const Text('Add Machine'),
+              ),
             ],
           ),
           const SizedBox(height: 20),
@@ -625,11 +787,14 @@ class _MachinesTabState extends State<MachinesTab> {
                       return Card(
                         child: ListTile(
                           leading: const Icon(Icons.precision_manufacturing),
-                          title: Text('${machine['name']} (${machine['machine_id']})'),
+                          title: Text(
+                            '${machine['name']} (${machine['machine_id']})',
+                          ),
                           subtitle: Text('Type: ${machine['type']}'),
                           trailing: IconButton(
                             icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => _deleteMachine(machine['machine_id']),
+                            onPressed: () =>
+                                _deleteMachine(machine['machine_id']),
                           ),
                         ),
                       );
@@ -646,7 +811,8 @@ class _MachinesTabState extends State<MachinesTab> {
 // 4. ITEMS TAB
 // ---------------------------------------------------------------------------
 class ItemsTab extends StatefulWidget {
-  const ItemsTab({super.key});
+  final String organizationCode;
+  const ItemsTab({super.key, required this.organizationCode});
 
   @override
   State<ItemsTab> createState() => _ItemsTabState();
@@ -661,7 +827,7 @@ class _ItemsTabState extends State<ItemsTab> {
   final _itemIdController = TextEditingController();
   final _itemNameController = TextEditingController();
   List<OperationDetail> _operations = [];
-  
+
   // Operation Controllers
   final _opNameController = TextEditingController();
   final _opTargetController = TextEditingController();
@@ -676,7 +842,10 @@ class _ItemsTabState extends State<ItemsTab> {
   Future<void> _fetchItems() async {
     setState(() => _isLoadingItems = true);
     try {
-      final response = await _supabase.from('items').select();
+      final response = await _supabase
+          .from('items')
+          .select()
+          .eq('organization_code', widget.organizationCode);
       if (mounted) {
         setState(() {
           _items = List<Map<String, dynamic>>.from(response);
@@ -685,7 +854,9 @@ class _ItemsTabState extends State<ItemsTab> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
         setState(() => _isLoadingItems = false);
       }
     }
@@ -703,13 +874,15 @@ class _ItemsTabState extends State<ItemsTab> {
 
   void _addOperation() {
     if (_opNameController.text.isEmpty) return;
-    
+
     setState(() {
-      _operations.add(OperationDetail(
-        name: _opNameController.text,
-        target: int.tryParse(_opTargetController.text) ?? 0,
-        imageFile: _opImage,
-      ));
+      _operations.add(
+        OperationDetail(
+          name: _opNameController.text,
+          target: int.tryParse(_opTargetController.text) ?? 0,
+          imageFile: _opImage,
+        ),
+      );
       _opNameController.clear();
       _opTargetController.clear();
       _opImage = null;
@@ -718,106 +891,144 @@ class _ItemsTabState extends State<ItemsTab> {
 
   Future<void> _addItem() async {
     if (_itemIdController.text.isEmpty || _itemNameController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill item details')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please fill item details')));
       return;
     }
     if (_operations.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please add at least one operation')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please add at least one operation')),
+      );
       return;
     }
 
     try {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Uploading...')));
-      
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Uploading...')));
+
       // 1. Upload images first and get URLs
       List<Map<String, dynamic>> opJson = [];
       for (var op in _operations) {
         String? imageUrl;
         if (op.imageFile != null) {
           try {
-             // Ensure bucket exists (attempt to create if missing)
-             try {
-               final fileName = '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
-               final bytes = await op.imageFile!.readAsBytes();
-               
-               await _supabase.storage.from('operation_images').uploadBinary(
-                 fileName, 
-                 bytes,
-                 fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: true),
-               );
-               imageUrl = _supabase.storage.from('operation_images').getPublicUrl(fileName);
-             } catch (e) {
-                final errStr = e.toString();
-                // Check for RLS (403) or Bucket Missing (404)
-                if (errStr.contains('403') || errStr.contains('row-level security') || errStr.contains('Unauthorized')) {
-                   if (mounted) _showRLSErrorDialog(context);
-                } 
-                else if (errStr.contains('Bucket not found') || errStr.contains('404')) {
-                   try {
-                     debugPrint('Bucket not found, attempting to create...');
-                     // Try creating bucket
-                     await _supabase.storage.createBucket('operation_images', const BucketOptions(public: true));
-                     
-                     // Retry upload
-                     final fileName = '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
-                     final bytes = await op.imageFile!.readAsBytes();
-                     await _supabase.storage.from('operation_images').uploadBinary(
-                        fileName, 
+            // Ensure bucket exists (attempt to create if missing)
+            try {
+              final fileName =
+                  '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
+              final bytes = await op.imageFile!.readAsBytes();
+
+              await _supabase.storage
+                  .from('operation_images')
+                  .uploadBinary(
+                    fileName,
+                    bytes,
+                    fileOptions: const FileOptions(
+                      contentType: 'image/jpeg',
+                      upsert: true,
+                    ),
+                  );
+              imageUrl = _supabase.storage
+                  .from('operation_images')
+                  .getPublicUrl(fileName);
+            } catch (e) {
+              final errStr = e.toString();
+              // Check for RLS (403) or Bucket Missing (404)
+              if (errStr.contains('403') ||
+                  errStr.contains('row-level security') ||
+                  errStr.contains('Unauthorized')) {
+                if (mounted) _showRLSErrorDialog(context);
+              } else if (errStr.contains('Bucket not found') ||
+                  errStr.contains('404')) {
+                try {
+                  debugPrint('Bucket not found, attempting to create...');
+                  // Try creating bucket
+                  await _supabase.storage.createBucket(
+                    'operation_images',
+                    const BucketOptions(public: true),
+                  );
+
+                  // Retry upload
+                  final fileName =
+                      '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
+                  final bytes = await op.imageFile!.readAsBytes();
+                  await _supabase.storage
+                      .from('operation_images')
+                      .uploadBinary(
+                        fileName,
                         bytes,
-                        fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: true),
-                     );
-                     imageUrl = _supabase.storage.from('operation_images').getPublicUrl(fileName);
-                   } catch (createErr) {
-                      debugPrint('Failed to create bucket/upload: $createErr');
-                      if (createErr.toString().contains('403') || createErr.toString().contains('row-level security') || createErr.toString().contains('Unauthorized')) {
-                         if (mounted) _showRLSErrorDialog(context);
-                      } else if (mounted) {
-                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                           content: Text('Error: "operation_images" bucket missing. Please create it in Supabase Storage.'),
-                           duration: Duration(seconds: 5),
-                           backgroundColor: Colors.red,
-                         ));
-                      }
-                   }
-                } else {
-                   debugPrint('Image upload failed: $e');
+                        fileOptions: const FileOptions(
+                          contentType: 'image/jpeg',
+                          upsert: true,
+                        ),
+                      );
+                  imageUrl = _supabase.storage
+                      .from('operation_images')
+                      .getPublicUrl(fileName);
+                } catch (createErr) {
+                  debugPrint('Failed to create bucket/upload: $createErr');
+                  if (createErr.toString().contains('403') ||
+                      createErr.toString().contains('row-level security') ||
+                      createErr.toString().contains('Unauthorized')) {
+                    if (mounted) _showRLSErrorDialog(context);
+                  } else if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Error: "operation_images" bucket missing. Please create it in Supabase Storage.',
+                        ),
+                        duration: Duration(seconds: 5),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
                 }
-             }
+              } else {
+                debugPrint('Image upload failed: $e');
+              }
+            }
           } catch (e) {
-             debugPrint('Image upload critical error: $e');
+            debugPrint('Image upload critical error: $e');
           }
         }
         opJson.add({
           'name': op.name,
           'target': op.target,
-          'imageUrl': imageUrl
+          'imageUrl': imageUrl,
         });
       }
 
       // 2. Insert Item
-      // Note: 'operation' column seems to be required by schema (singular). 
+      // Note: 'operation' column seems to be required by schema (singular).
       // We populate it with a comma-separated string of operations.
       // We also populate 'operations' (plural array) if it exists.
       final opNames = _operations.map((o) => o.name).toList();
-      
+
       await _supabase.from('items').insert({
         'item_id': _itemIdController.text,
         'name': _itemNameController.text,
         'operation_details': opJson,
         'operations': opNames, // Standard array column
+        'organization_code': widget.organizationCode,
         // 'operation': opNames.join(', '), // Removed due to PGRST204 (column missing)
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Item Added Successfully!')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Item Added Successfully!')),
+        );
         _itemIdController.clear();
         _itemNameController.clear();
         setState(() => _operations = []);
         _fetchItems();
       }
-
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -831,23 +1042,35 @@ class _ItemsTabState extends State<ItemsTab> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('The server rejected the image upload due to Row-Level Security (RLS) policies.'),
+              Text(
+                'The server rejected the image upload due to Row-Level Security (RLS) policies.',
+              ),
               SizedBox(height: 10),
-              Text('To fix this, go to your Supabase Dashboard -> SQL Editor and run:'),
+              Text(
+                'To fix this, go to your Supabase Dashboard -> SQL Editor and run:',
+              ),
               SizedBox(height: 10),
               SelectableText(
                 '''insert into storage.buckets (id, name, public) values ('operation_images', 'operation_images', true);
 create policy "Public Access" on storage.objects for select using ( bucket_id = 'operation_images' );
 create policy "Authenticated Insert" on storage.objects for insert with check ( bucket_id = 'operation_images' );''',
-                style: TextStyle(fontFamily: 'monospace', backgroundColor: Color(0xFFEEEEEE)),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  backgroundColor: Color(0xFFEEEEEE),
+                ),
               ),
               SizedBox(height: 10),
-              Text('Alternatively, go to Storage -> Create "operation_images" bucket (Public) -> Add Policy for INSERT.'),
+              Text(
+                'Alternatively, go to Storage -> Create "operation_images" bucket (Public) -> Add Policy for INSERT.',
+              ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('OK')),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
         ],
       ),
     );
@@ -874,64 +1097,108 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
             flex: 6,
             child: ListView(
               children: [
-                const Text('Add New Item', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                const Text(
+                  'Add New Item',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
                 const SizedBox(height: 10),
-                TextField(controller: _itemIdController, decoration: const InputDecoration(labelText: 'Item ID (e.g. 5001)')),
-                TextField(controller: _itemNameController, decoration: const InputDecoration(labelText: 'Item Name (e.g. Shirt)')),
-                
+                TextField(
+                  controller: _itemIdController,
+                  decoration: const InputDecoration(
+                    labelText: 'Item ID (e.g. 5001)',
+                  ),
+                ),
+                TextField(
+                  controller: _itemNameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Item Name (e.g. Shirt)',
+                  ),
+                ),
+
                 const SizedBox(height: 20),
-                const Text('Operations', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text(
+                  'Operations',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 Container(
                   padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(border: Border.all(color: Colors.grey), borderRadius: BorderRadius.circular(8)),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
                   child: Column(
                     children: [
-                      TextField(controller: _opNameController, decoration: const InputDecoration(labelText: 'Operation Name (e.g. Collar)')),
                       TextField(
-                        controller: _opTargetController, 
-                        keyboardType: TextInputType.number, 
-                        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                        decoration: const InputDecoration(labelText: 'Target Quantity'),
+                        controller: _opNameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Operation Name (e.g. Collar)',
+                        ),
+                      ),
+                      TextField(
+                        controller: _opTargetController,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: 'Target Quantity',
+                        ),
                       ),
                       const SizedBox(height: 10),
                       Row(
                         children: [
                           ElevatedButton.icon(
-                            onPressed: _pickImage, 
-                            icon: const Icon(Icons.image), 
-                            label: const Text('Pick Image')
+                            onPressed: _pickImage,
+                            icon: const Icon(Icons.image),
+                            label: const Text('Pick Image'),
                           ),
                           const SizedBox(width: 10),
-                          if (_opImage != null) 
+                          if (_opImage != null)
                             SizedBox(
-                              width: 40, 
-                              height: 40, 
-                              child: kIsWeb 
-                                ? Image.network(_opImage!.path, fit: BoxFit.cover) 
-                                : Image.file(File(_opImage!.path), fit: BoxFit.cover)
-                            )
+                              width: 40,
+                              height: 40,
+                              child: kIsWeb
+                                  ? Image.network(
+                                      _opImage!.path,
+                                      fit: BoxFit.cover,
+                                    )
+                                  : Image.file(
+                                      File(_opImage!.path),
+                                      fit: BoxFit.cover,
+                                    ),
+                            ),
                         ],
                       ),
                       const SizedBox(height: 10),
-                      ElevatedButton(onPressed: _addOperation, child: const Text('Add Operation')),
+                      ElevatedButton(
+                        onPressed: _addOperation,
+                        child: const Text('Add Operation'),
+                      ),
                     ],
                   ),
                 ),
-                
+
                 // Operation List Preview
                 if (_operations.isNotEmpty) ...[
                   const SizedBox(height: 10),
-                  ..._operations.map((op) => ListTile(
-                    title: Text(op.name),
-                    subtitle: Text('Target: ${op.target}'),
-                    trailing: op.imageUrl != null ? const Icon(Icons.image, color: Colors.blue) : null,
-                  )),
+                  ..._operations.map(
+                    (op) => ListTile(
+                      title: Text(op.name),
+                      subtitle: Text('Target: ${op.target}'),
+                      trailing: op.imageUrl != null
+                          ? const Icon(Icons.image, color: Colors.blue)
+                          : null,
+                    ),
+                  ),
                 ],
 
                 const SizedBox(height: 20),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white),
-                  onPressed: _addItem, 
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _addItem,
                   child: const Text('Save Item to Database'),
                 ),
               ],
@@ -940,32 +1207,35 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
           const Divider(thickness: 2),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 8.0),
-            child: Text('Existing Items', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            child: Text(
+              'Existing Items',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
           ),
           Expanded(
             flex: 4,
             child: _isLoadingItems
-              ? const Center(child: CircularProgressIndicator())
-              : _items.isEmpty 
-                 ? const Center(child: Text('No items found.'))
-                 : ListView.builder(
-                     itemCount: _items.length,
-                     itemBuilder: (context, index) {
-                       final item = _items[index];
-                       // Count operations if possible
-                       final ops = item['operation_details'] as List? ?? [];
-                       return Card(
-                         child: ListTile(
-                           title: Text('${item['name']} (${item['item_id']})'),
-                           subtitle: Text('${ops.length} Operations'),
-                           trailing: IconButton(
-                             icon: const Icon(Icons.delete, color: Colors.red),
-                             onPressed: () => _deleteItem(item['item_id']),
-                           ),
-                         ),
-                       );
-                     },
-                   ),
+                ? const Center(child: CircularProgressIndicator())
+                : _items.isEmpty
+                ? const Center(child: Text('No items found.'))
+                : ListView.builder(
+                    itemCount: _items.length,
+                    itemBuilder: (context, index) {
+                      final item = _items[index];
+                      // Count operations if possible
+                      final ops = item['operation_details'] as List? ?? [];
+                      return Card(
+                        child: ListTile(
+                          title: Text('${item['name']} (${item['item_id']})'),
+                          subtitle: Text('${ops.length} Operations'),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => _deleteItem(item['item_id']),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -977,7 +1247,8 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
 // 5. SHIFTS TAB
 // ---------------------------------------------------------------------------
 class ShiftsTab extends StatefulWidget {
-  const ShiftsTab({super.key});
+  final String organizationCode;
+  const ShiftsTab({super.key, required this.organizationCode});
 
   @override
   State<ShiftsTab> createState() => _ShiftsTabState();
@@ -995,16 +1266,21 @@ class _ShiftsTabState extends State<ShiftsTab> {
         'name': _nameController.text,
         'start_time': _startController.text,
         'end_time': _endController.text,
+        'organization_code': widget.organizationCode,
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Shift added!')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Shift added!')));
         _nameController.clear();
         _startController.clear();
         _endController.clear();
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -1015,9 +1291,24 @@ class _ShiftsTabState extends State<ShiftsTab> {
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
-          TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'Shift Name (e.g. Morning)')),
-          TextField(controller: _startController, decoration: const InputDecoration(labelText: 'Start Time (e.g. 08:00)')),
-          TextField(controller: _endController, decoration: const InputDecoration(labelText: 'End Time (e.g. 16:00)')),
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Shift Name (e.g. Morning)',
+            ),
+          ),
+          TextField(
+            controller: _startController,
+            decoration: const InputDecoration(
+              labelText: 'Start Time (e.g. 08:00)',
+            ),
+          ),
+          TextField(
+            controller: _endController,
+            decoration: const InputDecoration(
+              labelText: 'End Time (e.g. 16:00)',
+            ),
+          ),
           const SizedBox(height: 16),
           ElevatedButton(onPressed: _addShift, child: const Text('Add Shift')),
         ],
@@ -1055,7 +1346,7 @@ class _SecurityTabState extends State<SecurityTab> {
           .select()
           .order('login_time', ascending: false)
           .limit(50);
-      
+
       if (mounted) {
         setState(() {
           _logs = List<Map<String, dynamic>>.from(response);
@@ -1081,9 +1372,15 @@ class _SecurityTabState extends State<SecurityTab> {
           children: [
             Icon(Icons.security, size: 64, color: Colors.grey),
             SizedBox(height: 16),
-            Text('No login history found.', style: TextStyle(color: Colors.grey)),
+            Text(
+              'No login history found.',
+              style: TextStyle(color: Colors.grey),
+            ),
             SizedBox(height: 8),
-            Text('(Make sure "owner_logs" table exists in Supabase)', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            Text(
+              '(Make sure "owner_logs" table exists in Supabase)',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
           ],
         ),
       );
@@ -1094,15 +1391,18 @@ class _SecurityTabState extends State<SecurityTab> {
       itemBuilder: (context, index) {
         final log = _logs[index];
         final timeStr = log['login_time'] as String?;
-        final time = DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
+        final time =
+            DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
         final device = log['device_name'] ?? 'Unknown';
         final os = log['os_version'] ?? 'Unknown';
-        
+
         return Card(
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: ListTile(
             leading: const Icon(Icons.security, color: Colors.blue),
-            title: Text('Logged in at ${DateFormat('yyyy-MM-dd HH:mm:ss').format(time)}'),
+            title: Text(
+              'Logged in at ${DateFormat('yyyy-MM-dd HH:mm:ss').format(time)}',
+            ),
             subtitle: Text('Device: $device\nOS: $os'),
             isThreeLine: true,
           ),

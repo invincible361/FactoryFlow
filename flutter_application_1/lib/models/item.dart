@@ -39,7 +39,7 @@ class OperationDetail {
     return {
       'name': name,
       'target': target,
-      'imageUrl': imageUrl, // Consistent naming
+      'imageUrl': imageUrl, 
     };
   }
 }

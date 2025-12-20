@@ -36,4 +36,14 @@ class LocationService {
     );
     return distanceInMeters <= MockData.factoryRadiusMeters;
   }
+
+  bool isInside(Position position, double targetLat, double targetLng, double radiusMeters) {
+    double distanceInMeters = Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      targetLat,
+      targetLng,
+    );
+    return distanceInMeters <= radiusMeters;
+  }
 }
