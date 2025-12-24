@@ -7,9 +7,9 @@
         <compositeConfiguration>
           <compositeBuild compositeDefinitionSource="SCRIPT">
             <builds>
-              <build path="$PROJECT_DIR$/../flutter/packages/flutter_tools/gradle" name="gradle">
+              <build path="/opt/homebrew/share/flutter/packages/flutter_tools/gradle" name="gradle">
                 <projects>
-                  <project path="$PROJECT_DIR$/../flutter/packages/flutter_tools/gradle" />
+                  <project path="/opt/homebrew/share/flutter/packages/flutter_tools/gradle" />
                 </projects>
               </build>
             </builds>
@@ -17,18 +17,23 @@
         </compositeConfiguration>
         <option name="testRunner" value="CHOOSE_PER_TEST" />
         <option name="externalProjectPath" value="$PROJECT_DIR$/flutter_application_1/android" />
-        <option name="gradleJvm" value="#JAVA_HOME" />
+        <option name="gradleJvm" value="#GRADLE_LOCAL_JAVA_HOME" />
         <option name="modules">
           <set>
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/app_links-6.4.1/android" />
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/geolocator_android-4.6.2/android" />
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/path_provider_android-2.2.22/android" />
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/permission_handler_android-12.1.0/android" />
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/shared_preferences_android-2.4.18/android" />
-            <option value="$USER_HOME$/.pub-cache/hosted/pub.dev/url_launcher_android-6.3.28/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/app_links-6.4.1/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/device_info_plus-12.3.0/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/flutter_plugin_android_lifecycle-2.0.33/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/geolocator_android-5.0.2/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/image_picker_android-0.8.13+10/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/package_info_plus-8.3.1/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/path_provider_android-2.2.22/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/permission_handler_android-13.0.1/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/share_plus-12.0.1/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/shared_preferences_android-2.4.18/android" />
+            <option value="$PROJECT_DIR$/../.pub-cache/hosted/pub.dev/url_launcher_android-6.3.28/android" />
             <option value="$PROJECT_DIR$/flutter_application_1/android" />
             <option value="$PROJECT_DIR$/flutter_application_1/android/app" />
-            <option value="$PROJECT_DIR$/../flutter/packages/flutter_tools/gradle" />
+            <option value="/opt/homebrew/share/flutter/packages/flutter_tools/gradle" />
           </set>
         </option>
       </GradleProjectSettings>

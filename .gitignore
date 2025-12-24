@@ -5,3 +5,6 @@
 build/
 *.pid
 *.log
+
+# Local Netlify folder
+.netlify
