@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:fl_chart/fl_chart.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
 import '../models/worker.dart';
@@ -27,7 +28,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   final TextEditingController _quantityController = TextEditingController();
 
   bool _isSaving = false;
-  String _statusMessage = '';
 
   // Data State
   List<Machine> _machines = [];
@@ -152,10 +152,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           final radius = (org['radius_meters'] ?? 500.0) * 1.0;
           isInside = _locationService.isInside(position, lat, lng, radius);
         } else {
-          isInside = _locationService.isInsideFactory(position);
+          isInside = false;
         }
       } catch (_) {
-        isInside = _locationService.isInsideFactory(position);
+        isInside = false;
       }
 
       if (mounted) {
@@ -352,9 +352,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   }
 
   Future<void> _saveLog(DateTime endTime, int performanceDiff) async {
+    if (_isSaving) return;
     setState(() {
       _isSaving = true;
-      _statusMessage = 'Saving log...';
     });
 
     try {
@@ -416,7 +416,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       if (mounted) {
         setState(() {
           _isSaving = false;
-          _statusMessage = '';
         });
       }
     }
@@ -468,6 +467,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 const SnackBar(content: Text('Refreshing data...')),
               );
             },
+          ),
+          IconButton(
+            icon: const Icon(Icons.bar_chart),
+            tooltip: 'Productivity',
+            onPressed: _openProductivity,
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -588,7 +592,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
                   decoration: const InputDecoration(labelText: 'Select Shift'),
-                  value: _selectedShift,
+                  initialValue: _selectedShift,
                   items: _shifts.map((s) {
                     final name = s['name']?.toString() ?? '';
                     return DropdownMenuItem(value: name, child: Text(name));
@@ -645,8 +649,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                   fit: BoxFit.contain,
                                   loadingBuilder:
                                       (context, child, loadingProgress) {
-                                        if (loadingProgress == null)
+                                        if (loadingProgress == null) {
                                           return child;
+                                        }
                                         return SizedBox(
                                           height: 250,
                                           child: Center(
@@ -782,6 +787,256 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchWorkerLogs(DateTime from) async {
+    final supabase = Supabase.instance.client;
+    final response = await supabase
+        .from('production_logs')
+        .select()
+        .eq('worker_id', widget.worker.id)
+        .eq('organization_code', widget.worker.organizationCode ?? '')
+        .gte('created_at', from.toIso8601String())
+        .order('created_at', ascending: true);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  void _openProductivity() async {
+    final now = DateTime.now();
+    final dayFrom = DateTime(now.year, now.month, now.day);
+    final weekFrom = now.subtract(const Duration(days: 6));
+    final monthFrom = now.subtract(const Duration(days: 29));
+    final dayLogs = await _fetchWorkerLogs(dayFrom);
+    final weekLogs = await _fetchWorkerLogs(weekFrom);
+    final monthLogs = await _fetchWorkerLogs(monthFrom);
+    final extraWeeks = await _fetchWorkerLogs(
+      now.subtract(const Duration(days: 7 * 8)),
+    );
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        String period = 'Week';
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            List<Map<String, dynamic>> logs;
+            if (period == 'Day') {
+              logs = dayLogs;
+            } else if (period == 'Month') {
+              logs = monthLogs;
+            } else {
+              logs = weekLogs;
+            }
+            List<BarChartGroupData> groups = [];
+            if (period == 'Day') {
+              final buckets = List<double>.filled(24, 0);
+              for (final l in logs) {
+                final t = DateTime.tryParse(
+                  (l['created_at'] ?? '').toString(),
+                )?.toLocal();
+                if (t != null) {
+                  buckets[t.hour] += (l['quantity'] ?? 0) * 1.0;
+                }
+              }
+              for (int i = 0; i < buckets.length; i++) {
+                groups.add(
+                  BarChartGroupData(
+                    x: i,
+                    barRods: [BarChartRodData(toY: buckets[i])],
+                  ),
+                );
+              }
+            } else {
+              int days = period == 'Week' ? 7 : 30;
+              final buckets = List<double>.filled(days, 0);
+              for (final l in logs) {
+                final t = DateTime.tryParse(
+                  (l['created_at'] ?? '').toString(),
+                )?.toLocal();
+                if (t != null) {
+                  final idx = period == 'Week'
+                      ? now.difference(t).inDays
+                      : now.difference(t).inDays;
+                  final pos = days - 1 - idx;
+                  if (pos >= 0 && pos < days) {
+                    buckets[pos] += (l['quantity'] ?? 0) * 1.0;
+                  }
+                }
+              }
+              for (int i = 0; i < buckets.length; i++) {
+                groups.add(
+                  BarChartGroupData(
+                    x: i,
+                    barRods: [BarChartRodData(toY: buckets[i])],
+                  ),
+                );
+              }
+            }
+
+            final extraBuckets = List<double>.filled(8, 0);
+            for (final l in extraWeeks) {
+              final t = DateTime.tryParse(
+                (l['created_at'] ?? '').toString(),
+              )?.toLocal();
+              if (t != null) {
+                final wStart = DateTime(
+                  t.year,
+                  t.month,
+                  t.day,
+                ).subtract(Duration(days: t.weekday - 1));
+                final weeksAgo =
+                    DateTime(
+                      now.year,
+                      now.month,
+                      now.day,
+                    ).difference(wStart).inDays ~/
+                    7;
+                final pos = 7 - weeksAgo;
+                final diff = (l['performance_diff'] ?? 0) as int;
+                if (diff > 0 && pos >= 0 && pos < 8) {
+                  extraBuckets[pos] += diff * 1.0;
+                }
+              }
+            }
+            final extraGroups = [
+              for (int i = 0; i < extraBuckets.length; i++)
+                BarChartGroupData(
+                  x: i,
+                  barRods: [
+                    BarChartRodData(toY: extraBuckets[i], color: Colors.green),
+                  ],
+                ),
+            ];
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        'Productivity',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const Spacer(),
+                      DropdownButton<String>(
+                        value: period,
+                        items: const [
+                          DropdownMenuItem<String>(
+                            value: 'Day',
+                            child: Text('Day'),
+                          ),
+                          DropdownMenuItem<String>(
+                            value: 'Week',
+                            child: Text('Week'),
+                          ),
+                          DropdownMenuItem<String>(
+                            value: 'Month',
+                            child: Text('Month'),
+                          ),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) setModalState(() => period = v);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 240,
+                    child: BarChart(
+                      BarChartData(
+                        barGroups: groups,
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              getTitlesWidget: (value, meta) {
+                                if (period == 'Day') {
+                                  return Text(
+                                    '${value.toInt()}h',
+                                    style: const TextStyle(fontSize: 10),
+                                  );
+                                }
+                                return Text(
+                                  '${value.toInt() + 1}',
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: true),
+                          ),
+                          topTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Weekly Extra Work',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 200,
+                    child: BarChart(
+                      BarChartData(
+                        barGroups: extraGroups,
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  'W${value.toInt() + 1}',
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: true),
+                          ),
+                          topTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }

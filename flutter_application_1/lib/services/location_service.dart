@@ -1,5 +1,4 @@
 import 'package:geolocator/geolocator.dart';
-import 'mock_data.dart';
 
 class LocationService {
   Future<Position> getCurrentLocation() async {
@@ -25,16 +24,6 @@ class LocationService {
     }
 
     return await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-  }
-
-  bool isInsideFactory(Position position) {
-    double distanceInMeters = Geolocator.distanceBetween(
-      position.latitude,
-      position.longitude,
-      MockData.factoryLat,
-      MockData.factoryLng,
-    );
-    return distanceInMeters <= MockData.factoryRadiusMeters;
   }
 
   bool isInside(Position position, double targetLat, double targetLng, double radiusMeters) {

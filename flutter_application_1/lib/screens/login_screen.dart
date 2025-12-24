@@ -23,7 +23,6 @@ class _LoginScreenState extends State<LoginScreen> {
   final LocationService _locationService = LocationService();
   bool _isLoading = false;
   final _regOrgCodeController = TextEditingController();
-  final _regOrgNameController = TextEditingController();
   final _regFactoryNameController = TextEditingController();
   final _regAddressController = TextEditingController();
   final _regLatController = TextEditingController();
@@ -31,6 +30,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _regRadiusController = TextEditingController(text: '500');
   final _regOwnerUserController = TextEditingController();
   final _regOwnerPassController = TextEditingController();
+  bool _isUsingGps = false;
 
   Future<void> _recordOwnerLogin() async {
     final deviceInfo = DeviceInfoPlugin();
@@ -184,75 +184,82 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Adinath Automotive Pvt Ltd')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              // Logo
-              Image.asset(
-                'assets/images/logo.png',
-                height: 120,
-                errorBuilder: (context, error, stackTrace) {
-                  return const Icon(
-                    Icons.factory,
-                    size: 80,
-                    color: Colors.blue,
-                  );
-                },
+      appBar: AppBar(title: const Text('FactoryFlow')),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Form(
+            key: _formKey,
+            child: SingleChildScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Image.asset(
+                    'assets/images/logo.png',
+                    height: 120,
+                    errorBuilder: (context, error, stackTrace) {
+                      return const Icon(
+                        Icons.factory,
+                        size: 80,
+                        color: Colors.blue,
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 30),
+                  TextFormField(
+                    controller: _orgCodeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Organization Code',
+                    ),
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter organization code';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _usernameController,
+                    decoration: const InputDecoration(labelText: 'Username'),
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter username';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _passwordController,
+                    decoration: const InputDecoration(labelText: 'Password'),
+                    obscureText: true,
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter password';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 24),
+                  if (_isLoading)
+                    const CircularProgressIndicator()
+                  else
+                    ElevatedButton(
+                      onPressed: _login,
+                      child: const Text('Login'),
+                    ),
+                  const SizedBox(height: 16),
+                  const Text('Hint: worker1 / password1'),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: _showRegisterDialog,
+                    child: const Text('Register Factory'),
+                  ),
+                ],
               ),
-              const SizedBox(height: 30),
-              TextFormField(
-                controller: _orgCodeController,
-                decoration: const InputDecoration(
-                  labelText: 'Organization Code',
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter organization code';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _usernameController,
-                decoration: const InputDecoration(labelText: 'Username'),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter username';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password'),
-                obscureText: true,
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter password';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 24),
-              if (_isLoading)
-                const CircularProgressIndicator()
-              else
-                ElevatedButton(onPressed: _login, child: const Text('Login')),
-              const SizedBox(height: 16),
-              const Text('Hint: worker1 / password1'),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _showRegisterDialog,
-                child: const Text('Register Factory'),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -260,67 +267,97 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _showRegisterDialog() {
-    showDialog(
+    showDialog<void>(
       context: context,
+      barrierDismissible: true,
+      useRootNavigator: true,
       builder: (ctx) {
         return AlertDialog(
           title: const Text('Register Factory'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: _regOrgCodeController,
-                  decoration: const InputDecoration(
-                    labelText: 'Organization Code',
+          content: LayoutBuilder(
+            builder: (contextLB, constraints) {
+              final mq = MediaQuery.of(ctx);
+              final maxHeight = mq.size.height * 0.7;
+              return ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: maxHeight),
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: _regOrgCodeController,
+                        decoration: const InputDecoration(
+                          labelText: 'Factory Code',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regFactoryNameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Factory Name',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regAddressController,
+                        decoration: const InputDecoration(labelText: 'Address'),
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: ElevatedButton(
+                          onPressed: _isUsingGps
+                              ? null
+                              : _useCurrentLocationForFactory,
+                          child: _isUsingGps
+                              ? const SizedBox(
+                                  height: 18,
+                                  width: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Text('Use Current Location'),
+                        ),
+                      ),
+                      TextField(
+                        controller: _regLatController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regLngController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regRadiusController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Radius (meters)',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regOwnerUserController,
+                        decoration: const InputDecoration(
+                          labelText: 'Owner Username',
+                        ),
+                      ),
+                      TextField(
+                        controller: _regOwnerPassController,
+                        decoration: const InputDecoration(
+                          labelText: 'Owner Password',
+                        ),
+                        obscureText: true,
+                      ),
+                    ],
                   ),
                 ),
-                TextField(
-                  controller: _regOrgNameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Organization Name',
-                  ),
-                ),
-                TextField(
-                  controller: _regFactoryNameController,
-                  decoration: const InputDecoration(labelText: 'Factory Name'),
-                ),
-                TextField(
-                  controller: _regAddressController,
-                  decoration: const InputDecoration(labelText: 'Address'),
-                ),
-                TextField(
-                  controller: _regLatController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Latitude'),
-                ),
-                TextField(
-                  controller: _regLngController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Longitude'),
-                ),
-                TextField(
-                  controller: _regRadiusController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Radius (meters)',
-                  ),
-                ),
-                TextField(
-                  controller: _regOwnerUserController,
-                  decoration: const InputDecoration(
-                    labelText: 'Owner Username',
-                  ),
-                ),
-                TextField(
-                  controller: _regOwnerPassController,
-                  decoration: const InputDecoration(
-                    labelText: 'Owner Password',
-                  ),
-                  obscureText: true,
-                ),
-              ],
-            ),
+              );
+            },
           ),
           actions: [
             TextButton(
@@ -337,14 +374,56 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  Future<void> _useCurrentLocationForFactory() async {
+    setState(() => _isUsingGps = true);
+    try {
+      final pos = await _locationService.getCurrentLocation();
+      _regLatController.text = pos.latitude.toStringAsFixed(6);
+      _regLngController.text = pos.longitude.toStringAsFixed(6);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Coordinates set from GPS')));
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error using GPS: $e')));
+    } finally {
+      setState(() => _isUsingGps = false);
+    }
+  }
+
   Future<void> _registerOrganization() async {
     try {
       final lat = double.tryParse(_regLatController.text) ?? 0.0;
       final lng = double.tryParse(_regLngController.text) ?? 0.0;
       final radius = double.tryParse(_regRadiusController.text) ?? 500.0;
+      final code = _regOrgCodeController.text.trim();
+      if (code.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Factory Code is required')),
+        );
+        return;
+      }
+      final dup = await Supabase.instance.client
+          .from('organizations')
+          .select()
+          .eq('organization_code', code)
+          .maybeSingle();
+      if (dup != null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Factory Code already exists. Choose a different code.',
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
       await Supabase.instance.client.from('organizations').insert({
-        'organization_code': _regOrgCodeController.text,
-        'organization_name': _regOrgNameController.text,
+        'organization_code': code,
         'factory_name': _regFactoryNameController.text,
         'address': _regAddressController.text,
         'latitude': lat,

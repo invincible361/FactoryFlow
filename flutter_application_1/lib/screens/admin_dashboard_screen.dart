@@ -2,10 +2,10 @@ import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:image_picker/image_picker.dart' as picker;
 import 'package:excel/excel.dart' hide Border;
 import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:share_plus/share_plus.dart' as share_plus;
 import 'package:intl/intl.dart';
 import '../models/item.dart';
 import 'dart:io'
@@ -90,9 +90,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   }
 }
 
-// ---------------------------------------------------------------------------
-// 1. REPORTS TAB
-// ---------------------------------------------------------------------------
 class ReportsTab extends StatefulWidget {
   final String organizationCode;
   const ReportsTab({super.key, required this.organizationCode});
@@ -321,18 +318,83 @@ class _ReportsTabState extends State<ReportsTab> {
         });
       });
 
-      // 5. Save & Share
-      final directory = await getTemporaryDirectory();
-      final path =
-          '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
-      final file = File(path);
-      final bytes = excel.save();
+      Sheet detailsSheet = excel['Detailed Logs'];
+      detailsSheet.appendRow([
+        TextCellValue('Worker Name'),
+        TextCellValue('Worker ID'),
+        TextCellValue('Item ID'),
+        TextCellValue('Operation'),
+        TextCellValue('Date'),
+        TextCellValue('Time'),
+        TextCellValue('Machine ID'),
+        TextCellValue('Quantity'),
+        TextCellValue('Surplus/Deficit'),
+        TextCellValue('Status'),
+      ]);
+      for (final log in allLogs) {
+        final wName = (log['workerName'] ?? 'Unknown').toString();
+        final workerId = (log['worker_id'] ?? '').toString();
+        final itemId = (log['item_id'] ?? '').toString();
+        final opName = (log['operation'] ?? '').toString();
+        final qty = (log['quantity'] ?? 0) as int;
+        final diff = (log['performance_diff'] ?? 0) as int;
+        String status = diff >= 0 ? 'Surplus' : 'Deficit';
+        final createdAtStr = (log['created_at'] ?? '').toString();
+        DateTime dt;
+        try {
+          dt = DateTime.parse(createdAtStr).toLocal();
+        } catch (_) {
+          dt = DateTime.now();
+        }
+        final dateStr = DateFormat('yyyy-MM-dd').format(dt);
+        final timeStr = DateFormat('HH:mm').format(dt);
+        final machineId = (log['machine_id'] ?? '').toString();
+        detailsSheet.appendRow([
+          TextCellValue(wName),
+          TextCellValue(workerId),
+          TextCellValue(itemId),
+          TextCellValue(opName),
+          TextCellValue(dateStr),
+          TextCellValue(timeStr),
+          TextCellValue(machineId),
+          IntCellValue(qty),
+          IntCellValue(diff),
+          TextCellValue(status),
+        ]);
+      }
 
-      if (bytes != null) {
+      // 5. Save & Share
+      final bytes = excel.save();
+      if (bytes == null) {
+        throw Exception('Failed to generate Excel bytes');
+      }
+      if (kIsWeb) {
+        final uint8 = Uint8List.fromList(bytes);
+        final params = share_plus.ShareParams(
+          files: [
+            share_plus.XFile.fromData(
+              uint8,
+              mimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ),
+          ],
+          fileNameOverrides: [
+            'production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx',
+          ],
+          text: 'Production Report ($_filter)',
+        );
+        await share_plus.SharePlus.instance.share(params);
+      } else {
+        final directory = await getTemporaryDirectory();
+        final path =
+            '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+        final file = File(path);
         await file.writeAsBytes(bytes);
-        await Share.shareXFiles([
-          XFile(path),
-        ], text: 'Production Report ($_filter)');
+        final params = share_plus.ShareParams(
+          files: [share_plus.XFile(path)],
+          text: 'Production Report ($_filter)',
+        );
+        await share_plus.SharePlus.instance.share(params);
       }
 
       if (mounted) {
@@ -514,20 +576,22 @@ class _WorkersTabState extends State<WorkersTab> {
     final aadharRegex = RegExp(r'^[0-9]{12}$');
 
     if (!_panController.text.contains(panRegex)) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Invalid PAN Card Format')),
         );
+      }
       return;
     }
 
     if (!_aadharController.text.contains(aadharRegex)) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Invalid Aadhar Card Format (must be 12 digits)'),
           ),
         );
+      }
       return;
     }
 
@@ -574,7 +638,7 @@ class _WorkersTabState extends State<WorkersTab> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
+      child: ListView(
         children: [
           ExpansionTile(
             title: const Text('Add New Worker'),
@@ -621,28 +685,27 @@ class _WorkersTabState extends State<WorkersTab> {
             ],
           ),
           const SizedBox(height: 20),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    itemCount: _workers.length,
-                    itemBuilder: (context, index) {
-                      final worker = _workers[index];
-                      return Card(
-                        child: ListTile(
-                          title: Text(
-                            '${worker['name']} (${worker['worker_id']})',
-                          ),
-                          subtitle: Text('Mobile: ${worker['mobile_number']}'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => _deleteWorker(worker['worker_id']),
-                          ),
-                        ),
-                      );
-                    },
+          if (_isLoading)
+            const Center(child: CircularProgressIndicator())
+          else
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _workers.length,
+              itemBuilder: (context, index) {
+                final worker = _workers[index];
+                return Card(
+                  child: ListTile(
+                    title: Text('${worker['name']} (${worker['worker_id']})'),
+                    subtitle: Text('Mobile: ${worker['mobile_number']}'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _deleteWorker(worker['worker_id']),
+                    ),
                   ),
-          ),
+                );
+              },
+            ),
         ],
       ),
     );
@@ -712,10 +775,11 @@ class _MachinesTabState extends State<MachinesTab> {
         _fetchMachines();
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     }
   }
 
@@ -831,7 +895,7 @@ class _ItemsTabState extends State<ItemsTab> {
   // Operation Controllers
   final _opNameController = TextEditingController();
   final _opTargetController = TextEditingController();
-  XFile? _opImage;
+  picker.XFile? _opImage;
 
   @override
   void initState() {
@@ -863,8 +927,10 @@ class _ItemsTabState extends State<ItemsTab> {
   }
 
   Future<void> _pickImage() async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
+    final imagePicker = picker.ImagePicker();
+    final picked = await imagePicker.pickImage(
+      source: picker.ImageSource.gallery,
+    );
     if (picked != null) {
       setState(() {
         _opImage = picked;
@@ -1025,10 +1091,11 @@ class _ItemsTabState extends State<ItemsTab> {
         _fetchItems();
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
     }
   }
 
