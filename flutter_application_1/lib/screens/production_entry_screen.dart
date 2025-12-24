@@ -46,12 +46,29 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   DateTime? _startTime;
   Duration _elapsed = Duration.zero;
   bool _isTimerRunning = false;
+  String? _factoryName;
 
   @override
   void initState() {
     super.initState();
     _fetchData();
     _checkLocation();
+    _fetchOrganizationName();
+  }
+
+  Future<void> _fetchOrganizationName() async {
+    try {
+      final resp = await Supabase.instance.client
+          .from('organizations')
+          .select('factory_name')
+          .eq('organization_code', widget.worker.organizationCode ?? '')
+          .maybeSingle();
+      if (mounted && resp != null) {
+        setState(() {
+          _factoryName = (resp['factory_name'] ?? '').toString();
+        });
+      }
+    } catch (e) {}
   }
 
   Future<void> _fetchData() async {
@@ -456,7 +473,19 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Log Production'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Log Production'),
+            Padding(
+              padding: const EdgeInsets.only(top: 2.0),
+              child: Text(
+                'Welcome, ${widget.worker.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -958,6 +987,22 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                     child: BarChart(
                       BarChartData(
                         barGroups: groups,
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                        ),
+                        borderData: FlBorderData(show: false),
+                        barTouchData: BarTouchData(
+                          enabled: true,
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              return BarTooltipItem(
+                                rod.toY.toStringAsFixed(0),
+                                const TextStyle(color: Colors.white),
+                              );
+                            },
+                          ),
+                        ),
                         titlesData: FlTitlesData(
                           bottomTitles: AxisTitles(
                             sideTitles: SideTitles(
@@ -966,18 +1011,21 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                 if (period == 'Day') {
                                   return Text(
                                     '${value.toInt()}h',
-                                    style: const TextStyle(fontSize: 10),
+                                    style: const TextStyle(fontSize: 12),
                                   );
                                 }
                                 return Text(
                                   '${value.toInt() + 1}',
-                                  style: const TextStyle(fontSize: 10),
+                                  style: const TextStyle(fontSize: 12),
                                 );
                               },
                             ),
                           ),
                           leftTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: true),
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                            ),
                           ),
                           topTitles: AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
@@ -1002,10 +1050,26 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                   ),
                   const SizedBox(height: 8),
                   SizedBox(
-                    height: 200,
+                    height: 220,
                     child: BarChart(
                       BarChartData(
                         barGroups: extraGroups,
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                        ),
+                        borderData: FlBorderData(show: false),
+                        barTouchData: BarTouchData(
+                          enabled: true,
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              return BarTooltipItem(
+                                rod.toY.toStringAsFixed(0),
+                                const TextStyle(color: Colors.white),
+                              );
+                            },
+                          ),
+                        ),
                         titlesData: FlTitlesData(
                           bottomTitles: AxisTitles(
                             sideTitles: SideTitles(
@@ -1013,13 +1077,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                               getTitlesWidget: (value, meta) {
                                 return Text(
                                   'W${value.toInt() + 1}',
-                                  style: const TextStyle(fontSize: 10),
+                                  style: const TextStyle(fontSize: 12),
                                 );
                               },
                             ),
                           ),
                           leftTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: true),
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                            ),
                           ),
                           topTitles: AxisTitles(
                             sideTitles: SideTitles(showTitles: false),

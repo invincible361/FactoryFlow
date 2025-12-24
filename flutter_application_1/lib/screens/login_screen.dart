@@ -2,11 +2,12 @@ import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:image_picker/image_picker.dart';
 import '../models/worker.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
-import 'dart:io' show Platform; // Only show Platform for non-web logic
+import 'dart:io' show Platform, File; // Only show Platform for non-web logic
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -254,7 +255,13 @@ class _LoginScreenState extends State<LoginScreen> {
                   const Text('Hint: worker1 / password1'),
                   const SizedBox(height: 24),
                   ElevatedButton(
-                    onPressed: _showRegisterDialog,
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const FactoryRegistrationPage(),
+                        ),
+                      );
+                    },
                     child: const Text('Register Factory'),
                   ),
                 ],
@@ -443,5 +450,319 @@ class _LoginScreenState extends State<LoginScreen> {
         context,
       ).showSnackBar(SnackBar(content: Text('Error: $e')));
     }
+  }
+}
+
+class FactoryRegistrationPage extends StatefulWidget {
+  const FactoryRegistrationPage({super.key});
+  @override
+  State<FactoryRegistrationPage> createState() =>
+      _FactoryRegistrationPageState();
+}
+
+class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
+  final _formKey = GlobalKey<FormState>();
+  final LocationService _locationService = LocationService();
+  final _codeController = TextEditingController();
+  final _nameController = TextEditingController();
+  final _addressController = TextEditingController();
+  final _latController = TextEditingController();
+  final _lngController = TextEditingController();
+  final _radiusController = TextEditingController(text: '500');
+  final _ownerUserController = TextEditingController();
+  final _ownerPassController = TextEditingController();
+  XFile? _logo;
+  bool _isSaving = false;
+  bool _isUsingGps = false;
+
+  Future<void> _pickLogo() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked != null) {
+      setState(() => _logo = picked);
+    }
+  }
+
+  Future<String?> _uploadLogoIfAny() async {
+    if (_logo == null) return null;
+    try {
+      final bytes = await _logo!.readAsBytes();
+      final fileName =
+          'logo_${DateTime.now().millisecondsSinceEpoch}_${_codeController.text.replaceAll(' ', '_')}.png';
+      try {
+        await Supabase.instance.client.storage
+            .from('factory_logos')
+            .uploadBinary(
+              fileName,
+              bytes,
+              fileOptions: const FileOptions(
+                contentType: 'image/png',
+                upsert: true,
+              ),
+            );
+      } catch (e) {
+        if (e.toString().contains('Bucket not found') ||
+            e.toString().contains('404')) {
+          await Supabase.instance.client.storage.createBucket(
+            'factory_logos',
+            const BucketOptions(public: true),
+          );
+          await Supabase.instance.client.storage
+              .from('factory_logos')
+              .uploadBinary(
+                fileName,
+                bytes,
+                fileOptions: const FileOptions(
+                  contentType: 'image/png',
+                  upsert: true,
+                ),
+              );
+        } else {
+          rethrow;
+        }
+      }
+      return Supabase.instance.client.storage
+          .from('factory_logos')
+          .getPublicUrl(fileName);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _useCurrentLocation() async {
+    setState(() => _isUsingGps = true);
+    try {
+      final pos = await _locationService.getCurrentLocation();
+      _latController.text = pos.latitude.toStringAsFixed(6);
+      _lngController.text = pos.longitude.toStringAsFixed(6);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Coordinates set from GPS')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error using GPS: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isUsingGps = false);
+    }
+  }
+
+  Future<void> _saveFactory() async {
+    if (_formKey.currentState?.validate() != true) return;
+    setState(() => _isSaving = true);
+    try {
+      final code = _codeController.text.trim();
+      final dup = await Supabase.instance.client
+          .from('organizations')
+          .select()
+          .eq('organization_code', code)
+          .maybeSingle();
+      if (dup != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Factory Code already exists. Choose a different code.',
+              ),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+      final lat = double.tryParse(_latController.text) ?? 0.0;
+      final lng = double.tryParse(_lngController.text) ?? 0.0;
+      final radius = double.tryParse(_radiusController.text) ?? 500.0;
+      final logoUrl = await _uploadLogoIfAny();
+      final payload = {
+        'organization_code': code,
+        'factory_name': _nameController.text,
+        'address': _addressController.text,
+        'latitude': lat,
+        'longitude': lng,
+        'radius_meters': radius,
+        'owner_username': _ownerUserController.text,
+        'owner_password': _ownerPassController.text,
+      };
+      if (logoUrl != null) {
+        payload['logo_url'] = logoUrl;
+      }
+      try {
+        await Supabase.instance.client.from('organizations').insert(payload);
+      } catch (e) {
+        if (logoUrl != null &&
+            (e.toString().contains('PGRST204') ||
+                e.toString().contains('column') ||
+                e.toString().contains('missing'))) {
+          payload.remove('logo_url');
+          await Supabase.instance.client.from('organizations').insert(payload);
+        } else {
+          rethrow;
+        }
+      }
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Factory registered')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Register Factory')),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Form(
+            key: _formKey,
+            child: ListView(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _codeController,
+                        decoration: const InputDecoration(
+                          labelText: 'Factory Code',
+                        ),
+                        validator: (v) =>
+                            (v == null || v.trim().isEmpty) ? 'Required' : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _nameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Factory Name',
+                        ),
+                        validator: (v) =>
+                            (v == null || v.trim().isEmpty) ? 'Required' : null,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _addressController,
+                  decoration: const InputDecoration(labelText: 'Address'),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _latController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _lngController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: ElevatedButton(
+                    onPressed: _isUsingGps ? null : _useCurrentLocation,
+                    child: _isUsingGps
+                        ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Use Current Location'),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _radiusController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Radius (meters)',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _ownerUserController,
+                        decoration: const InputDecoration(
+                          labelText: 'Owner Username',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _ownerPassController,
+                        decoration: const InputDecoration(
+                          labelText: 'Owner Password',
+                        ),
+                        obscureText: true,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _pickLogo,
+                      icon: const Icon(Icons.image),
+                      label: const Text('Pick Factory Logo'),
+                    ),
+                    const SizedBox(width: 12),
+                    if (_logo != null)
+                      SizedBox(
+                        width: 48,
+                        height: 48,
+                        child: kIsWeb
+                            ? Image.network(_logo!.path, fit: BoxFit.cover)
+                            : Image.file(File(_logo!.path), fit: BoxFit.cover),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: _isSaving ? null : _saveFactory,
+                    child: _isSaving
+                        ? const CircularProgressIndicator()
+                        : const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

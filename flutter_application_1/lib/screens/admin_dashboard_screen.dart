@@ -7,6 +7,7 @@ import 'package:excel/excel.dart' hide Border;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart' as share_plus;
 import 'package:intl/intl.dart';
+import 'package:fl_chart/fl_chart.dart';
 import '../models/item.dart';
 import 'dart:io'
     show File; // Show File only for non-web logic if strictly needed
@@ -22,11 +23,15 @@ class AdminDashboardScreen extends StatefulWidget {
 class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  String? _factoryName;
+  String? _ownerUsername;
+  String? _logoUrl;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 6, vsync: this);
+    _fetchOrganization();
   }
 
   @override
@@ -35,20 +40,65 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     super.dispose();
   }
 
+  Future<void> _fetchOrganization() async {
+    try {
+      final resp = await Supabase.instance.client
+          .from('organizations')
+          .select('factory_name, owner_username, logo_url')
+          .eq('organization_code', widget.organizationCode)
+          .maybeSingle();
+      if (mounted && resp != null) {
+        setState(() {
+          _factoryName = (resp['factory_name'] ?? '').toString();
+          _ownerUsername = (resp['owner_username'] ?? '').toString();
+          _logoUrl = (resp['logo_url'] ?? '').toString();
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch org error: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Row(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Image.asset(
-              'assets/images/logo.png',
-              height: 30,
-              errorBuilder: (context, error, stackTrace) =>
-                  const Icon(Icons.factory),
+            Row(
+              children: [
+                if (_logoUrl != null && _logoUrl!.isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.network(
+                      _logoUrl!,
+                      height: 28,
+                      width: 28,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          const Icon(Icons.factory, size: 28),
+                    ),
+                  )
+                else
+                  Image.asset(
+                    'assets/images/logo.png',
+                    height: 28,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const Icon(Icons.factory, size: 28),
+                  ),
+                const SizedBox(width: 10),
+                const Text('Admin Dashboard'),
+              ],
             ),
-            const SizedBox(width: 10),
-            const Text('Admin Dashboard'),
+            if (_ownerUsername != null && _factoryName != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4.0),
+                child: Text(
+                  'Welcome, ${_ownerUsername!} — ${_factoryName!}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
           ],
         ),
         actions: [
@@ -104,11 +154,18 @@ class _ReportsTabState extends State<ReportsTab> {
   bool _isLoading = true;
   bool _isExporting = false;
   String _filter = 'All'; // All, Today, Week, Month
+  List<Map<String, dynamic>> _workers = [];
+  String? _selectedWorkerId;
+  List<Map<String, dynamic>> _dayLogs = [];
+  List<Map<String, dynamic>> _weekLogs = [];
+  List<Map<String, dynamic>> _monthLogs = [];
+  List<Map<String, dynamic>> _extraWeekLogs = [];
 
   @override
   void initState() {
     super.initState();
     _fetchLogs();
+    _fetchWorkersForDropdown();
   }
 
   Future<void> _fetchLogs() async {
@@ -158,6 +215,157 @@ class _ReportsTabState extends State<ReportsTab> {
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  Future<void> _fetchWorkersForDropdown() async {
+    try {
+      final resp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode);
+      setState(() {
+        _workers = List<Map<String, dynamic>>.from(resp);
+      });
+    } catch (e) {
+      debugPrint('Fetch workers for dropdown error: $e');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchLogsFrom(
+    DateTime from, {
+    String? workerId,
+  }) async {
+    if (workerId != null) {
+      final response = await _supabase
+          .from('production_logs')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .eq('worker_id', workerId)
+          .gte('created_at', from.toIso8601String())
+          .order('created_at', ascending: true);
+      return List<Map<String, dynamic>>.from(response);
+    } else {
+      final response = await _supabase
+          .from('production_logs')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .gte('created_at', from.toIso8601String())
+          .order('created_at', ascending: true);
+      return List<Map<String, dynamic>>.from(response);
+    }
+  }
+
+  Future<void> _loadSelectedWorkerCharts(String workerId) async {
+    final now = DateTime.now();
+    final dayFrom = DateTime(now.year, now.month, now.day);
+    final weekFrom = now.subtract(const Duration(days: 6));
+    final monthFrom = now.subtract(const Duration(days: 29));
+    final extraFrom = now.subtract(const Duration(days: 7 * 8));
+    try {
+      final d = await _fetchLogsFrom(dayFrom, workerId: workerId);
+      final w = await _fetchLogsFrom(weekFrom, workerId: workerId);
+      final m = await _fetchLogsFrom(monthFrom, workerId: workerId);
+      final e = await _fetchLogsFrom(extraFrom, workerId: workerId);
+      if (mounted) {
+        setState(() {
+          _dayLogs = d;
+          _weekLogs = w;
+          _monthLogs = m;
+          _extraWeekLogs = e;
+        });
+      }
+    } catch (e) {
+      debugPrint('Load worker charts error: $e');
+    }
+  }
+
+  List<BarChartGroupData> _buildPeriodGroups(
+    List<Map<String, dynamic>> logs,
+    String period,
+  ) {
+    final now = DateTime.now();
+    final List<BarChartGroupData> groups = [];
+    if (period == 'Day') {
+      final buckets = List<double>.filled(24, 0);
+      for (final l in logs) {
+        final t = DateTime.tryParse(
+          (l['created_at'] ?? '').toString(),
+        )?.toLocal();
+        if (t != null) {
+          buckets[t.hour] += (l['quantity'] ?? 0) * 1.0;
+        }
+      }
+      for (int i = 0; i < buckets.length; i++) {
+        groups.add(
+          BarChartGroupData(
+            x: i,
+            barRods: [
+              BarChartRodData(toY: buckets[i], color: Colors.blueAccent),
+            ],
+          ),
+        );
+      }
+    } else {
+      final days = period == 'Week' ? 7 : 30;
+      final buckets = List<double>.filled(days, 0);
+      for (final l in logs) {
+        final t = DateTime.tryParse(
+          (l['created_at'] ?? '').toString(),
+        )?.toLocal();
+        if (t != null) {
+          final idx = now.difference(t).inDays;
+          final pos = days - 1 - idx;
+          if (pos >= 0 && pos < days) {
+            buckets[pos] += (l['quantity'] ?? 0) * 1.0;
+          }
+        }
+      }
+      for (int i = 0; i < buckets.length; i++) {
+        groups.add(
+          BarChartGroupData(
+            x: i,
+            barRods: [
+              BarChartRodData(toY: buckets[i], color: Colors.blueAccent),
+            ],
+          ),
+        );
+      }
+    }
+    return groups;
+  }
+
+  List<BarChartGroupData> _buildExtraWeekGroups(
+    List<Map<String, dynamic>> logs,
+  ) {
+    final now = DateTime.now();
+    final extraBuckets = List<double>.filled(8, 0);
+    for (final l in logs) {
+      final t = DateTime.tryParse(
+        (l['created_at'] ?? '').toString(),
+      )?.toLocal();
+      if (t != null) {
+        final wStart = DateTime(
+          t.year,
+          t.month,
+          t.day,
+        ).subtract(Duration(days: t.weekday - 1));
+        final weeksAgo =
+            DateTime(now.year, now.month, now.day).difference(wStart).inDays ~/
+            7;
+        final pos = 7 - weeksAgo;
+        final diff = (l['performance_diff'] ?? 0) as int;
+        if (diff > 0 && pos >= 0 && pos < 8) {
+          extraBuckets[pos] += diff * 1.0;
+        }
+      }
+    }
+    return [
+      for (int i = 0; i < extraBuckets.length; i++)
+        BarChartGroupData(
+          x: i,
+          barRods: [BarChartRodData(toY: extraBuckets[i], color: Colors.green)],
+        ),
+    ];
   }
 
   // Build query based on filter
@@ -458,6 +666,186 @@ class _ReportsTabState extends State<ReportsTab> {
             ],
           ),
         ),
+        // Worker selection and graphs
+        if (_workers.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: Row(
+              children: [
+                const Text(
+                  'Worker: ',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                DropdownButton<String>(
+                  value: _selectedWorkerId,
+                  hint: const Text('Select worker'),
+                  items: _workers.map((w) {
+                    final id = (w['worker_id'] ?? '').toString();
+                    final name = (w['name'] ?? '').toString();
+                    return DropdownMenuItem<String>(
+                      value: id,
+                      child: Text('$name ($id)'),
+                    );
+                  }).toList(),
+                  onChanged: (v) {
+                    setState(() {
+                      _selectedWorkerId = v;
+                    });
+                    if (v != null) {
+                      _loadSelectedWorkerCharts(v);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        if (_selectedWorkerId != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 12.0,
+              vertical: 8.0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Efficiency (Day)',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(
+                  height: 240,
+                  child: BarChart(
+                    BarChartData(
+                      barGroups: _buildPeriodGroups(_dayLogs, 'Day'),
+                      gridData: FlGridData(show: true, drawVerticalLine: false),
+                      titlesData: FlTitlesData(
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            getTitlesWidget: (value, meta) => Text(
+                              '${value.toInt()}h',
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          ),
+                        ),
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: true),
+                        ),
+                        topTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Efficiency (Week)',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(
+                  height: 240,
+                  child: BarChart(
+                    BarChartData(
+                      barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
+                      gridData: FlGridData(show: true, drawVerticalLine: false),
+                      titlesData: FlTitlesData(
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            getTitlesWidget: (value, meta) => Text(
+                              '${value.toInt() + 1}',
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          ),
+                        ),
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: true),
+                        ),
+                        topTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Efficiency (Month)',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(
+                  height: 240,
+                  child: BarChart(
+                    BarChartData(
+                      barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
+                      gridData: FlGridData(show: true, drawVerticalLine: false),
+                      titlesData: FlTitlesData(
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            getTitlesWidget: (value, meta) => Text(
+                              '${value.toInt() + 1}',
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          ),
+                        ),
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: true),
+                        ),
+                        topTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Weekly Extra Work',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(
+                  height: 200,
+                  child: BarChart(
+                    BarChartData(
+                      barGroups: _buildExtraWeekGroups(_extraWeekLogs),
+                      gridData: FlGridData(show: true, drawVerticalLine: false),
+                      titlesData: FlTitlesData(
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            getTitlesWidget: (value, meta) => Text(
+                              'W${value.toInt() + 1}',
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          ),
+                        ),
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: true),
+                        ),
+                        topTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Expanded(
           child: _isLoading
               ? const Center(child: CircularProgressIndicator())
