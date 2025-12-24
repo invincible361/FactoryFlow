@@ -44,14 +44,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     try {
       final resp = await Supabase.instance.client
           .from('organizations')
-          .select('factory_name, owner_username, logo_url')
+          .select('factory_name, owner_username')
           .eq('organization_code', widget.organizationCode)
           .maybeSingle();
       if (mounted && resp != null) {
         setState(() {
           _factoryName = (resp['factory_name'] ?? '').toString();
           _ownerUsername = (resp['owner_username'] ?? '').toString();
-          _logoUrl = (resp['logo_url'] ?? '').toString();
+          _logoUrl = null;
         });
       }
     } catch (e) {
@@ -156,7 +156,6 @@ class _ReportsTabState extends State<ReportsTab> {
   String _filter = 'All'; // All, Today, Week, Month
   List<Map<String, dynamic>> _workers = [];
   String? _selectedWorkerId;
-  List<Map<String, dynamic>> _dayLogs = [];
   List<Map<String, dynamic>> _weekLogs = [];
   List<Map<String, dynamic>> _monthLogs = [];
   List<Map<String, dynamic>> _extraWeekLogs = [];
@@ -257,18 +256,15 @@ class _ReportsTabState extends State<ReportsTab> {
 
   Future<void> _loadSelectedWorkerCharts(String workerId) async {
     final now = DateTime.now();
-    final dayFrom = DateTime(now.year, now.month, now.day);
     final weekFrom = now.subtract(const Duration(days: 6));
     final monthFrom = now.subtract(const Duration(days: 29));
     final extraFrom = now.subtract(const Duration(days: 7 * 8));
     try {
-      final d = await _fetchLogsFrom(dayFrom, workerId: workerId);
       final w = await _fetchLogsFrom(weekFrom, workerId: workerId);
       final m = await _fetchLogsFrom(monthFrom, workerId: workerId);
       final e = await _fetchLogsFrom(extraFrom, workerId: workerId);
       if (mounted) {
         setState(() {
-          _dayLogs = d;
           _weekLogs = w;
           _monthLogs = m;
           _extraWeekLogs = e;
@@ -623,7 +619,7 @@ class _ReportsTabState extends State<ReportsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return ListView(
       children: [
         // Filter Bar
         Padding(
@@ -708,40 +704,6 @@ class _ReportsTabState extends State<ReportsTab> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
-                  'Efficiency (Day)',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                SizedBox(
-                  height: 240,
-                  child: BarChart(
-                    BarChartData(
-                      barGroups: _buildPeriodGroups(_dayLogs, 'Day'),
-                      gridData: FlGridData(show: true, drawVerticalLine: false),
-                      titlesData: FlTitlesData(
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            getTitlesWidget: (value, meta) => Text(
-                              '${value.toInt()}h',
-                              style: const TextStyle(fontSize: 10),
-                            ),
-                          ),
-                        ),
-                        leftTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: true),
-                        ),
-                        topTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        rightTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
                 const Text(
                   'Efficiency (Week)',
                   style: TextStyle(fontWeight: FontWeight.bold),
@@ -846,12 +808,21 @@ class _ReportsTabState extends State<ReportsTab> {
               ],
             ),
           ),
-        Expanded(
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8.0),
           child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
+              ? const Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Center(child: CircularProgressIndicator()),
+                )
               : _logs.isEmpty
-              ? const Center(child: Text('No work done.'))
+              ? const Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Center(child: Text('No work done.')),
+                )
               : ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
                   itemCount: _logs.length,
                   itemBuilder: (context, index) {
                     final log = _logs[index];
@@ -860,7 +831,6 @@ class _ReportsTabState extends State<ReportsTab> {
                     ).toLocal();
                     final workerName = log['workerName'] ?? 'Unknown';
                     final itemName = log['itemName'] ?? 'Unknown';
-
                     return ListTile(
                       title: Text('$workerName - $itemName'),
                       subtitle: Text(

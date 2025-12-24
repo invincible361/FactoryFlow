@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/production_log.dart';
 
@@ -30,9 +31,7 @@ class LogService {
         // 'created_at' is handled by default in Postgres
       });
     } catch (e) {
-      // Handle error (maybe retry later or show error)
-      // For now, we just rethrow to let the UI handle it
-      print('Error saving log to Supabase: $e');
+      debugPrint('Error saving log to Supabase: $e');
       rethrow;
     }
   }

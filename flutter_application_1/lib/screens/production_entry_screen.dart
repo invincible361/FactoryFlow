@@ -68,7 +68,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           _factoryName = (resp['factory_name'] ?? '').toString();
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint('Fetch org name error: $e');
+    }
   }
 
   Future<void> _fetchData() async {
