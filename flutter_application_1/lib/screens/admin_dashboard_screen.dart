@@ -44,14 +44,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
     try {
       final resp = await Supabase.instance.client
           .from('organizations')
-          .select('factory_name, owner_username')
+          .select()
           .eq('organization_code', widget.organizationCode)
           .maybeSingle();
       if (mounted && resp != null) {
         setState(() {
-          _factoryName = (resp['factory_name'] ?? '').toString();
+          final orgName = (resp['organization_name'] ?? '').toString();
+          final facName = (resp['factory_name'] ?? '').toString();
+          _factoryName = orgName.isNotEmpty ? orgName : facName;
           _ownerUsername = (resp['owner_username'] ?? '').toString();
-          _logoUrl = null;
+          _logoUrl = (resp['logo_url'] ?? '').toString();
         });
       }
     } catch (e) {
@@ -133,7 +135,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           MachinesTab(organizationCode: widget.organizationCode),
           ItemsTab(organizationCode: widget.organizationCode),
           ShiftsTab(organizationCode: widget.organizationCode),
-          const SecurityTab(),
+          SecurityTab(organizationCode: widget.organizationCode),
         ],
       ),
     );
@@ -159,12 +161,59 @@ class _ReportsTabState extends State<ReportsTab> {
   List<Map<String, dynamic>> _weekLogs = [];
   List<Map<String, dynamic>> _monthLogs = [];
   List<Map<String, dynamic>> _extraWeekLogs = [];
+  int _extraUnitsToday = 0;
+  bool _isWorkerScope = false;
+  String _linePeriod = 'Week';
+  List<FlSpot> _lineSpots = [];
+
+  Widget _metricTile(String title, String value, Color color, IconData icon) {
+    return Container(
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Colors.black87),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     _fetchLogs();
     _fetchWorkersForDropdown();
+    _fetchExtraUnitsTodayOrg();
+    _refreshLineData();
   }
 
   Future<void> _fetchLogs() async {
@@ -178,6 +227,8 @@ class _ReportsTabState extends State<ReportsTab> {
           _logs = enriched;
           _isLoading = false;
         });
+        // Update rolling 24h extra units after logs load
+        _fetchExtraUnitsTodayOrg();
       }
     } catch (e) {
       // Fallback if relationship fails
@@ -617,6 +668,72 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
+  Future<void> _fetchExtraUnitsTodayOrg() async {
+    try {
+      final now = DateTime.now();
+      final dayFrom = now.subtract(const Duration(hours: 24));
+      final response = await _supabase
+          .from('production_logs')
+          .select('performance_diff, created_at')
+          .eq('organization_code', widget.organizationCode)
+          .gte('created_at', dayFrom.toIso8601String());
+      int sum = 0;
+      for (final l in List<Map<String, dynamic>>.from(response)) {
+        final diff = (l['performance_diff'] ?? 0) as int;
+        if (diff > 0) sum += diff;
+      }
+      if (mounted) setState(() => _extraUnitsToday = sum);
+    } catch (e) {
+      debugPrint('Fetch org extra units today error: $e');
+    }
+  }
+
+  Future<void> _refreshLineData() async {
+    try {
+      final now = DateTime.now();
+      DateTime from;
+      int bucketsCount;
+      if (_linePeriod == 'Day') {
+        from = DateTime(now.year, now.month, now.day);
+        bucketsCount = 24;
+      } else if (_linePeriod == 'Week') {
+        from = now.subtract(const Duration(days: 6));
+        bucketsCount = 7;
+      } else {
+        from = now.subtract(const Duration(days: 29));
+        bucketsCount = 30;
+      }
+      final logs = await _fetchLogsFrom(
+        from,
+        workerId: _isWorkerScope ? _selectedWorkerId : null,
+      );
+      final buckets = List<double>.filled(bucketsCount, 0);
+      for (final l in logs) {
+        final t = DateTime.tryParse(
+          (l['created_at'] ?? '').toString(),
+        )?.toLocal();
+        if (t == null) continue;
+        int pos;
+        if (_linePeriod == 'Day') {
+          pos = t.hour;
+        } else {
+          final idx = now.difference(t).inDays;
+          pos = bucketsCount - 1 - idx;
+        }
+        if (pos >= 0 && pos < bucketsCount) {
+          buckets[pos] += (l['quantity'] ?? 0) * 1.0;
+        }
+      }
+      final spots = <FlSpot>[];
+      for (int i = 0; i < buckets.length; i++) {
+        spots.add(FlSpot(i.toDouble(), buckets[i]));
+      }
+      if (mounted) setState(() => _lineSpots = spots);
+    } catch (e) {
+      if (mounted) setState(() => _lineSpots = []);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -659,6 +776,223 @@ class _ReportsTabState extends State<ReportsTab> {
                   height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
+            ],
+          ),
+        ),
+        // Metrics Grid
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0),
+          child: GridView.count(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            crossAxisCount: 2,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            childAspectRatio: 2.2,
+            children: [
+              _metricTile(
+                'Extra Units (24h)',
+                '$_extraUnitsToday',
+                Colors.green.shade200,
+                Icons.trending_up,
+              ),
+              _metricTile(
+                'Workers',
+                '${_workers.length}',
+                Colors.blue.shade100,
+                Icons.people,
+              ),
+            ],
+          ),
+        ),
+        // Line chart controls
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: !_isWorkerScope,
+                        onChanged: (v) {
+                          setState(() {
+                            _isWorkerScope = false;
+                          });
+                          _refreshLineData();
+                        },
+                      ),
+                      const Text('All workers'),
+                    ],
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: _isWorkerScope,
+                        onChanged: (v) {
+                          setState(() {
+                            _isWorkerScope = true;
+                          });
+                          _refreshLineData();
+                        },
+                      ),
+                      const Text('Specific worker'),
+                    ],
+                  ),
+                  if (_isWorkerScope)
+                    DropdownButton<String>(
+                      value: _selectedWorkerId,
+                      hint: const Text('Select worker'),
+                      items: _workers.map((w) {
+                        final id = (w['worker_id'] ?? '').toString();
+                        final name = (w['name'] ?? '').toString();
+                        return DropdownMenuItem<String>(
+                          value: id,
+                          child: Text('$name ($id)'),
+                        );
+                      }).toList(),
+                      onChanged: (v) {
+                        setState(() => _selectedWorkerId = v);
+                        _refreshLineData();
+                      },
+                    ),
+                ],
+              ),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: _linePeriod == 'Day',
+                        onChanged: (v) {
+                          setState(() => _linePeriod = 'Day');
+                          _refreshLineData();
+                        },
+                      ),
+                      const Text('Daily'),
+                    ],
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: _linePeriod == 'Week',
+                        onChanged: (v) {
+                          setState(() => _linePeriod = 'Week');
+                          _refreshLineData();
+                        },
+                      ),
+                      const Text('Weekly'),
+                    ],
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: _linePeriod == 'Month',
+                        onChanged: (v) {
+                          setState(() => _linePeriod = 'Month');
+                          _refreshLineData();
+                        },
+                      ),
+                      const Text('Monthly'),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 240,
+                child: LineChart(
+                  LineChartData(
+                    lineTouchData: LineTouchData(
+                      enabled: true,
+                      touchTooltipData: LineTouchTooltipData(
+                        getTooltipItems: (touchedSpots) {
+                          return touchedSpots
+                              .map(
+                                (s) => LineTooltipItem(
+                                  s.y.toStringAsFixed(0),
+                                  const TextStyle(color: Colors.white),
+                                ),
+                              )
+                              .toList();
+                        },
+                      ),
+                    ),
+                    gridData: FlGridData(show: true, drawVerticalLine: false),
+                    titlesData: FlTitlesData(
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 26,
+                          getTitlesWidget: (value, meta) {
+                            final v = value.toInt();
+                            if (_linePeriod == 'Day') {
+                              if (v % 3 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                '${v}h',
+                                style: const TextStyle(fontSize: 11),
+                              );
+                            } else if (_linePeriod == 'Week') {
+                              if ((v + 1) % 2 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                '${v + 1}',
+                                style: const TextStyle(fontSize: 11),
+                              );
+                            } else {
+                              if ((v + 1) % 5 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                '${v + 1}',
+                                style: const TextStyle(fontSize: 11),
+                              );
+                            }
+                          },
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 40,
+                        ),
+                      ),
+                      topTitles: AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    lineBarsData: [
+                      LineChartBarData(
+                        spots: _lineSpots,
+                        isCurved: true,
+                        color: Colors.blueAccent,
+                        barWidth: 3,
+                        dotData: FlDotData(show: true),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -718,14 +1052,24 @@ class _ReportsTabState extends State<ReportsTab> {
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            getTitlesWidget: (value, meta) => Text(
-                              '${value.toInt() + 1}',
-                              style: const TextStyle(fontSize: 10),
-                            ),
+                            reservedSize: 26,
+                            getTitlesWidget: (value, meta) {
+                              final v = value.toInt();
+                              if ((v + 1) % 2 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                '${v + 1}',
+                                style: const TextStyle(fontSize: 10),
+                              );
+                            },
                           ),
                         ),
                         leftTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: true),
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 40,
+                          ),
                         ),
                         topTitles: AxisTitles(
                           sideTitles: SideTitles(showTitles: false),
@@ -752,14 +1096,24 @@ class _ReportsTabState extends State<ReportsTab> {
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            getTitlesWidget: (value, meta) => Text(
-                              '${value.toInt() + 1}',
-                              style: const TextStyle(fontSize: 10),
-                            ),
+                            reservedSize: 26,
+                            getTitlesWidget: (value, meta) {
+                              final v = value.toInt();
+                              if ((v + 1) % 5 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                '${v + 1}',
+                                style: const TextStyle(fontSize: 10),
+                              );
+                            },
                           ),
                         ),
                         leftTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: true),
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 40,
+                          ),
                         ),
                         topTitles: AxisTitles(
                           sideTitles: SideTitles(showTitles: false),
@@ -786,14 +1140,24 @@ class _ReportsTabState extends State<ReportsTab> {
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            getTitlesWidget: (value, meta) => Text(
-                              'W${value.toInt() + 1}',
-                              style: const TextStyle(fontSize: 10),
-                            ),
+                            reservedSize: 24,
+                            getTitlesWidget: (value, meta) {
+                              final v = value.toInt();
+                              if ((v + 1) % 2 != 0) {
+                                return const SizedBox.shrink();
+                              }
+                              return Text(
+                                'W${v + 1}',
+                                style: const TextStyle(fontSize: 10),
+                              );
+                            },
                           ),
                         ),
                         leftTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: true),
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 40,
+                          ),
                         ),
                         topTitles: AxisTitles(
                           sideTitles: SideTitles(showTitles: false),
@@ -1746,7 +2110,8 @@ class _ShiftsTabState extends State<ShiftsTab> {
 // 6. SECURITY TAB
 // ---------------------------------------------------------------------------
 class SecurityTab extends StatefulWidget {
-  const SecurityTab({super.key});
+  final String organizationCode;
+  const SecurityTab({super.key, required this.organizationCode});
 
   @override
   State<SecurityTab> createState() => _SecurityTabState();
@@ -1756,6 +2121,7 @@ class _SecurityTabState extends State<SecurityTab> {
   final _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _logs = [];
   bool _isLoading = true;
+  bool _missingTable = false;
 
   @override
   void initState() {
@@ -1769,6 +2135,7 @@ class _SecurityTabState extends State<SecurityTab> {
       final response = await _supabase
           .from('owner_logs')
           .select()
+          .eq('organization_code', widget.organizationCode)
           .order('login_time', ascending: false)
           .limit(50);
 
@@ -1776,12 +2143,15 @@ class _SecurityTabState extends State<SecurityTab> {
         setState(() {
           _logs = List<Map<String, dynamic>>.from(response);
           _isLoading = false;
+          _missingTable = false;
         });
       }
     } catch (e) {
       if (mounted) {
-        // Just show empty state or simple error log if table missing
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+          _missingTable = true;
+        });
       }
     }
   }
@@ -1789,6 +2159,31 @@ class _SecurityTabState extends State<SecurityTab> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
+
+    if (_missingTable) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Icon(Icons.security, size: 64, color: Colors.grey),
+              SizedBox(height: 16),
+              Text(
+                'No login security available.',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Make sure the "owner_logs" table exists in Supabase.',
+                style: TextStyle(color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     if (_logs.isEmpty) {
       return const Center(

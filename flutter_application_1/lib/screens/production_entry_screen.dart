@@ -47,6 +47,72 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   Duration _elapsed = Duration.zero;
   bool _isTimerRunning = false;
   String? _factoryName;
+  String? _logoUrl;
+  Widget _metricTile(String title, String value, Color color, IconData icon) {
+    return Container(
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Colors.black87),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    height: 1.15,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  int _extraUnitsToday = 0;
+
+  Future<void> _fetchTodayExtraUnits() async {
+    try {
+      final now = DateTime.now();
+      final dayFrom = DateTime(now.year, now.month, now.day);
+      final response = await Supabase.instance.client
+          .from('production_logs')
+          .select('performance_diff, created_at')
+          .eq('worker_id', widget.worker.id)
+          .eq('organization_code', widget.worker.organizationCode ?? '')
+          .gte('created_at', dayFrom.toIso8601String());
+      int sum = 0;
+      for (final l in List<Map<String, dynamic>>.from(response)) {
+        final diff = (l['performance_diff'] ?? 0) as int;
+        if (diff > 0) sum += diff;
+      }
+      if (mounted) setState(() => _extraUnitsToday = sum);
+    } catch (e) {
+      debugPrint('Fetch extra units today error: $e');
+    }
+  }
 
   @override
   void initState() {
@@ -54,18 +120,22 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     _fetchData();
     _checkLocation();
     _fetchOrganizationName();
+    _fetchTodayExtraUnits();
   }
 
   Future<void> _fetchOrganizationName() async {
     try {
       final resp = await Supabase.instance.client
           .from('organizations')
-          .select('factory_name')
+          .select('organization_name, factory_name, logo_url')
           .eq('organization_code', widget.worker.organizationCode ?? '')
           .maybeSingle();
       if (mounted && resp != null) {
         setState(() {
-          _factoryName = (resp['factory_name'] ?? '').toString();
+          final orgName = (resp['organization_name'] ?? '').toString();
+          final facName = (resp['factory_name'] ?? '').toString();
+          _factoryName = orgName.isNotEmpty ? orgName : facName;
+          _logoUrl = (resp['logo_url'] ?? '').toString();
         });
       }
     } catch (e) {
@@ -478,7 +548,32 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Log Production'),
+            Row(
+              children: [
+                if (_logoUrl != null && _logoUrl!.isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.network(
+                      _logoUrl!,
+                      height: 28,
+                      width: 28,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          const Icon(Icons.factory, size: 28),
+                    ),
+                  )
+                else
+                  Image.asset(
+                    'assets/images/logo.png',
+                    height: 28,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const Icon(Icons.factory, size: 28),
+                  ),
+                const SizedBox(width: 10),
+                const Text('Log Production'),
+              ],
+            ),
+            const SizedBox(height: 6),
             Padding(
               padding: const EdgeInsets.only(top: 2.0),
               child: Text(
@@ -494,6 +589,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
             tooltip: 'Refresh Data',
             onPressed: () {
               _fetchData();
+              _fetchTodayExtraUnits();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Refreshing data...')),
               );
@@ -522,11 +618,68 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           key: _formKey,
           child: ListView(
             children: [
+              GridView.count(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisCount: 2,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 2.0,
+                children: [
+                  _metricTile(
+                    'Shift',
+                    _isTimerRunning
+                        ? '${_elapsed.inHours}h ${_elapsed.inMinutes % 60}m'
+                        : 'Not started',
+                    Colors.blue.shade100,
+                    Icons.schedule,
+                  ),
+                  _metricTile(
+                    'Location',
+                    _locationStatus,
+                    _locationStatus.contains('Inside')
+                        ? Colors.green.shade100
+                        : Colors.red.shade100,
+                    Icons.place,
+                  ),
+                  _metricTile(
+                    'Machine',
+                    _selectedMachine != null ? _selectedMachine!.name : 'None',
+                    Colors.orange.shade100,
+                    Icons.precision_manufacturing,
+                  ),
+                  _metricTile(
+                    'Item',
+                    _selectedItem != null ? _selectedItem!.name : 'None',
+                    Colors.teal.shade100,
+                    Icons.widgets,
+                  ),
+                  _metricTile(
+                    'Operation',
+                    _selectedOperation ?? 'None',
+                    Colors.purple.shade100,
+                    Icons.build,
+                  ),
+                  _metricTile(
+                    'Shift Name',
+                    _selectedShift ?? 'None',
+                    Colors.indigo.shade100,
+                    Icons.fact_check,
+                  ),
+                  _metricTile(
+                    'Extra Units (Today)',
+                    '$_extraUnitsToday',
+                    Colors.green.shade200,
+                    Icons.trending_up,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
               // Location Status Card
               Card(
                 color: _locationStatus.contains('Inside')
-                    ? Colors.green[50]
-                    : Colors.red[50],
+                    ? Colors.green.shade50
+                    : Colors.red.shade50,
                 child: Padding(
                   padding: const EdgeInsets.all(12.0),
                   child: Column(
@@ -1009,24 +1162,41 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           bottomTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
+                              reservedSize: 28,
                               getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
                                 if (period == 'Day') {
+                                  if (v % 3 != 0) {
+                                    return const SizedBox.shrink();
+                                  }
                                   return Text(
-                                    '${value.toInt()}h',
-                                    style: const TextStyle(fontSize: 12),
+                                    '${v}h',
+                                    style: const TextStyle(fontSize: 11),
+                                  );
+                                } else if (period == 'Week') {
+                                  if ((v + 1) % 2 != 0) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Text(
+                                    '${v + 1}',
+                                    style: const TextStyle(fontSize: 11),
+                                  );
+                                } else {
+                                  if ((v + 1) % 5 != 0) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Text(
+                                    '${v + 1}',
+                                    style: const TextStyle(fontSize: 11),
                                   );
                                 }
-                                return Text(
-                                  '${value.toInt() + 1}',
-                                  style: const TextStyle(fontSize: 12),
-                                );
                               },
                             ),
                           ),
                           leftTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
-                              reservedSize: 40,
+                              reservedSize: 44,
                             ),
                           ),
                           topTitles: AxisTitles(
@@ -1076,10 +1246,15 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           bottomTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
+                              reservedSize: 26,
                               getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 2 != 0) {
+                                  return const SizedBox.shrink();
+                                }
                                 return Text(
-                                  'W${value.toInt() + 1}',
-                                  style: const TextStyle(fontSize: 12),
+                                  'W${v + 1}',
+                                  style: const TextStyle(fontSize: 11),
                                 );
                               },
                             ),
@@ -1087,7 +1262,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           leftTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
-                              reservedSize: 40,
+                              reservedSize: 44,
                             ),
                           ),
                           topTitles: AxisTitles(

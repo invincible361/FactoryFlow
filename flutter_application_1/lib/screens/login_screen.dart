@@ -24,7 +24,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final LocationService _locationService = LocationService();
   bool _isLoading = false;
 
-  Future<void> _recordOwnerLogin() async {
+  Future<void> _recordOwnerLogin(String organizationCode) async {
     final deviceInfo = DeviceInfoPlugin();
     String deviceName = 'Unknown Device';
     String osVersion = 'Unknown OS';
@@ -52,11 +52,24 @@ class _LoginScreenState extends State<LoginScreen> {
         osVersion = 'Windows';
       }
 
-      await Supabase.instance.client.from('owner_logs').insert({
+      final payload = {
         'login_time': DateTime.now().toIso8601String(),
         'device_name': deviceName,
         'os_version': osVersion,
-      });
+        'organization_code': organizationCode,
+      };
+      try {
+        await Supabase.instance.client.from('owner_logs').insert(payload);
+      } catch (e) {
+        if (e.toString().contains('PGRST204') ||
+            e.toString().contains('column') ||
+            e.toString().contains('missing')) {
+          payload.remove('organization_code');
+          await Supabase.instance.client.from('owner_logs').insert(payload);
+        } else {
+          rethrow;
+        }
+      }
     } catch (e) {
       debugPrint('Error logging owner login: $e');
     }
@@ -89,7 +102,7 @@ class _LoginScreenState extends State<LoginScreen> {
         final orgRadius = (orgResp['radius_meters'] ?? 500.0) * 1.0;
 
         if (username == ownerUser && password == ownerPass) {
-          await _recordOwnerLogin();
+          await _recordOwnerLogin(orgCode);
           if (!mounted) return;
           Navigator.pushReplacement(
             context,
@@ -242,8 +255,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       onPressed: _login,
                       child: const Text('Login'),
                     ),
-                  const SizedBox(height: 16),
-                  const Text('Hint: worker1 / password1'),
                   const SizedBox(height: 24),
                   ElevatedButton(
                     onPressed: () {
@@ -395,6 +406,7 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
       final payload = {
         'organization_code': code,
         'factory_name': _nameController.text,
+        'organization_name': _nameController.text,
         'address': _addressController.text,
         'latitude': lat,
         'longitude': lng,
@@ -519,6 +531,13 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                   decoration: const InputDecoration(
                     labelText: 'Radius (meters)',
                   ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Radius defines the geofence around your factory in meters. '
+                  'Set coordinates at the center of your location using "Use Current Location". '
+                  'For example, 200 m covers a small campus; 500 m covers a larger area.',
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
                 ),
                 const SizedBox(height: 12),
                 Row(
