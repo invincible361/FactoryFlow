@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
 import '../models/worker.dart';
@@ -122,6 +123,111 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     _checkLocation();
     _fetchOrganizationName();
     _fetchTodayExtraUnits();
+    // _loadPersistedState will be called inside _fetchData to ensure lists are ready
+  }
+
+  Future<void> _loadPersistedState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final machineId = prefs.getString('persisted_machine_id');
+      final itemId = prefs.getString('persisted_item_id');
+      final operation = prefs.getString('persisted_operation');
+      final shift = prefs.getString('persisted_shift');
+      final startTimeStr = prefs.getString('persisted_start_time');
+      final isTimerRunning =
+          prefs.getBool('persisted_is_timer_running') ?? false;
+
+      if (mounted) {
+        setState(() {
+          if (machineId != null && _machines.isNotEmpty) {
+            try {
+              _selectedMachine = _machines.firstWhere((m) => m.id == machineId);
+            } catch (_) {}
+          }
+          if (itemId != null && _items.isNotEmpty) {
+            try {
+              _selectedItem = _items.firstWhere((i) => i.id == itemId);
+            } catch (_) {}
+          }
+          _selectedOperation = operation;
+          _selectedShift = shift;
+
+          if (isTimerRunning && startTimeStr != null) {
+            _startTime = DateTime.parse(startTimeStr);
+            _isTimerRunning = true;
+            _resumeTimer();
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading persisted state: $e');
+    }
+  }
+
+  void _resumeTimer() {
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _elapsed = DateTime.now().difference(_startTime!);
+        });
+      }
+    });
+  }
+
+  Future<void> _persistState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_selectedMachine != null) {
+        await prefs.setString('persisted_machine_id', _selectedMachine!.id);
+      } else {
+        await prefs.remove('persisted_machine_id');
+      }
+
+      if (_selectedItem != null) {
+        await prefs.setString('persisted_item_id', _selectedItem!.id);
+      } else {
+        await prefs.remove('persisted_item_id');
+      }
+
+      if (_selectedOperation != null) {
+        await prefs.setString('persisted_operation', _selectedOperation!);
+      } else {
+        await prefs.remove('persisted_operation');
+      }
+
+      if (_selectedShift != null) {
+        await prefs.setString('persisted_shift', _selectedShift!);
+      } else {
+        await prefs.remove('persisted_shift');
+      }
+
+      await prefs.setBool('persisted_is_timer_running', _isTimerRunning);
+      if (_startTime != null) {
+        await prefs.setString(
+          'persisted_start_time',
+          _startTime!.toIso8601String(),
+        );
+      } else {
+        await prefs.remove('persisted_start_time');
+      }
+    } catch (e) {
+      debugPrint('Error persisting state: $e');
+    }
+  }
+
+  Future<void> _clearPersistedState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('persisted_machine_id');
+      await prefs.remove('persisted_item_id');
+      await prefs.remove('persisted_operation');
+      await prefs.remove('persisted_shift');
+      await prefs.remove('persisted_is_timer_running');
+      await prefs.remove('persisted_start_time');
+    } catch (e) {
+      debugPrint('Error clearing persisted state: $e');
+    }
   }
 
   Future<void> _fetchOrganizationName() async {
@@ -197,11 +303,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           _shifts = shiftsList;
           _isLoadingData = false;
 
-          // Reset selections to avoid Dropdown error since object references changed
-          _selectedMachine = null;
-          _selectedItem = null;
-          _selectedOperation = null;
-          _selectedShift = null;
+          // Attempt to restore selections from persisted state if not already set
+          if (_selectedMachine == null || _selectedItem == null) {
+            _loadPersistedState();
+          }
         });
       }
     } catch (e) {
@@ -287,6 +392,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       _startTime = DateTime.now();
       _elapsed = Duration.zero;
     });
+    _persistState();
 
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
@@ -512,6 +618,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         _remarksController.clear();
         _elapsed = Duration.zero;
       });
+      _clearPersistedState();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -766,6 +873,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                             _selectedItem = null;
                             _selectedOperation = null;
                           });
+                          _persistState();
                         },
                 ),
                 const SizedBox(height: 16),
@@ -787,6 +895,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                             _selectedItem = newValue;
                             _selectedOperation = null;
                           });
+                          _persistState();
                         },
                 ),
                 const SizedBox(height: 16),
@@ -803,6 +912,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           setState(() {
                             _selectedShift = value;
                           });
+                          _persistState();
                         },
                 ),
               ],
@@ -822,6 +932,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                         setState(() {
                           _selectedOperation = value;
                         });
+                        _persistState();
                       },
               ),
               if (_selectedOperation != null) ...[

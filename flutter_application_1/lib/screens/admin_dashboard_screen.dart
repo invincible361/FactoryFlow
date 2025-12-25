@@ -689,7 +689,7 @@ class _ReportsTabState extends State<ReportsTab> {
       final dayFrom = now.subtract(const Duration(hours: 24));
       final response = await _supabase
           .from('production_logs')
-          .select('performance_diff, created_at')
+          .select('performance_diff, created_at, remarks')
           .eq('organization_code', widget.organizationCode)
           .gte('created_at', dayFrom.toIso8601String());
       int sum = 0;
