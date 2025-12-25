@@ -218,6 +218,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   void dispose() {
     _timer?.cancel();
     _quantityController.dispose();
+    _remarksController.dispose();
     super.dispose();
   }
 

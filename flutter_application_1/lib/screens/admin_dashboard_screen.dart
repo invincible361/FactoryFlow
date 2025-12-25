@@ -262,6 +262,18 @@ class _ReportsTabState extends State<ReportsTab> {
         if (!e.toString().contains('PGRST200')) {
           debugPrint('Fetch logs error: $e');
         }
+
+        String msg = e.toString();
+        if (msg.contains('Load failed') || msg.contains('ClientException')) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Connection failed. Check your internet or ad-blocker.',
+              ),
+            ),
+          );
+        }
+
         setState(() => _isLoading = false);
       }
     }
@@ -419,7 +431,7 @@ class _ReportsTabState extends State<ReportsTab> {
   Future<dynamic> _buildQuery({required bool isExport}) {
     var query = _supabase
         .from('production_logs')
-        .select()
+        .select('*, remarks') // Explicitly select remarks to be safe
         .eq('organization_code', widget.organizationCode);
 
     // Apply Date Filters
@@ -739,317 +751,213 @@ class _ReportsTabState extends State<ReportsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      children: [
-        // Filter Bar
-        Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: Row(
-            children: [
-              const Text(
-                'Filter: ',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              DropdownButton<String>(
-                value: _filter,
-                items: ['All', 'Today', 'Week', 'Month'].map((String value) {
-                  return DropdownMenuItem<String>(
-                    value: value,
-                    child: Text(value),
-                  );
-                }).toList(),
-                onChanged: (newValue) {
-                  if (newValue != null) {
-                    setState(() {
-                      _filter = newValue;
-                      _fetchLogs();
-                    });
-                  }
-                },
-              ),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.download, color: Colors.green),
-                onPressed: _isExporting ? null : _exportToExcel,
-                tooltip: 'Export to Excel',
-              ),
-              if (_isExporting)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-            ],
-          ),
-        ),
-        // Metrics Grid
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0),
-          child: GridView.count(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisCount: 2,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 2.2,
-            children: [
-              _metricTile(
-                'Extra Units (24h)',
-                '$_extraUnitsToday',
-                Colors.green.shade200,
-                Icons.trending_up,
-              ),
-              _metricTile(
-                'Workers',
-                '${_workers.length}',
-                Colors.blue.shade100,
-                Icons.people,
-              ),
-            ],
-          ),
-        ),
-        // Line chart controls
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: !_isWorkerScope,
-                        onChanged: (v) {
-                          setState(() {
-                            _isWorkerScope = false;
-                          });
-                          _refreshLineData();
-                        },
-                      ),
-                      const Text('All workers'),
-                    ],
-                  ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: _isWorkerScope,
-                        onChanged: (v) {
-                          setState(() {
-                            _isWorkerScope = true;
-                          });
-                          _refreshLineData();
-                        },
-                      ),
-                      const Text('Specific worker'),
-                    ],
-                  ),
-                  if (_isWorkerScope)
-                    DropdownButton<String>(
-                      value: _selectedWorkerId,
-                      hint: const Text('Select worker'),
-                      items: _workers.map((w) {
-                        final id = (w['worker_id'] ?? '').toString();
-                        final name = (w['name'] ?? '').toString();
-                        return DropdownMenuItem<String>(
-                          value: id,
-                          child: Text('$name ($id)'),
-                        );
-                      }).toList(),
-                      onChanged: (v) {
-                        setState(() => _selectedWorkerId = v);
-                        _refreshLineData();
-                      },
-                    ),
-                ],
-              ),
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: _linePeriod == 'Day',
-                        onChanged: (v) {
-                          setState(() => _linePeriod = 'Day');
-                          _refreshLineData();
-                        },
-                      ),
-                      const Text('Daily'),
-                    ],
-                  ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: _linePeriod == 'Week',
-                        onChanged: (v) {
-                          setState(() => _linePeriod = 'Week');
-                          _refreshLineData();
-                        },
-                      ),
-                      const Text('Weekly'),
-                    ],
-                  ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: _linePeriod == 'Month',
-                        onChanged: (v) {
-                          setState(() => _linePeriod = 'Month');
-                          _refreshLineData();
-                        },
-                      ),
-                      const Text('Monthly'),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 240,
-                child: LineChart(
-                  LineChartData(
-                    lineTouchData: LineTouchData(
-                      enabled: true,
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipItems: (touchedSpots) {
-                          return touchedSpots
-                              .map(
-                                (s) => LineTooltipItem(
-                                  s.y.toStringAsFixed(0),
-                                  const TextStyle(color: Colors.white),
-                                ),
-                              )
-                              .toList();
-                        },
-                      ),
-                    ),
-                    gridData: FlGridData(show: true, drawVerticalLine: false),
-                    titlesData: FlTitlesData(
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 26,
-                          getTitlesWidget: (value, meta) {
-                            final v = value.toInt();
-                            if (_linePeriod == 'Day') {
-                              if (v % 3 != 0) {
-                                return const SizedBox.shrink();
-                              }
-                              return Text(
-                                '${v}h',
-                                style: const TextStyle(fontSize: 11),
-                              );
-                            } else if (_linePeriod == 'Week') {
-                              if ((v + 1) % 2 != 0) {
-                                return const SizedBox.shrink();
-                              }
-                              return Text(
-                                '${v + 1}',
-                                style: const TextStyle(fontSize: 11),
-                              );
-                            } else {
-                              if ((v + 1) % 5 != 0) {
-                                return const SizedBox.shrink();
-                              }
-                              return Text(
-                                '${v + 1}',
-                                style: const TextStyle(fontSize: 11),
-                              );
-                            }
-                          },
-                        ),
-                      ),
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 40,
-                        ),
-                      ),
-                      topTitles: AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      rightTitles: AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                    ),
-                    borderData: FlBorderData(show: false),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: _lineSpots,
-                        isCurved: true,
-                        color: Colors.blueAccent,
-                        barWidth: 3,
-                        dotData: FlDotData(show: true),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        // Worker selection and graphs
-        if (_workers.isNotEmpty)
+    return RefreshIndicator(
+      onRefresh: () async {
+        await Future.wait([
+          _fetchLogs(),
+          _fetchWorkersForDropdown(),
+          _fetchExtraUnitsTodayOrg(),
+          _refreshLineData(),
+        ]);
+      },
+      child: ListView(
+        children: [
+          // Filter Bar
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            padding: const EdgeInsets.all(8.0),
             child: Row(
               children: [
                 const Text(
-                  'Worker: ',
+                  'Filter: ',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 DropdownButton<String>(
-                  value: _selectedWorkerId,
-                  hint: const Text('Select worker'),
-                  items: _workers.map((w) {
-                    final id = (w['worker_id'] ?? '').toString();
-                    final name = (w['name'] ?? '').toString();
+                  value: _filter,
+                  items: ['All', 'Today', 'Week', 'Month'].map((String value) {
                     return DropdownMenuItem<String>(
-                      value: id,
-                      child: Text('$name ($id)'),
+                      value: value,
+                      child: Text(value),
                     );
                   }).toList(),
-                  onChanged: (v) {
-                    setState(() {
-                      _selectedWorkerId = v;
-                    });
-                    if (v != null) {
-                      _loadSelectedWorkerCharts(v);
+                  onChanged: (newValue) {
+                    if (newValue != null) {
+                      setState(() {
+                        _filter = newValue;
+                        _fetchLogs();
+                      });
                     }
                   },
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.download, color: Colors.green),
+                  onPressed: _isExporting ? null : _exportToExcel,
+                  tooltip: 'Export to Excel',
+                ),
+                if (_isExporting)
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+          ),
+          // Metrics Grid
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12.0),
+            child: GridView.count(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 2.2,
+              children: [
+                _metricTile(
+                  'Extra Units (24h)',
+                  '$_extraUnitsToday',
+                  Colors.green.shade200,
+                  Icons.trending_up,
+                ),
+                _metricTile(
+                  'Workers',
+                  '${_workers.length}',
+                  Colors.blue.shade100,
+                  Icons.people,
                 ),
               ],
             ),
           ),
-        if (_selectedWorkerId != null)
+          // Line chart controls
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: 12.0,
               vertical: 8.0,
             ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Efficiency (Week)',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Checkbox(
+                          value: !_isWorkerScope,
+                          onChanged: (v) {
+                            setState(() {
+                              _isWorkerScope = false;
+                            });
+                            _refreshLineData();
+                          },
+                        ),
+                        const Text('All workers'),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Checkbox(
+                          value: _isWorkerScope,
+                          onChanged: (v) {
+                            setState(() {
+                              _isWorkerScope = true;
+                            });
+                            _refreshLineData();
+                          },
+                        ),
+                        const Text('Specific worker'),
+                      ],
+                    ),
+                    if (_isWorkerScope)
+                      DropdownButton<String>(
+                        value: _selectedWorkerId,
+                        hint: const Text('Select worker'),
+                        items: _workers.map((w) {
+                          final id = (w['worker_id'] ?? '').toString();
+                          final name = (w['name'] ?? '').toString();
+                          return DropdownMenuItem<String>(
+                            value: id,
+                            child: Text('$name ($id)'),
+                          );
+                        }).toList(),
+                        onChanged: (v) {
+                          setState(() => _selectedWorkerId = v);
+                          _refreshLineData();
+                        },
+                      ),
+                  ],
                 ),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Checkbox(
+                          value: _linePeriod == 'Day',
+                          onChanged: (v) {
+                            setState(() => _linePeriod = 'Day');
+                            _refreshLineData();
+                          },
+                        ),
+                        const Text('Daily'),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Checkbox(
+                          value: _linePeriod == 'Week',
+                          onChanged: (v) {
+                            setState(() => _linePeriod = 'Week');
+                            _refreshLineData();
+                          },
+                        ),
+                        const Text('Weekly'),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Checkbox(
+                          value: _linePeriod == 'Month',
+                          onChanged: (v) {
+                            setState(() => _linePeriod = 'Month');
+                            _refreshLineData();
+                          },
+                        ),
+                        const Text('Monthly'),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
                 SizedBox(
                   height: 240,
-                  child: BarChart(
-                    BarChartData(
-                      barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
+                  child: LineChart(
+                    LineChartData(
+                      lineTouchData: LineTouchData(
+                        enabled: true,
+                        touchTooltipData: LineTouchTooltipData(
+                          getTooltipItems: (touchedSpots) {
+                            return touchedSpots
+                                .map(
+                                  (s) => LineTooltipItem(
+                                    s.y.toStringAsFixed(0),
+                                    const TextStyle(color: Colors.white),
+                                  ),
+                                )
+                                .toList();
+                          },
+                        ),
+                      ),
                       gridData: FlGridData(show: true, drawVerticalLine: false),
                       titlesData: FlTitlesData(
                         bottomTitles: AxisTitles(
@@ -1058,13 +966,31 @@ class _ReportsTabState extends State<ReportsTab> {
                             reservedSize: 26,
                             getTitlesWidget: (value, meta) {
                               final v = value.toInt();
-                              if ((v + 1) % 2 != 0) {
-                                return const SizedBox.shrink();
+                              if (_linePeriod == 'Day') {
+                                if (v % 3 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  '${v}h',
+                                  style: const TextStyle(fontSize: 11),
+                                );
+                              } else if (_linePeriod == 'Week') {
+                                if ((v + 1) % 2 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  '${v + 1}',
+                                  style: const TextStyle(fontSize: 11),
+                                );
+                              } else {
+                                if ((v + 1) % 5 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  '${v + 1}',
+                                  style: const TextStyle(fontSize: 11),
+                                );
                               }
-                              return Text(
-                                '${v + 1}',
-                                style: const TextStyle(fontSize: 10),
-                              );
                             },
                           ),
                         ),
@@ -1081,154 +1007,262 @@ class _ReportsTabState extends State<ReportsTab> {
                           sideTitles: SideTitles(showTitles: false),
                         ),
                       ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Efficiency (Month)',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                SizedBox(
-                  height: 240,
-                  child: BarChart(
-                    BarChartData(
-                      barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
-                      gridData: FlGridData(show: true, drawVerticalLine: false),
-                      titlesData: FlTitlesData(
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 26,
-                            getTitlesWidget: (value, meta) {
-                              final v = value.toInt();
-                              if ((v + 1) % 5 != 0) {
-                                return const SizedBox.shrink();
-                              }
-                              return Text(
-                                '${v + 1}',
-                                style: const TextStyle(fontSize: 10),
-                              );
-                            },
-                          ),
+                      borderData: FlBorderData(show: false),
+                      lineBarsData: [
+                        LineChartBarData(
+                          spots: _lineSpots,
+                          isCurved: true,
+                          color: Colors.blueAccent,
+                          barWidth: 3,
+                          dotData: FlDotData(show: true),
                         ),
-                        leftTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 40,
-                          ),
-                        ),
-                        topTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        rightTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Weekly Extra Work',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                SizedBox(
-                  height: 200,
-                  child: BarChart(
-                    BarChartData(
-                      barGroups: _buildExtraWeekGroups(_extraWeekLogs),
-                      gridData: FlGridData(show: true, drawVerticalLine: false),
-                      titlesData: FlTitlesData(
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 24,
-                            getTitlesWidget: (value, meta) {
-                              final v = value.toInt();
-                              if ((v + 1) % 2 != 0) {
-                                return const SizedBox.shrink();
-                              }
-                              return Text(
-                                'W${v + 1}',
-                                style: const TextStyle(fontSize: 10),
-                              );
-                            },
-                          ),
-                        ),
-                        leftTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 40,
-                          ),
-                        ),
-                        topTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        rightTitles: AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                      ),
+                      ],
                     ),
                   ),
                 ),
               ],
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8.0),
-          child: _isLoading
-              ? const Padding(
-                  padding: EdgeInsets.all(24.0),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              : _logs.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(24.0),
-                  child: Center(child: Text('No work done.')),
-                )
-              : ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _logs.length,
-                  itemBuilder: (context, index) {
-                    final log = _logs[index];
-                    final timestamp = DateTime.parse(
-                      log['created_at'],
-                    ).toLocal();
-                    final workerName = log['workerName'] ?? 'Unknown';
-                    final itemName = log['itemName'] ?? 'Unknown';
-                    final remarks = log['remarks'] as String?;
-                    return ListTile(
-                      title: Text('$workerName - $itemName'),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+          // Worker selection and graphs
+          if (_workers.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+              child: Row(
+                children: [
+                  const Text(
+                    'Worker: ',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  DropdownButton<String>(
+                    value: _selectedWorkerId,
+                    hint: const Text('Select worker'),
+                    items: _workers.map((w) {
+                      final id = (w['worker_id'] ?? '').toString();
+                      final name = (w['name'] ?? '').toString();
+                      return DropdownMenuItem<String>(
+                        value: id,
+                        child: Text('$name ($id)'),
+                      );
+                    }).toList(),
+                    onChanged: (v) {
+                      setState(() {
+                        _selectedWorkerId = v;
+                      });
+                      if (v != null) {
+                        _loadSelectedWorkerCharts(v);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          if (_selectedWorkerId != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12.0,
+                vertical: 8.0,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'Efficiency (Week)',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(
+                    height: 240,
+                    child: BarChart(
+                      BarChartData(
+                        barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                        ),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 26,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 2 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  '${v + 1}',
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
                           ),
-                          if (remarks != null && remarks.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4.0),
-                              child: Text(
-                                'Remark: $remarks',
-                                style: const TextStyle(
-                                  fontStyle: FontStyle.italic,
-                                  color: Colors.orange,
-                                  fontSize: 12,
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                            ),
+                          ),
+                          topTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Efficiency (Month)',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(
+                    height: 240,
+                    child: BarChart(
+                      BarChartData(
+                        barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                        ),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 26,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 5 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  '${v + 1}',
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                            ),
+                          ),
+                          topTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Weekly Extra Work',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(
+                    height: 200,
+                    child: BarChart(
+                      BarChartData(
+                        barGroups: _buildExtraWeekGroups(_extraWeekLogs),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: false,
+                        ),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 24,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 2 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Text(
+                                  'W${v + 1}',
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                            ),
+                          ),
+                          topTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: _isLoading
+                ? const Padding(
+                    padding: EdgeInsets.all(24.0),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : _logs.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(24.0),
+                    child: Center(child: Text('No work done.')),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _logs.length,
+                    itemBuilder: (context, index) {
+                      final log = _logs[index];
+                      final timestamp = DateTime.parse(
+                        log['created_at'],
+                      ).toLocal();
+                      final workerName = log['workerName'] ?? 'Unknown';
+                      final itemName = log['itemName'] ?? 'Unknown';
+                      final remarks = log['remarks'] as String?;
+                      return ListTile(
+                        title: Text('$workerName - $itemName'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+                            ),
+                            if (remarks != null && remarks.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4.0),
+                                child: Text(
+                                  'Remark: $remarks',
+                                  style: const TextStyle(
+                                    fontStyle: FontStyle.italic,
+                                    color: Colors.orange,
+                                    fontSize: 12,
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
-                      ),
-                      trailing: Text(
-                        DateFormat('MM/dd HH:mm').format(timestamp),
-                      ),
-                    );
-                  },
-                ),
-        ),
-      ],
+                          ],
+                        ),
+                        trailing: Text(
+                          DateFormat('MM/dd HH:mm').format(timestamp),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1279,9 +1313,13 @@ class _WorkersTabState extends State<WorkersTab> {
       }
     } catch (e) {
       if (mounted) {
+        String msg = 'Error: $e';
+        if (msg.contains('Load failed') || msg.contains('ClientException')) {
+          msg = 'Connection failed. Check your internet or ad-blocker.';
+        }
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ).showSnackBar(SnackBar(content: Text(msg)));
         setState(() => _isLoading = false);
       }
     }
@@ -1318,7 +1356,8 @@ class _WorkersTabState extends State<WorkersTab> {
     final panRegex = RegExp(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$');
     final aadharRegex = RegExp(r'^[0-9]{12}$');
 
-    if (!_panController.text.contains(panRegex)) {
+    final panValue = _panController.text.trim();
+    if (panValue.isNotEmpty && !panRegex.hasMatch(panValue)) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Invalid PAN Card Format')),
@@ -1342,7 +1381,7 @@ class _WorkersTabState extends State<WorkersTab> {
       await _supabase.from('workers').insert({
         'worker_id': _workerIdController.text,
         'name': _nameController.text,
-        'pan_card': _panController.text,
+        'pan_card': panValue.isEmpty ? null : panValue,
         'aadhar_card': _aadharController.text,
         'age': int.tryParse(_ageController.text),
         'mobile_number': _mobileController.text,
@@ -1379,77 +1418,83 @@ class _WorkersTabState extends State<WorkersTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: ListView(
-        children: [
-          ExpansionTile(
-            title: const Text('Add New Worker'),
-            children: [
-              TextField(
-                controller: _workerIdController,
-                decoration: const InputDecoration(labelText: 'Worker ID'),
-              ),
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Name'),
-              ),
-              TextField(
-                controller: _panController,
-                decoration: const InputDecoration(labelText: 'PAN Card'),
-              ),
-              TextField(
-                controller: _aadharController,
-                decoration: const InputDecoration(labelText: 'Aadhar Card'),
-              ),
-              TextField(
-                controller: _ageController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Age'),
-              ),
-              TextField(
-                controller: _mobileController,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: 'Mobile Number'),
-              ),
-              TextField(
-                controller: _usernameController,
-                decoration: const InputDecoration(labelText: 'Username'),
-              ),
-              TextField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password'),
-              ),
-              const SizedBox(height: 10),
-              ElevatedButton(
-                onPressed: _addWorker,
-                child: const Text('Add Worker'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          if (_isLoading)
-            const Center(child: CircularProgressIndicator())
-          else
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _workers.length,
-              itemBuilder: (context, index) {
-                final worker = _workers[index];
-                return Card(
-                  child: ListTile(
-                    title: Text('${worker['name']} (${worker['worker_id']})'),
-                    subtitle: Text('Mobile: ${worker['mobile_number']}'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () => _deleteWorker(worker['worker_id']),
-                    ),
+    return RefreshIndicator(
+      onRefresh: _fetchWorkers,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ListView(
+          children: [
+            ExpansionTile(
+              title: const Text('Add New Worker'),
+              children: [
+                TextField(
+                  controller: _workerIdController,
+                  decoration: const InputDecoration(labelText: 'Worker ID'),
+                ),
+                TextField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(labelText: 'Name'),
+                ),
+                TextField(
+                  controller: _panController,
+                  decoration: const InputDecoration(
+                    labelText: 'PAN Card (Optional)',
+                    hintText: 'ABCDE1234F',
                   ),
-                );
-              },
+                ),
+                TextField(
+                  controller: _aadharController,
+                  decoration: const InputDecoration(labelText: 'Aadhar Card'),
+                ),
+                TextField(
+                  controller: _ageController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Age'),
+                ),
+                TextField(
+                  controller: _mobileController,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(labelText: 'Mobile Number'),
+                ),
+                TextField(
+                  controller: _usernameController,
+                  decoration: const InputDecoration(labelText: 'Username'),
+                ),
+                TextField(
+                  controller: _passwordController,
+                  decoration: const InputDecoration(labelText: 'Password'),
+                ),
+                const SizedBox(height: 10),
+                ElevatedButton(
+                  onPressed: _addWorker,
+                  child: const Text('Add Worker'),
+                ),
+              ],
             ),
-        ],
+            const SizedBox(height: 20),
+            if (_isLoading)
+              const Center(child: CircularProgressIndicator())
+            else
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _workers.length,
+                itemBuilder: (context, index) {
+                  final worker = _workers[index];
+                  return Card(
+                    child: ListTile(
+                      title: Text('${worker['name']} (${worker['worker_id']})'),
+                      subtitle: Text('Mobile: ${worker['mobile_number']}'),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () => _deleteWorker(worker['worker_id']),
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
       ),
     );
   }

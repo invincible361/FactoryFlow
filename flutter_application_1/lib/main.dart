@@ -5,10 +5,15 @@ import 'screens/login_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Supabase.initialize(
-    url: 'https://gxeglfjlxdpcliptmunu.supabase.co',
-    anonKey: 'sb_publishable_JWHoTte803314NYuJeGb4Q_0kE0OioE',
-  );
+  try {
+    await Supabase.initialize(
+      url: 'https://gxeglfjlxdpcliptmunu.supabase.co',
+      anonKey: 'sb_publishable_JWHoTte803314NYuJeGb4Q_0kE0OioE',
+    );
+    debugPrint('Supabase initialized successfully');
+  } catch (e) {
+    debugPrint('Supabase initialization error: $e');
+  }
 
   runApp(const MyApp());
 }

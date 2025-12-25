@@ -174,6 +174,18 @@ class _LoginScreenState extends State<LoginScreen> {
           errorMessage = 'Invalid username or password';
         } else {
           errorMessage = e.toString();
+          // Log detailed error for debugging
+          debugPrint('Detailed Login Error: $e');
+
+          if (errorMessage.contains('Load failed') ||
+              errorMessage.contains('ClientException')) {
+            errorMessage =
+                'Connection failed. This usually means Supabase is blocked by an ad-blocker, firewall, or your network is down.\n\nDetails: $e';
+          } else if (errorMessage.contains('PGRST204') ||
+              errorMessage.contains('column')) {
+            errorMessage =
+                'Database schema mismatch. Please run the migration script.';
+          }
         }
 
         ScaffoldMessenger.of(
