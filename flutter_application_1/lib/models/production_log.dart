@@ -13,6 +13,7 @@ class ProductionLog {
   final String? shiftName;
   final int performanceDiff;
   final String? organizationCode;
+  final String? remarks;
 
   ProductionLog({
     required this.id,
@@ -29,6 +30,7 @@ class ProductionLog {
     this.shiftName,
     this.performanceDiff = 0,
     this.organizationCode,
+    this.remarks,
   });
 
   Map<String, dynamic> toJson() {
@@ -47,6 +49,7 @@ class ProductionLog {
       'shiftName': shiftName,
       'performanceDiff': performanceDiff,
       'organizationCode': organizationCode,
+      'remarks': remarks,
     };
   }
 
@@ -66,6 +69,7 @@ class ProductionLog {
       shiftName: json['shiftName'],
       performanceDiff: json['performanceDiff'] ?? 0,
       organizationCode: json['organizationCode'],
+      remarks: json['remarks'],
     );
   }
 }

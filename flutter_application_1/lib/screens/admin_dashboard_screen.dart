@@ -585,6 +585,7 @@ class _ReportsTabState extends State<ReportsTab> {
         TextCellValue('Quantity'),
         TextCellValue('Surplus/Deficit'),
         TextCellValue('Status'),
+        TextCellValue('Remarks'),
       ]);
       for (final log in allLogs) {
         final wName = (log['workerName'] ?? 'Unknown').toString();
@@ -594,6 +595,7 @@ class _ReportsTabState extends State<ReportsTab> {
         final qty = (log['quantity'] ?? 0) as int;
         final diff = (log['performance_diff'] ?? 0) as int;
         String status = diff >= 0 ? 'Surplus' : 'Deficit';
+        final remarks = (log['remarks'] ?? '').toString();
         final createdAtStr = (log['created_at'] ?? '').toString();
         DateTime dt;
         try {
@@ -615,6 +617,7 @@ class _ReportsTabState extends State<ReportsTab> {
           IntCellValue(qty),
           IntCellValue(diff),
           TextCellValue(status),
+          TextCellValue(remarks),
         ]);
       }
 
@@ -1195,10 +1198,28 @@ class _ReportsTabState extends State<ReportsTab> {
                     ).toLocal();
                     final workerName = log['workerName'] ?? 'Unknown';
                     final itemName = log['itemName'] ?? 'Unknown';
+                    final remarks = log['remarks'] as String?;
                     return ListTile(
                       title: Text('$workerName - $itemName'),
-                      subtitle: Text(
-                        '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+                          ),
+                          if (remarks != null && remarks.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4.0),
+                              child: Text(
+                                'Remark: $remarks',
+                                style: const TextStyle(
+                                  fontStyle: FontStyle.italic,
+                                  color: Colors.orange,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                       trailing: Text(
                         DateFormat('MM/dd HH:mm').format(timestamp),

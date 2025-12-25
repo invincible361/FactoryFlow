@@ -28,6 +28,7 @@ class LogService {
         'shift_name': log.shiftName,
         'performance_diff': log.performanceDiff,
         'organization_code': log.organizationCode,
+        'remarks': log.remarks,
         // 'created_at' is handled by default in Postgres
       });
     } catch (e) {

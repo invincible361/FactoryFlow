@@ -26,6 +26,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   Item? _selectedItem;
   String? _selectedOperation;
   final TextEditingController _quantityController = TextEditingController();
+  final TextEditingController _remarksController = TextEditingController();
 
   bool _isSaving = false;
 
@@ -347,6 +348,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 border: OutlineInputBorder(),
               ),
             ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _remarksController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Remarks (Optional)',
+                hintText: 'Add any issues or notes here...',
+                border: OutlineInputBorder(),
+              ),
+            ),
           ],
         ),
         actions: [
@@ -475,6 +486,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         shiftName: _selectedShift ?? _getShiftName(DateTime.now()),
         performanceDiff: performanceDiff,
         organizationCode: widget.worker.organizationCode,
+        remarks: _remarksController.text.isNotEmpty
+            ? _remarksController.text
+            : null,
       );
 
       await LogService().addLog(log);
@@ -494,6 +508,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         _selectedItem = null;
         _selectedMachine = null;
         _quantityController.clear();
+        _remarksController.clear();
         _elapsed = Duration.zero;
       });
     } catch (e) {
