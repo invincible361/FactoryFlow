@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "37828631168",
+    "project_id": "factoryflow-46d05",
+    "storage_bucket": "factoryflow-46d05.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:37828631168:android:acd754981c60779b00a465",
+        "android_client_info": {
+          "package_name": "com.adityajain.factoryflow"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCH3pU33ZINtOh_Fb4ajUFOsuVh2iTY1ps"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

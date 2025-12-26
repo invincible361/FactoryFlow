@@ -6,14 +6,14 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
-import '../models/worker.dart';
+import '../models/employee.dart';
 import '../models/item.dart';
 import '../services/location_service.dart';
 import '../services/log_service.dart';
 
 class ProductionEntryScreen extends StatefulWidget {
-  final Worker worker;
-  const ProductionEntryScreen({super.key, required this.worker});
+  final Employee employee;
+  const ProductionEntryScreen({super.key, required this.employee});
 
   @override
   State<ProductionEntryScreen> createState() => _ProductionEntryScreenState();
@@ -102,8 +102,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final response = await Supabase.instance.client
           .from('production_logs')
           .select('performance_diff, created_at')
-          .eq('worker_id', widget.worker.id)
-          .eq('organization_code', widget.worker.organizationCode ?? '')
+          .eq('worker_id', widget.employee.id)
+          .eq('organization_code', widget.employee.organizationCode ?? '')
           .gte('created_at', dayFrom.toIso8601String());
       int sum = 0;
       for (final l in List<Map<String, dynamic>>.from(response)) {
@@ -235,7 +235,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final resp = await Supabase.instance.client
           .from('organizations')
           .select('organization_name, factory_name, logo_url')
-          .eq('organization_code', widget.worker.organizationCode ?? '')
+          .eq('organization_code', widget.employee.organizationCode ?? '')
           .maybeSingle();
       if (mounted && resp != null) {
         setState(() {
@@ -258,7 +258,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final machinesResponse = await supabase
           .from('machines')
           .select()
-          .eq('organization_code', widget.worker.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!);
       final machinesList = (machinesResponse as List).map((data) {
         return Machine(
           id: data['machine_id'],
@@ -273,7 +273,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final itemsResponse = await supabase
           .from('items')
           .select()
-          .eq('organization_code', widget.worker.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!);
       final itemsList = (itemsResponse as List).map((data) {
         return Item(
           id: data['item_id'],
@@ -288,7 +288,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final shiftsResponse = await supabase
           .from('shifts')
           .select()
-          .eq('organization_code', widget.worker.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!);
       final shiftsList = List<Map<String, dynamic>>.from(shiftsResponse).where((
         s,
       ) {
@@ -340,7 +340,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         final org = await Supabase.instance.client
             .from('organizations')
             .select()
-            .eq('organization_code', widget.worker.organizationCode!)
+            .eq('organization_code', widget.employee.organizationCode!)
             .maybeSingle();
         if (org != null) {
           final lat = (org['latitude'] ?? 0.0) * 1.0;
@@ -463,12 +463,20 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 labelText: 'Remarks (Optional)',
                 hintText: 'Add any issues or notes here...',
                 border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.comment),
               ),
             ),
           ],
         ),
         actions: [
           TextButton(
+            onPressed: () {
+              _resumeTimer(); // Restart timer if cancelled
+              Navigator.pop(context);
+            },
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
             onPressed: () {
               if (_quantityController.text.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -580,7 +588,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
       final log = ProductionLog(
         id: DateTime.now().toIso8601String(),
-        workerId: widget.worker.id,
+        employeeId: widget.employee.id,
         machineId: _selectedMachine!.id,
         itemId: _selectedItem!.id,
         operation: _selectedOperation!,
@@ -592,7 +600,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         longitude: position.longitude,
         shiftName: _selectedShift ?? _getShiftName(DateTime.now()),
         performanceDiff: performanceDiff,
-        organizationCode: widget.worker.organizationCode,
+        organizationCode: widget.employee.organizationCode,
         remarks: _remarksController.text.isNotEmpty
             ? _remarksController.text
             : null,
@@ -700,7 +708,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 2.0),
               child: Text(
-                'Welcome, ${widget.worker.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
+                'Welcome, ${widget.employee.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
                 style: const TextStyle(fontSize: 12),
               ),
             ),
@@ -1101,13 +1109,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     );
   }
 
-  Future<List<Map<String, dynamic>>> _fetchWorkerLogs(DateTime from) async {
+  Future<List<Map<String, dynamic>>> _fetchEmployeeLogs(DateTime from) async {
     final supabase = Supabase.instance.client;
     final response = await supabase
         .from('production_logs')
         .select()
-        .eq('worker_id', widget.worker.id)
-        .eq('organization_code', widget.worker.organizationCode ?? '')
+        .eq('worker_id', widget.employee.id)
+        .eq('organization_code', widget.employee.organizationCode ?? '')
         .gte('created_at', from.toIso8601String())
         .order('created_at', ascending: true);
     return List<Map<String, dynamic>>.from(response);
@@ -1118,10 +1126,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     final dayFrom = DateTime(now.year, now.month, now.day);
     final weekFrom = now.subtract(const Duration(days: 6));
     final monthFrom = now.subtract(const Duration(days: 29));
-    final dayLogs = await _fetchWorkerLogs(dayFrom);
-    final weekLogs = await _fetchWorkerLogs(weekFrom);
-    final monthLogs = await _fetchWorkerLogs(monthFrom);
-    final extraWeeks = await _fetchWorkerLogs(
+    final dayLogs = await _fetchEmployeeLogs(dayFrom);
+    final weekLogs = await _fetchEmployeeLogs(weekFrom);
+    final monthLogs = await _fetchEmployeeLogs(monthFrom);
+    final extraWeeks = await _fetchEmployeeLogs(
       now.subtract(const Duration(days: 7 * 8)),
     );
     if (!mounted) return;

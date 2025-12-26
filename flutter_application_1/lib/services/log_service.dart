@@ -16,7 +16,7 @@ class LogService {
 
     try {
       await Supabase.instance.client.from('production_logs').insert({
-        'worker_id': log.workerId,
+        'worker_id': log.employeeId,
         'machine_id': log.machineId,
         'item_id': log.itemId,
         'operation': log.operation,

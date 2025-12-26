@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:image_picker/image_picker.dart';
-import '../models/worker.dart';
+import '../models/employee.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
@@ -114,7 +114,7 @@ class _LoginScreenState extends State<LoginScreen> {
           return;
         }
 
-        // 2. Worker Login Checks
+        // 2. Employee Login Checks
         // Check location first
         final position = await _locationService.getCurrentLocation();
         final isInside = _locationService.isInside(
@@ -157,13 +157,13 @@ class _LoginScreenState extends State<LoginScreen> {
           throw StateError('Invalid username or password');
         }
 
-        final worker = Worker.fromJson(response);
+        final employee = Employee.fromJson(response);
 
         if (!mounted) return;
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (context) => ProductionEntryScreen(worker: worker),
+            builder: (context) => ProductionEntryScreen(employee: employee),
           ),
         );
       } catch (e) {

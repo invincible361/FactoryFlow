@@ -119,7 +119,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           isScrollable: true,
           tabs: const [
             Tab(text: 'Reports'),
-            Tab(text: 'Workers'),
+            Tab(text: 'Employees'),
             Tab(text: 'Machines'),
             Tab(text: 'Items'),
             Tab(text: 'Shifts'),
@@ -131,7 +131,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         controller: _tabController,
         children: [
           ReportsTab(organizationCode: widget.organizationCode),
-          WorkersTab(organizationCode: widget.organizationCode),
+          EmployeesTab(organizationCode: widget.organizationCode),
           MachinesTab(organizationCode: widget.organizationCode),
           ItemsTab(organizationCode: widget.organizationCode),
           ShiftsTab(organizationCode: widget.organizationCode),
@@ -156,13 +156,13 @@ class _ReportsTabState extends State<ReportsTab> {
   bool _isLoading = true;
   bool _isExporting = false;
   String _filter = 'All'; // All, Today, Week, Month
-  List<Map<String, dynamic>> _workers = [];
-  String? _selectedWorkerId;
+  List<Map<String, dynamic>> _employees = [];
+  String? _selectedEmployeeId;
   List<Map<String, dynamic>> _weekLogs = [];
   List<Map<String, dynamic>> _monthLogs = [];
   List<Map<String, dynamic>> _extraWeekLogs = [];
   int _extraUnitsToday = 0;
-  bool _isWorkerScope = false;
+  bool _isEmployeeScope = false;
   String _linePeriod = 'Week';
   List<FlSpot> _lineSpots = [];
 
@@ -211,7 +211,7 @@ class _ReportsTabState extends State<ReportsTab> {
   void initState() {
     super.initState();
     _fetchLogs();
-    _fetchWorkersForDropdown();
+    _fetchEmployeesForDropdown();
     _fetchExtraUnitsTodayOrg();
     _refreshLineData();
   }
@@ -279,30 +279,30 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  Future<void> _fetchWorkersForDropdown() async {
+  Future<void> _fetchEmployeesForDropdown() async {
     try {
       final resp = await _supabase
           .from('workers')
           .select('worker_id, name')
           .eq('organization_code', widget.organizationCode);
       setState(() {
-        _workers = List<Map<String, dynamic>>.from(resp);
+        _employees = List<Map<String, dynamic>>.from(resp);
       });
     } catch (e) {
-      debugPrint('Fetch workers for dropdown error: $e');
+      debugPrint('Fetch employees for dropdown error: $e');
     }
   }
 
   Future<List<Map<String, dynamic>>> _fetchLogsFrom(
     DateTime from, {
-    String? workerId,
+    String? employeeId,
   }) async {
-    if (workerId != null) {
+    if (employeeId != null) {
       final response = await _supabase
           .from('production_logs')
           .select()
           .eq('organization_code', widget.organizationCode)
-          .eq('worker_id', workerId)
+          .eq('worker_id', employeeId)
           .gte('created_at', from.toIso8601String())
           .order('created_at', ascending: true);
       return List<Map<String, dynamic>>.from(response);
@@ -317,15 +317,15 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  Future<void> _loadSelectedWorkerCharts(String workerId) async {
+  Future<void> _loadSelectedEmployeeCharts(String employeeId) async {
     final now = DateTime.now();
     final weekFrom = now.subtract(const Duration(days: 6));
     final monthFrom = now.subtract(const Duration(days: 29));
     final extraFrom = now.subtract(const Duration(days: 7 * 8));
     try {
-      final w = await _fetchLogsFrom(weekFrom, workerId: workerId);
-      final m = await _fetchLogsFrom(monthFrom, workerId: workerId);
-      final e = await _fetchLogsFrom(extraFrom, workerId: workerId);
+      final w = await _fetchLogsFrom(weekFrom, employeeId: employeeId);
+      final m = await _fetchLogsFrom(monthFrom, employeeId: employeeId);
+      final e = await _fetchLogsFrom(extraFrom, employeeId: employeeId);
       if (mounted) {
         setState(() {
           _weekLogs = w;
@@ -334,7 +334,7 @@ class _ReportsTabState extends State<ReportsTab> {
         });
       }
     } catch (e) {
-      debugPrint('Load worker charts error: $e');
+      debugPrint('Load employee charts error: $e');
     }
   }
 
@@ -463,7 +463,7 @@ class _ReportsTabState extends State<ReportsTab> {
     List<Map<String, dynamic>> rawLogs,
   ) async {
     try {
-      final workersResp = await _supabase
+      final employeesResp = await _supabase
           .from('workers')
           .select('worker_id, name')
           .eq('organization_code', widget.organizationCode);
@@ -471,12 +471,12 @@ class _ReportsTabState extends State<ReportsTab> {
           .from('items')
           .select('item_id, name')
           .eq('organization_code', widget.organizationCode);
-      final workerMap = <String, String>{};
+      final employeeMap = <String, String>{};
       final itemMap = <String, String>{};
-      for (final w in List<Map<String, dynamic>>.from(workersResp)) {
+      for (final w in List<Map<String, dynamic>>.from(employeesResp)) {
         final id = w['worker_id']?.toString() ?? '';
         final name = w['name']?.toString() ?? '';
-        if (id.isNotEmpty) workerMap[id] = name;
+        if (id.isNotEmpty) employeeMap[id] = name;
       }
       for (final it in List<Map<String, dynamic>>.from(itemsResp)) {
         final id = it['item_id']?.toString() ?? '';
@@ -488,7 +488,7 @@ class _ReportsTabState extends State<ReportsTab> {
         final iid = log['item_id']?.toString() ?? '';
         return {
           ...log,
-          'workerName': workerMap[wid] ?? 'Unknown',
+          'employeeName': employeeMap[wid] ?? 'Unknown',
           'itemName': itemMap[iid] ?? 'Unknown',
         };
       }).toList();
@@ -497,32 +497,32 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  // Aggregate logs: Worker -> Item -> Operation -> {qty, diff, workerName}
+  // Aggregate logs: Employee -> Item -> Operation -> {qty, diff, employeeName}
   Map<String, Map<String, Map<String, Map<String, dynamic>>>>
   _getAggregatedData() {
     final Map<String, Map<String, Map<String, Map<String, dynamic>>>> data = {};
 
     for (var log in _logs) {
-      final worker = log['worker_id'] as String;
-      final workerName = (log['workerName'] ?? 'Unknown') as String;
+      final employeeId = log['worker_id'] as String;
+      final employeeName = (log['employeeName'] ?? 'Unknown') as String;
 
       final item = log['item_id'] as String;
       final op = log['operation'] as String;
       final qty = log['quantity'] as int;
       final diff = (log['performance_diff'] ?? 0) as int;
 
-      data.putIfAbsent(worker, () => {});
-      data[worker]!.putIfAbsent(item, () => {});
-      data[worker]![item]!.putIfAbsent(
+      data.putIfAbsent(employeeId, () => {});
+      data[employeeId]!.putIfAbsent(item, () => {});
+      data[employeeId]![item]!.putIfAbsent(
         op,
-        () => {'qty': 0, 'diff': 0, 'workerName': workerName},
+        () => {'qty': 0, 'diff': 0, 'employeeName': employeeName},
       );
 
-      final current = data[worker]![item]![op]!;
-      data[worker]![item]![op] = {
+      final current = data[employeeId]![item]![op]!;
+      data[employeeId]![item]![op] = {
         'qty': current['qty'] + qty,
         'diff': current['diff'] + diff,
-        'workerName': workerName,
+        'employeeName': employeeName,
       };
     }
     return data;
@@ -546,8 +546,8 @@ class _ReportsTabState extends State<ReportsTab> {
 
       // Headers
       sheetObject.appendRow([
-        TextCellValue('Worker Name'),
-        TextCellValue('Worker ID'),
+        TextCellValue('Employee Name'),
+        TextCellValue('Employee ID'),
         TextCellValue('Item ID'),
         TextCellValue('Operation'),
         TextCellValue('Total Quantity'),
@@ -564,17 +564,17 @@ class _ReportsTabState extends State<ReportsTab> {
       _logs = tempLogs; // Restore display logs
 
       // 4. Write Rows
-      aggregated.forEach((workerId, items) {
+      aggregated.forEach((employeeId, items) {
         items.forEach((itemId, ops) {
           ops.forEach((opName, data) {
             final qty = data['qty'];
             final diff = data['diff'];
-            final wName = data['workerName'];
+            final eName = data['employeeName'];
             String status = diff >= 0 ? 'Surplus' : 'Deficit';
 
             sheetObject.appendRow([
-              TextCellValue(wName),
-              TextCellValue(workerId),
+              TextCellValue(eName),
+              TextCellValue(employeeId),
               TextCellValue(itemId),
               TextCellValue(opName),
               IntCellValue(qty),
@@ -587,8 +587,8 @@ class _ReportsTabState extends State<ReportsTab> {
 
       Sheet detailsSheet = excel['Detailed Logs'];
       detailsSheet.appendRow([
-        TextCellValue('Worker Name'),
-        TextCellValue('Worker ID'),
+        TextCellValue('Employee Name'),
+        TextCellValue('Employee ID'),
         TextCellValue('Item ID'),
         TextCellValue('Operation'),
         TextCellValue('Date'),
@@ -600,8 +600,8 @@ class _ReportsTabState extends State<ReportsTab> {
         TextCellValue('Remarks'),
       ]);
       for (final log in allLogs) {
-        final wName = (log['workerName'] ?? 'Unknown').toString();
-        final workerId = (log['worker_id'] ?? '').toString();
+        final eName = (log['employeeName'] ?? 'Unknown').toString();
+        final employeeId = (log['worker_id'] ?? '').toString();
         final itemId = (log['item_id'] ?? '').toString();
         final opName = (log['operation'] ?? '').toString();
         final qty = (log['quantity'] ?? 0) as int;
@@ -619,8 +619,8 @@ class _ReportsTabState extends State<ReportsTab> {
         final timeStr = DateFormat('HH:mm').format(dt);
         final machineId = (log['machine_id'] ?? '').toString();
         detailsSheet.appendRow([
-          TextCellValue(wName),
-          TextCellValue(workerId),
+          TextCellValue(eName),
+          TextCellValue(employeeId),
           TextCellValue(itemId),
           TextCellValue(opName),
           TextCellValue(dateStr),
@@ -720,7 +720,7 @@ class _ReportsTabState extends State<ReportsTab> {
       }
       final logs = await _fetchLogsFrom(
         from,
-        workerId: _isWorkerScope ? _selectedWorkerId : null,
+        employeeId: _isEmployeeScope ? _selectedEmployeeId : null,
       );
       final buckets = List<double>.filled(bucketsCount, 0);
       for (final l in logs) {
@@ -755,7 +755,7 @@ class _ReportsTabState extends State<ReportsTab> {
       onRefresh: () async {
         await Future.wait([
           _fetchLogs(),
-          _fetchWorkersForDropdown(),
+          _fetchEmployeesForDropdown(),
           _fetchExtraUnitsTodayOrg(),
           _refreshLineData(),
         ]);
@@ -821,8 +821,8 @@ class _ReportsTabState extends State<ReportsTab> {
                   Icons.trending_up,
                 ),
                 _metricTile(
-                  'Workers',
-                  '${_workers.length}',
+                  'Employees',
+                  '${_employees.length}',
                   Colors.blue.shade100,
                   Icons.people,
                 ),
@@ -847,37 +847,37 @@ class _ReportsTabState extends State<ReportsTab> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Checkbox(
-                          value: !_isWorkerScope,
+                          value: !_isEmployeeScope,
                           onChanged: (v) {
                             setState(() {
-                              _isWorkerScope = false;
+                              _isEmployeeScope = false;
                             });
                             _refreshLineData();
                           },
                         ),
-                        const Text('All workers'),
+                        const Text('All employees'),
                       ],
                     ),
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Checkbox(
-                          value: _isWorkerScope,
+                          value: _isEmployeeScope,
                           onChanged: (v) {
                             setState(() {
-                              _isWorkerScope = true;
+                              _isEmployeeScope = true;
                             });
                             _refreshLineData();
                           },
                         ),
-                        const Text('Specific worker'),
+                        const Text('Specific employee'),
                       ],
                     ),
-                    if (_isWorkerScope)
+                    if (_isEmployeeScope)
                       DropdownButton<String>(
-                        value: _selectedWorkerId,
-                        hint: const Text('Select worker'),
-                        items: _workers.map((w) {
+                        value: _selectedEmployeeId,
+                        hint: const Text('Select employee'),
+                        items: _employees.map((w) {
                           final id = (w['worker_id'] ?? '').toString();
                           final name = (w['name'] ?? '').toString();
                           return DropdownMenuItem<String>(
@@ -886,7 +886,7 @@ class _ReportsTabState extends State<ReportsTab> {
                           );
                         }).toList(),
                         onChanged: (v) {
-                          setState(() => _selectedWorkerId = v);
+                          setState(() => _selectedEmployeeId = v);
                           _refreshLineData();
                         },
                       ),
@@ -1023,20 +1023,20 @@ class _ReportsTabState extends State<ReportsTab> {
               ],
             ),
           ),
-          // Worker selection and graphs
-          if (_workers.isNotEmpty)
+          // Employee selection and graphs
+          if (_employees.isNotEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8.0),
               child: Row(
                 children: [
                   const Text(
-                    'Worker: ',
+                    'Employee: ',
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   DropdownButton<String>(
-                    value: _selectedWorkerId,
-                    hint: const Text('Select worker'),
-                    items: _workers.map((w) {
+                    value: _selectedEmployeeId,
+                    hint: const Text('Select employee'),
+                    items: _employees.map((w) {
                       final id = (w['worker_id'] ?? '').toString();
                       final name = (w['name'] ?? '').toString();
                       return DropdownMenuItem<String>(
@@ -1046,17 +1046,17 @@ class _ReportsTabState extends State<ReportsTab> {
                     }).toList(),
                     onChanged: (v) {
                       setState(() {
-                        _selectedWorkerId = v;
+                        _selectedEmployeeId = v;
                       });
                       if (v != null) {
-                        _loadSelectedWorkerCharts(v);
+                        _loadSelectedEmployeeCharts(v);
                       }
                     },
                   ),
                 ],
               ),
             ),
-          if (_selectedWorkerId != null)
+          if (_selectedEmployeeId != null)
             Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: 12.0,
@@ -1229,11 +1229,11 @@ class _ReportsTabState extends State<ReportsTab> {
                       final timestamp = DateTime.parse(
                         log['created_at'],
                       ).toLocal();
-                      final workerName = log['workerName'] ?? 'Unknown';
+                      final employeeName = log['employeeName'] ?? 'Unknown';
                       final itemName = log['itemName'] ?? 'Unknown';
                       final remarks = log['remarks'] as String?;
                       return ListTile(
-                        title: Text('$workerName - $itemName'),
+                        title: Text('$employeeName - $itemName'),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -1270,20 +1270,20 @@ class _ReportsTabState extends State<ReportsTab> {
 // ---------------------------------------------------------------------------
 // 2. WORKERS TAB
 // ---------------------------------------------------------------------------
-class WorkersTab extends StatefulWidget {
+class EmployeesTab extends StatefulWidget {
   final String organizationCode;
-  const WorkersTab({super.key, required this.organizationCode});
+  const EmployeesTab({super.key, required this.organizationCode});
 
   @override
-  State<WorkersTab> createState() => _WorkersTabState();
+  State<EmployeesTab> createState() => _EmployeesTabState();
 }
 
-class _WorkersTabState extends State<WorkersTab> {
+class _EmployeesTabState extends State<EmployeesTab> {
   final _supabase = Supabase.instance.client;
-  List<Map<String, dynamic>> _workers = [];
+  List<Map<String, dynamic>> _employeesList = [];
   bool _isLoading = true;
 
-  final _workerIdController = TextEditingController();
+  final _employeeIdController = TextEditingController();
   final _nameController = TextEditingController();
   final _panController = TextEditingController();
   final _aadharController = TextEditingController();
@@ -1295,10 +1295,10 @@ class _WorkersTabState extends State<WorkersTab> {
   @override
   void initState() {
     super.initState();
-    _fetchWorkers();
+    _fetchEmployees();
   }
 
-  Future<void> _fetchWorkers() async {
+  Future<void> _fetchEmployees() async {
     setState(() => _isLoading = true);
     try {
       final response = await _supabase
@@ -1307,7 +1307,7 @@ class _WorkersTabState extends State<WorkersTab> {
           .eq('organization_code', widget.organizationCode);
       if (mounted) {
         setState(() {
-          _workers = List<Map<String, dynamic>>.from(response);
+          _employeesList = List<Map<String, dynamic>>.from(response);
           _isLoading = false;
         });
       }
@@ -1325,22 +1325,22 @@ class _WorkersTabState extends State<WorkersTab> {
     }
   }
 
-  Future<void> _deleteWorker(String workerId) async {
+  Future<void> _deleteEmployee(String employeeId) async {
     try {
       // First delete associated production logs
       await _supabase
           .from('production_logs')
           .delete()
-          .eq('worker_id', workerId);
+          .eq('worker_id', employeeId);
 
-      // Then delete the worker
-      await _supabase.from('workers').delete().eq('worker_id', workerId);
+      // Then delete the worker (table is still 'workers' in DB)
+      await _supabase.from('workers').delete().eq('worker_id', employeeId);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Worker and associated logs deleted')),
+          const SnackBar(content: Text('Employee and associated logs deleted')),
         );
-        _fetchWorkers();
+        _fetchEmployees();
       }
     } catch (e) {
       if (mounted) {
@@ -1351,7 +1351,7 @@ class _WorkersTabState extends State<WorkersTab> {
     }
   }
 
-  Future<void> _addWorker() async {
+  Future<void> _addEmployee() async {
     // Basic validation
     final panRegex = RegExp(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$');
     final aadharRegex = RegExp(r'^[0-9]{12}$');
@@ -1379,7 +1379,7 @@ class _WorkersTabState extends State<WorkersTab> {
 
     try {
       await _supabase.from('workers').insert({
-        'worker_id': _workerIdController.text,
+        'worker_id': _employeeIdController.text,
         'name': _nameController.text,
         'pan_card': panValue.isEmpty ? null : panValue,
         'aadhar_card': _aadharController.text,
@@ -1392,9 +1392,9 @@ class _WorkersTabState extends State<WorkersTab> {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('Worker added!')));
+        ).showSnackBar(const SnackBar(content: Text('Employee added!')));
         _clearControllers();
-        _fetchWorkers();
+        _fetchEmployees();
       }
     } catch (e) {
       if (mounted) {
@@ -1405,8 +1405,116 @@ class _WorkersTabState extends State<WorkersTab> {
     }
   }
 
+  Future<void> _editEmployee(Map<String, dynamic> employee) async {
+    final nameEditController = TextEditingController(text: employee['name']);
+    final panEditController = TextEditingController(text: employee['pan_card']);
+    final aadharEditController = TextEditingController(
+      text: employee['aadhar_card'],
+    );
+    final ageEditController = TextEditingController(
+      text: employee['age']?.toString(),
+    );
+    final mobileEditController = TextEditingController(
+      text: employee['mobile_number'],
+    );
+    final usernameEditController = TextEditingController(
+      text: employee['username'],
+    );
+    final passwordEditController = TextEditingController(
+      text: employee['password'],
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Edit Employee: ${employee['worker_id']}'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameEditController,
+                decoration: const InputDecoration(labelText: 'Name'),
+              ),
+              TextField(
+                controller: panEditController,
+                decoration: const InputDecoration(labelText: 'PAN Card'),
+              ),
+              TextField(
+                controller: aadharEditController,
+                decoration: const InputDecoration(labelText: 'Aadhar Card'),
+              ),
+              TextField(
+                controller: ageEditController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Age'),
+              ),
+              TextField(
+                controller: mobileEditController,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Mobile Number'),
+              ),
+              TextField(
+                controller: usernameEditController,
+                decoration: const InputDecoration(labelText: 'Username'),
+              ),
+              TextField(
+                controller: passwordEditController,
+                decoration: const InputDecoration(labelText: 'Password'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              final nav = Navigator.of(ctx);
+              try {
+                await _supabase
+                    .from('workers')
+                    .update({
+                      'name': nameEditController.text,
+                      'pan_card': panEditController.text.isEmpty
+                          ? null
+                          : panEditController.text,
+                      'aadhar_card': aadharEditController.text,
+                      'age': int.tryParse(ageEditController.text),
+                      'mobile_number': mobileEditController.text,
+                      'username': usernameEditController.text,
+                      'password': passwordEditController.text,
+                    })
+                    .eq('worker_id', employee['worker_id'])
+                    .eq('organization_code', widget.organizationCode);
+
+                if (mounted) {
+                  nav.pop();
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Employee updated!')),
+                  );
+                  _fetchEmployees();
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text('Error: $e')));
+                }
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _clearControllers() {
-    _workerIdController.clear();
+    _employeeIdController.clear();
     _nameController.clear();
     _panController.clear();
     _aadharController.clear();
@@ -1419,17 +1527,17 @@ class _WorkersTabState extends State<WorkersTab> {
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      onRefresh: _fetchWorkers,
+      onRefresh: _fetchEmployees,
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ListView(
           children: [
             ExpansionTile(
-              title: const Text('Add New Worker'),
+              title: const Text('Add New Employee'),
               children: [
                 TextField(
-                  controller: _workerIdController,
-                  decoration: const InputDecoration(labelText: 'Worker ID'),
+                  controller: _employeeIdController,
+                  decoration: const InputDecoration(labelText: 'Employee ID'),
                 ),
                 TextField(
                   controller: _nameController,
@@ -1466,8 +1574,8 @@ class _WorkersTabState extends State<WorkersTab> {
                 ),
                 const SizedBox(height: 10),
                 ElevatedButton(
-                  onPressed: _addWorker,
-                  child: const Text('Add Worker'),
+                  onPressed: _addEmployee,
+                  child: const Text('Add Employee'),
                 ),
               ],
             ),
@@ -1478,16 +1586,28 @@ class _WorkersTabState extends State<WorkersTab> {
               ListView.builder(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                itemCount: _workers.length,
+                itemCount: _employeesList.length,
                 itemBuilder: (context, index) {
-                  final worker = _workers[index];
+                  final employee = _employeesList[index];
                   return Card(
                     child: ListTile(
-                      title: Text('${worker['name']} (${worker['worker_id']})'),
-                      subtitle: Text('Mobile: ${worker['mobile_number']}'),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete, color: Colors.red),
-                        onPressed: () => _deleteWorker(worker['worker_id']),
+                      title: Text(
+                        '${employee['name']} (${employee['worker_id']})',
+                      ),
+                      subtitle: Text('Mobile: ${employee['mobile_number']}'),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit, color: Colors.blue),
+                            onPressed: () => _editEmployee(employee),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () =>
+                                _deleteEmployee(employee['worker_id']),
+                          ),
+                        ],
                       ),
                     ),
                   );

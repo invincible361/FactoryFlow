@@ -1,18 +1,18 @@
 import '../models/machine.dart';
-import '../models/worker.dart';
+import '../models/employee.dart';
 import '../models/item.dart';
 
 class MockData {
   static final List<Machine> machines = _generateMachines();
-  static final List<Worker> workers = _generateWorkers();
+  static final List<Employee> employees = _generateEmployees();
 
-  static List<Worker> _generateWorkers() {
-    List<Worker> list = [];
+  static List<Employee> _generateEmployees() {
+    List<Employee> list = [];
     for (int i = 1; i <= 50; i++) {
-      list.add(Worker(
-        id: 'W-${i.toString().padLeft(3, '0')}',
-        name: 'Worker $i',
-        username: 'worker$i',
+      list.add(Employee(
+        id: 'E-${i.toString().padLeft(3, '0')}',
+        name: 'Employee $i',
+        username: 'employee$i',
         password: 'password$i',
       ));
     }

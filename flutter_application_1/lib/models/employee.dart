@@ -1,4 +1,4 @@
-class Worker {
+class Employee {
   final String id;
   final String name;
   final String username;
@@ -9,7 +9,7 @@ class Worker {
   final int? age;
   final String? mobileNumber;
 
-  Worker({
+  Employee({
     required this.id,
     required this.name,
     required this.username,
@@ -21,8 +21,8 @@ class Worker {
     this.mobileNumber,
   });
 
-  factory Worker.fromJson(Map<String, dynamic> json) {
-    return Worker(
+  factory Employee.fromJson(Map<String, dynamic> json) {
+    return Employee(
       id: json['worker_id'] ?? '',
       name: json['name'] ?? '',
       username: json['username'] ?? '',

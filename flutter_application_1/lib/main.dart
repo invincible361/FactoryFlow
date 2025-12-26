@@ -67,7 +67,7 @@ class MyApp extends StatelessWidget {
                   Set<WidgetState> states,
                 ) {
                   if (states.contains(WidgetState.pressed)) {
-                    return Colors.white.withOpacity(0.1);
+                    return Colors.white.withValues(alpha: 0.1);
                   }
                   return null;
                 }),

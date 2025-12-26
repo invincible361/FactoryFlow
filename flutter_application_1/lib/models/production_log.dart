@@ -1,6 +1,6 @@
 class ProductionLog {
   final String id;
-  final String workerId;
+  final String employeeId;
   final String machineId;
   final String itemId;
   final String operation;
@@ -17,7 +17,7 @@ class ProductionLog {
 
   ProductionLog({
     required this.id,
-    required this.workerId,
+    required this.employeeId,
     required this.machineId,
     required this.itemId,
     required this.operation,
@@ -36,7 +36,7 @@ class ProductionLog {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
-      'workerId': workerId,
+      'employeeId': employeeId,
       'machineId': machineId,
       'itemId': itemId,
       'operation': operation,
@@ -56,7 +56,7 @@ class ProductionLog {
   factory ProductionLog.fromJson(Map<String, dynamic> json) {
     return ProductionLog(
       id: json['id'],
-      workerId: json['workerId'],
+      employeeId: json['employeeId'],
       machineId: json['machineId'],
       itemId: json['itemId'],
       operation: json['operation'],
