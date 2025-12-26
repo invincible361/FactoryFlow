@@ -209,76 +209,94 @@ class _LoginScreenState extends State<LoginScreen> {
             key: _formKey,
             child: SingleChildScrollView(
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Image.asset(
-                    'assets/images/logo.png',
-                    height: 120,
-                    errorBuilder: (context, error, stackTrace) {
-                      return const Icon(
-                        Icons.factory,
-                        size: 80,
-                        color: Colors.blue,
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 30),
-                  TextFormField(
-                    controller: _orgCodeController,
-                    decoration: const InputDecoration(
-                      labelText: 'Organization Code',
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight:
+                      MediaQuery.of(context).size.height -
+                      MediaQuery.of(context).padding.top -
+                      MediaQuery.of(context).padding.bottom -
+                      kToolbarHeight -
+                      32, // 32 is total vertical padding
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Image.asset(
+                      'assets/images/logo.png',
+                      height:
+                          MediaQuery.of(context).orientation ==
+                              Orientation.landscape
+                          ? 80
+                          : 120,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Icon(
+                          Icons.factory,
+                          size:
+                              MediaQuery.of(context).orientation ==
+                                  Orientation.landscape
+                              ? 60
+                              : 80,
+                          color: Colors.blue,
+                        );
+                      },
                     ),
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter organization code';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _usernameController,
-                    decoration: const InputDecoration(labelText: 'Username'),
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter username';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _passwordController,
-                    decoration: const InputDecoration(labelText: 'Password'),
-                    obscureText: true,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Please enter password';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 24),
-                  if (_isLoading)
-                    const CircularProgressIndicator()
-                  else
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: _orgCodeController,
+                      decoration: const InputDecoration(
+                        labelText: 'Organization Code',
+                      ),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter organization code';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _usernameController,
+                      decoration: const InputDecoration(labelText: 'Username'),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter username';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _passwordController,
+                      decoration: const InputDecoration(labelText: 'Password'),
+                      obscureText: true,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter password';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 24),
+                    if (_isLoading)
+                      const CircularProgressIndicator()
+                    else
+                      ElevatedButton(
+                        onPressed: _login,
+                        child: const Text('Login'),
+                      ),
+                    const SizedBox(height: 24),
                     ElevatedButton(
-                      onPressed: _login,
-                      child: const Text('Login'),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const FactoryRegistrationPage(),
+                          ),
+                        );
+                      },
+                      child: const Text('Register Factory'),
                     ),
-                  const SizedBox(height: 24),
-                  ElevatedButton(
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const FactoryRegistrationPage(),
-                        ),
-                      );
-                    },
-                    child: const Text('Register Factory'),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),

@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:uuid/uuid.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:workmanager/workmanager.dart';
+import '../main.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
 import '../models/employee.dart';
@@ -54,45 +58,53 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   String? _logoUrl;
   String? _currentLogId;
   Widget _metricTile(String title, String value, Color color, IconData icon) {
-    return Container(
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: Colors.black87),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    height: 1.15,
-                  ),
-                ),
-              ],
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isLandscape =
+            MediaQuery.of(context).orientation == Orientation.landscape;
+        return Container(
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(16),
           ),
-        ],
-      ),
+          padding: EdgeInsets.all(isLandscape ? 8 : 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.black87, size: isLandscape ? 20 : 24),
+              SizedBox(width: isLandscape ? 8 : 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: isLandscape ? 10 : 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: isLandscape ? 12 : 14,
+                        fontWeight: FontWeight.bold,
+                        height: 1.15,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -130,6 +142,35 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) setState(() {});
     });
+  }
+
+  Future<void> _initializeBackgroundTasks() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('worker_id', widget.employee.id);
+    if (widget.employee.organizationCode != null) {
+      await prefs.setString('org_code', widget.employee.organizationCode!);
+    }
+
+    // Workmanager periodic tasks are only supported on Android.
+    // On iOS, we would need to use registerOneOffTask or a different background strategy.
+    if (!kIsWeb && Platform.isAndroid) {
+      await Workmanager().registerPeriodicTask(
+        "1",
+        syncLocationTask,
+        frequency: const Duration(minutes: 15),
+        constraints: Constraints(networkType: NetworkType.connected),
+      );
+
+      await Workmanager().registerPeriodicTask(
+        "2",
+        shiftEndReminderTask,
+        frequency: const Duration(minutes: 15),
+      );
+    } else if (!kIsWeb && Platform.isIOS) {
+      // iOS specific background task registration if needed
+      // For now, we skip to avoid the "unhandledMethod" crash
+      debugPrint('Periodic tasks are not supported on iOS via Workmanager.');
+    }
   }
 
   Future<void> _loadPersistedState() async {
@@ -309,7 +350,17 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           .from('shifts')
           .select()
           .eq('organization_code', widget.employee.organizationCode!);
-      final shiftsList = List<Map<String, dynamic>>.from(shiftsResponse);
+
+      // Deduplicate shifts by name to prevent dropdown crashes
+      final List<Map<String, dynamic>> shiftsList = [];
+      final Set<String> shiftNames = {};
+      for (var s in (shiftsResponse as List)) {
+        final name = s['name']?.toString() ?? '';
+        if (name.isNotEmpty && !shiftNames.contains(name)) {
+          shiftNames.add(name);
+          shiftsList.add(Map<String, dynamic>.from(s));
+        }
+      }
 
       if (mounted) {
         setState(() {
@@ -411,6 +462,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       _currentLogId = logId;
     });
 
+    // Start background tasks only when production starts
+    await _initializeBackgroundTasks();
+
+    // Record attendance check-in
+    await _updateAttendance(isCheckOut: false);
+
     // Save initial log for "In" time visibility
     try {
       final initialLog = ProductionLog(
@@ -487,6 +544,90 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       return 'Day Shift (07:30 AM - 07:30 PM)';
     } else {
       return 'Night Shift (07:30 PM - 07:30 AM)';
+    }
+  }
+
+  Future<void> _updateAttendance({bool isCheckOut = false}) async {
+    try {
+      final now = DateTime.now();
+      final dateStr = DateFormat('yyyy-MM-dd').format(now);
+      final supabase = Supabase.instance.client;
+
+      final shift = _shifts.firstWhere(
+        (s) => s['name'] == _selectedShift,
+        orElse: () => <String, dynamic>{},
+      );
+
+      final payload = {
+        'worker_id': widget.employee.id,
+        'organization_code': widget.employee.organizationCode,
+        'date': dateStr,
+        'shift_name': _selectedShift,
+        'shift_start_time': shift['start_time'],
+        'shift_end_time': shift['end_time'],
+      };
+
+      if (!isCheckOut) {
+        final existing = await supabase
+            .from('attendance')
+            .select()
+            .eq('worker_id', widget.employee.id)
+            .eq('date', dateStr)
+            .eq('organization_code', widget.employee.organizationCode!)
+            .maybeSingle();
+
+        if (existing == null) {
+          payload['check_in'] = now.toIso8601String();
+          await supabase.from('attendance').insert(payload);
+        }
+      } else {
+        payload['check_out'] = now.toIso8601String();
+
+        if (shift.isNotEmpty) {
+          try {
+            final format = DateFormat('hh:mm a');
+            final shiftEndDt = format.parse(shift['end_time']);
+            final shiftStartDt = format.parse(shift['start_time']);
+
+            DateTime shiftEndToday = DateTime(
+              now.year,
+              now.month,
+              now.day,
+              shiftEndDt.hour,
+              shiftEndDt.minute,
+            );
+
+            if (shiftEndDt.isBefore(shiftStartDt)) {
+              // Night shift logic
+              if (now.hour >= shiftStartDt.hour || now.hour < shiftEndDt.hour) {
+                if (now.hour >= shiftStartDt.hour) {
+                  shiftEndToday = shiftEndToday.add(const Duration(days: 1));
+                }
+              }
+            }
+
+            final diffMinutes = now.difference(shiftEndToday).inMinutes;
+            final isEarly = diffMinutes < -15;
+            final isOvertime = diffMinutes > 15;
+
+            payload['is_early_leave'] = isEarly;
+            payload['is_overtime'] = isOvertime;
+            payload['status'] = isEarly && isOvertime
+                ? 'Both'
+                : (isEarly
+                      ? 'Early Leave'
+                      : (isOvertime ? 'Overtime' : 'On Time'));
+          } catch (e) {
+            debugPrint('Error calculating shift end for attendance: $e');
+          }
+        }
+
+        await supabase
+            .from('attendance')
+            .upsert(payload, onConflict: 'worker_id,date,organization_code');
+      }
+    } catch (e) {
+      debugPrint('Error updating attendance: $e');
     }
   }
 
@@ -686,6 +827,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
       await LogService().addLog(log);
 
+      // Record attendance check-out
+      await _updateAttendance(isCheckOut: true);
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Production Log Saved Successfully!')),
@@ -710,6 +854,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
   void _resetForm() {
     _timer?.cancel();
+    // Cancel background tasks when production finishes
+    if (!kIsWeb) {
+      Workmanager().cancelAll();
+    }
+
     setState(() {
       _isTimerRunning = false;
       _startTime = null;
@@ -753,6 +902,44 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         ),
       ),
     );
+  }
+
+  String _getShiftTimeLeft() {
+    if (_selectedShift == null) return '';
+    try {
+      final now = DateTime.now();
+      final shift = _shifts.firstWhere((s) => s['name'] == _selectedShift);
+      final endStr = shift['end_time'] as String;
+      final format = DateFormat('hh:mm a');
+      final endDt = format.parse(endStr);
+
+      DateTime shiftEnd = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        endDt.hour,
+        endDt.minute,
+      );
+
+      // Handle night shift crossing midnight
+      final startStr = shift['start_time'] as String;
+      final startDt = format.parse(startStr);
+      if (endDt.isBefore(startDt)) {
+        // If end time is earlier than start time, it means end time is on the next day
+        if (now.hour >= startDt.hour) {
+          shiftEnd = shiftEnd.add(const Duration(days: 1));
+        }
+      }
+
+      final diff = shiftEnd.difference(now);
+      if (diff.isNegative) return 'Shift Ended';
+
+      final hours = diff.inHours;
+      final minutes = diff.inMinutes % 60;
+      return '$hours hrs $minutes mins left';
+    } catch (e) {
+      return '';
+    }
   }
 
   @override
@@ -835,10 +1022,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
               GridView.count(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                crossAxisCount: 2,
+                crossAxisCount:
+                    MediaQuery.of(context).orientation == Orientation.landscape
+                    ? 4
+                    : 2,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
-                childAspectRatio: 2.0,
+                childAspectRatio:
+                    MediaQuery.of(context).orientation == Orientation.landscape
+                    ? 2.5
+                    : 2.0,
                 children: [
                   _metricTile(
                     'Current Time',
@@ -951,11 +1144,59 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
               if (_isLoadingData)
                 const Center(child: CircularProgressIndicator())
               else ...[
+                DropdownButtonFormField<String>(
+                  decoration: const InputDecoration(
+                    labelText: 'Select Shift',
+                    prefixIcon: Icon(Icons.access_time),
+                  ),
+                  initialValue: _shifts.any((s) => s['name'] == _selectedShift)
+                      ? _selectedShift
+                      : null,
+                  items: _shifts.map((s) {
+                    final name = s['name']?.toString() ?? '';
+                    return DropdownMenuItem(value: name, child: Text(name));
+                  }).toList(),
+                  onChanged: _isTimerRunning
+                      ? null
+                      : (String? value) {
+                          setState(() {
+                            _selectedShift = value;
+                          });
+                          _persistState();
+                        },
+                ),
+                if (_selectedShift != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8, bottom: 16),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.timer_outlined,
+                          size: 16,
+                          color: Colors.blue,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _getShiftTimeLeft(),
+                          style: const TextStyle(
+                            color: Colors.blue,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  const SizedBox(height: 16),
                 DropdownButtonFormField<Machine>(
                   decoration: const InputDecoration(
                     labelText: 'Select Machine',
+                    prefixIcon: Icon(Icons.settings),
                   ),
-                  initialValue: _selectedMachine,
+                  initialValue: _machines.contains(_selectedMachine)
+                      ? _selectedMachine
+                      : null,
                   items: _machines.map((machine) {
                     return DropdownMenuItem(
                       value: machine,
@@ -977,8 +1218,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 DropdownButtonFormField<Item>(
                   decoration: const InputDecoration(
                     labelText: 'Select Item/Component',
+                    prefixIcon: Icon(Icons.inventory_2),
                   ),
-                  initialValue: _selectedItem,
+                  initialValue: _items.contains(_selectedItem)
+                      ? _selectedItem
+                      : null,
                   items: _items.map((item) {
                     return DropdownMenuItem(
                       value: item,
@@ -995,23 +1239,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           _persistState();
                         },
                 ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  decoration: const InputDecoration(labelText: 'Select Shift'),
-                  initialValue: _selectedShift,
-                  items: _shifts.map((s) {
-                    final name = s['name']?.toString() ?? '';
-                    return DropdownMenuItem(value: name, child: Text(name));
-                  }).toList(),
-                  onChanged: _isTimerRunning
-                      ? null
-                      : (String? value) {
-                          setState(() {
-                            _selectedShift = value;
-                          });
-                          _persistState();
-                        },
-                ),
               ],
               const SizedBox(height: 10),
 
@@ -1019,7 +1246,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 decoration: const InputDecoration(
                   labelText: 'Select Operation',
                 ),
-                initialValue: _selectedOperation,
+                initialValue:
+                    _getFilteredOperations().contains(_selectedOperation)
+                    ? _selectedOperation
+                    : null,
                 items: _getFilteredOperations().map((op) {
                   return DropdownMenuItem(value: op, child: Text(op));
                 }).toList(),
@@ -1091,26 +1321,101 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                   },
                                 ),
                           if (detail.target > 0)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 8.0),
-                              child: Text(
-                                'Target: ${detail.target}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue,
+                            Center(
+                              child: Container(
+                                margin: const EdgeInsets.only(top: 16),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue[50],
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: Colors.blue[200]!),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.track_changes,
+                                      color: Colors.blue,
+                                      size: 28,
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'TARGET',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.blue[700],
+                                            letterSpacing: 1.2,
+                                          ),
+                                        ),
+                                        Text(
+                                          '${detail.target} Units',
+                                          style: const TextStyle(
+                                            fontSize: 24,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.blue,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
                         ],
                       );
                     } else if (detail != null && detail.target > 0) {
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 8.0),
-                        child: Text(
-                          'Target: ${detail.target}',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue,
+                      return Center(
+                        child: Container(
+                          margin: const EdgeInsets.only(top: 16),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.blue[50],
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.blue[200]!),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.track_changes,
+                                color: Colors.blue,
+                                size: 28,
+                              ),
+                              const SizedBox(width: 12),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'TARGET',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue[700],
+                                      letterSpacing: 1.2,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${detail.target} Units',
+                                    style: const TextStyle(
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
                           ),
                         ),
                       );
@@ -1325,183 +1630,191 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 top: 16,
                 bottom: MediaQuery.of(context).viewInsets.bottom + 16,
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      const Text(
-                        'Productivity',
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          'Productivity',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const Spacer(),
+                        DropdownButton<String>(
+                          value: period,
+                          items: const [
+                            DropdownMenuItem<String>(
+                              value: 'Day',
+                              child: Text('Day'),
+                            ),
+                            DropdownMenuItem<String>(
+                              value: 'Week',
+                              child: Text('Week'),
+                            ),
+                            DropdownMenuItem<String>(
+                              value: 'Month',
+                              child: Text('Month'),
+                            ),
+                          ],
+                          onChanged: (v) {
+                            if (v != null) setModalState(() => period = v);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height:
+                          MediaQuery.of(context).orientation ==
+                              Orientation.landscape
+                          ? 150
+                          : 240,
+                      child: BarChart(
+                        BarChartData(
+                          barGroups: groups,
+                          gridData: FlGridData(
+                            show: true,
+                            drawVerticalLine: false,
+                          ),
+                          borderData: FlBorderData(show: false),
+                          barTouchData: BarTouchData(
+                            enabled: true,
+                            touchTooltipData: BarTouchTooltipData(
+                              getTooltipItem:
+                                  (group, groupIndex, rod, rodIndex) {
+                                    return BarTooltipItem(
+                                      rod.toY.toStringAsFixed(0),
+                                      const TextStyle(color: Colors.white),
+                                    );
+                                  },
+                            ),
+                          ),
+                          titlesData: FlTitlesData(
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 28,
+                                getTitlesWidget: (value, meta) {
+                                  final v = value.toInt();
+                                  if (period == 'Day') {
+                                    if (v % 3 != 0) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    final hour = v % 12 == 0 ? 12 : v % 12;
+                                    final amPm = v < 12 ? 'AM' : 'PM';
+                                    return Text(
+                                      '$hour $amPm',
+                                      style: const TextStyle(fontSize: 10),
+                                    );
+                                  } else if (period == 'Week') {
+                                    if ((v + 1) % 2 != 0) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    return Text(
+                                      '${v + 1}',
+                                      style: const TextStyle(fontSize: 11),
+                                    );
+                                  } else {
+                                    if ((v + 1) % 5 != 0) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    return Text(
+                                      '${v + 1}',
+                                      style: const TextStyle(fontSize: 11),
+                                    );
+                                  }
+                                },
+                              ),
+                            ),
+                            leftTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 44,
+                              ),
+                            ),
+                            topTitles: AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            rightTitles: AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Weekly Extra Work',
                         style: TextStyle(
-                          fontSize: 18,
+                          fontSize: 16,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      const Spacer(),
-                      DropdownButton<String>(
-                        value: period,
-                        items: const [
-                          DropdownMenuItem<String>(
-                            value: 'Day',
-                            child: Text('Day'),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 220,
+                      child: BarChart(
+                        BarChartData(
+                          barGroups: extraGroups,
+                          gridData: FlGridData(
+                            show: true,
+                            drawVerticalLine: false,
                           ),
-                          DropdownMenuItem<String>(
-                            value: 'Week',
-                            child: Text('Week'),
+                          borderData: FlBorderData(show: false),
+                          barTouchData: BarTouchData(
+                            enabled: true,
+                            touchTooltipData: BarTouchTooltipData(
+                              getTooltipItem:
+                                  (group, groupIndex, rod, rodIndex) {
+                                    return BarTooltipItem(
+                                      rod.toY.toStringAsFixed(0),
+                                      const TextStyle(color: Colors.white),
+                                    );
+                                  },
+                            ),
                           ),
-                          DropdownMenuItem<String>(
-                            value: 'Month',
-                            child: Text('Month'),
-                          ),
-                        ],
-                        onChanged: (v) {
-                          if (v != null) setModalState(() => period = v);
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    height: 240,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: groups,
-                        gridData: FlGridData(
-                          show: true,
-                          drawVerticalLine: false,
-                        ),
-                        borderData: FlBorderData(show: false),
-                        barTouchData: BarTouchData(
-                          enabled: true,
-                          touchTooltipData: BarTouchTooltipData(
-                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                              return BarTooltipItem(
-                                rod.toY.toStringAsFixed(0),
-                                const TextStyle(color: Colors.white),
-                              );
-                            },
-                          ),
-                        ),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 28,
-                              getTitlesWidget: (value, meta) {
-                                final v = value.toInt();
-                                if (period == 'Day') {
-                                  if (v % 3 != 0) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  final hour = v % 12 == 0 ? 12 : v % 12;
-                                  final amPm = v < 12 ? 'AM' : 'PM';
-                                  return Text(
-                                    '$hour $amPm',
-                                    style: const TextStyle(fontSize: 10),
-                                  );
-                                } else if (period == 'Week') {
+                          titlesData: FlTitlesData(
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 26,
+                                getTitlesWidget: (value, meta) {
+                                  final v = value.toInt();
                                   if ((v + 1) % 2 != 0) {
                                     return const SizedBox.shrink();
                                   }
                                   return Text(
-                                    '${v + 1}',
+                                    'W${v + 1}',
                                     style: const TextStyle(fontSize: 11),
                                   );
-                                } else {
-                                  if ((v + 1) % 5 != 0) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  return Text(
-                                    '${v + 1}',
-                                    style: const TextStyle(fontSize: 11),
-                                  );
-                                }
-                              },
+                                },
+                              ),
                             ),
-                          ),
-                          leftTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 44,
+                            leftTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 44,
+                              ),
                             ),
-                          ),
-                          topTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                          rightTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
+                            topTitles: AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            rightTitles: AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Weekly Extra Work',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 220,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: extraGroups,
-                        gridData: FlGridData(
-                          show: true,
-                          drawVerticalLine: false,
-                        ),
-                        borderData: FlBorderData(show: false),
-                        barTouchData: BarTouchData(
-                          enabled: true,
-                          touchTooltipData: BarTouchTooltipData(
-                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                              return BarTooltipItem(
-                                rod.toY.toStringAsFixed(0),
-                                const TextStyle(color: Colors.white),
-                              );
-                            },
-                          ),
-                        ),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 26,
-                              getTitlesWidget: (value, meta) {
-                                final v = value.toInt();
-                                if ((v + 1) % 2 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  'W${v + 1}',
-                                  style: const TextStyle(fontSize: 11),
-                                );
-                              },
-                            ),
-                          ),
-                          leftTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 44,
-                            ),
-                          ),
-                          topTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                          rightTitles: AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             );
           },

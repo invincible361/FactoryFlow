@@ -29,7 +29,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 6, vsync: this);
+    _tabController = TabController(length: 8, vsync: this);
     _fetchOrganization();
   }
 
@@ -119,10 +119,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           tabs: const [
             Tab(text: 'Reports'),
             Tab(text: 'Employees'),
+            Tab(text: 'Attendance'),
             Tab(text: 'Machines'),
             Tab(text: 'Items'),
             Tab(text: 'Shifts'),
             Tab(text: 'Security'),
+            Tab(text: 'Out of Bounds'),
           ],
         ),
       ),
@@ -131,12 +133,525 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         children: [
           ReportsTab(organizationCode: widget.organizationCode),
           EmployeesTab(organizationCode: widget.organizationCode),
+          AttendanceTab(organizationCode: widget.organizationCode),
           MachinesTab(organizationCode: widget.organizationCode),
           ItemsTab(organizationCode: widget.organizationCode),
           ShiftsTab(organizationCode: widget.organizationCode),
           SecurityTab(organizationCode: widget.organizationCode),
+          OutOfBoundsTab(organizationCode: widget.organizationCode),
         ],
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. OUT OF BOUNDS TAB
+// ---------------------------------------------------------------------------
+class OutOfBoundsTab extends StatefulWidget {
+  final String organizationCode;
+  const OutOfBoundsTab({super.key, required this.organizationCode});
+
+  @override
+  State<OutOfBoundsTab> createState() => _OutOfBoundsTabState();
+}
+
+class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _events = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchEvents();
+  }
+
+  Future<void> _fetchEvents() async {
+    setState(() => _isLoading = true);
+    try {
+      final response = await _supabase
+          .from('worker_boundary_events')
+          .select('*, workers(name)')
+          .eq('organization_code', widget.organizationCode)
+          .order('exit_time', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          _events = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch events error: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) return const Center(child: CircularProgressIndicator());
+
+    if (_events.isEmpty) {
+      return const Center(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.location_off, size: 64, color: Colors.grey),
+              SizedBox(height: 16),
+              Text(
+                'No "Out of Bounds" events recorded.',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _fetchEvents,
+      child: ListView.builder(
+        itemCount: _events.length,
+        itemBuilder: (context, index) {
+          final event = _events[index];
+          final workerName = event['workers']?['name'] ?? 'Unknown Worker';
+          final exitTime = DateTime.parse(event['exit_time']).toLocal();
+          final entryTimeStr = event['entry_time'] as String?;
+          final entryTime = entryTimeStr != null
+              ? DateTime.parse(entryTimeStr).toLocal()
+              : null;
+          final duration = event['duration_minutes'] ?? 'Still Out';
+
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: entryTime == null
+                    ? Colors.red.shade100
+                    : Colors.green.shade100,
+                child: Icon(
+                  entryTime == null
+                      ? Icons.exit_to_app
+                      : Icons.assignment_turned_in,
+                  color: entryTime == null ? Colors.red : Colors.green,
+                ),
+              ),
+              title: Text(
+                workerName,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Exited: ${DateFormat('hh:mm a (MMM dd)').format(exitTime)}',
+                  ),
+                  if (entryTime != null)
+                    Text(
+                      'Entered: ${DateFormat('hh:mm a (MMM dd)').format(entryTime)}',
+                    ),
+                  Text(
+                    'Duration: $duration',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: entryTime == null ? Colors.red : Colors.blue,
+                    ),
+                  ),
+                ],
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.map, color: Colors.indigo),
+                onPressed: () {
+                  // Optional: Open maps with exit/entry coordinates
+                },
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. ATTENDANCE TAB
+// ---------------------------------------------------------------------------
+class AttendanceTab extends StatefulWidget {
+  final String organizationCode;
+  const AttendanceTab({super.key, required this.organizationCode});
+
+  @override
+  State<AttendanceTab> createState() => _AttendanceTabState();
+}
+
+class _AttendanceTabState extends State<AttendanceTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _attendance = [];
+  bool _isLoading = true;
+  bool _isExporting = false;
+
+  // Filters
+  List<Map<String, dynamic>> _employees = [];
+  String? _selectedEmployeeId;
+  DateTimeRange? _selectedDateRange;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchEmployees();
+    _fetchAttendance();
+  }
+
+  Future<void> _fetchEmployees() async {
+    try {
+      final resp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode)
+          .order('name');
+      setState(() {
+        _employees = List<Map<String, dynamic>>.from(resp);
+      });
+    } catch (e) {
+      debugPrint('Fetch employees error: $e');
+    }
+  }
+
+  Future<void> _fetchAttendance() async {
+    setState(() => _isLoading = true);
+    try {
+      var query = _supabase
+          .from('attendance')
+          .select('*, workers:worker_id(name)')
+          .eq('organization_code', widget.organizationCode);
+
+      if (_selectedEmployeeId != null) {
+        query = query.eq('worker_id', _selectedEmployeeId!);
+      }
+
+      if (_selectedDateRange != null) {
+        query = query
+            .gte(
+              'date',
+              DateFormat('yyyy-MM-dd').format(_selectedDateRange!.start),
+            )
+            .lte(
+              'date',
+              DateFormat('yyyy-MM-dd').format(_selectedDateRange!.end),
+            );
+      }
+
+      final response = await query
+          .order('date', ascending: false)
+          .order('check_in', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          _attendance = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch attendance error: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _selectDateRange() async {
+    final DateTimeRange? picked = await showDateRangePicker(
+      context: context,
+      initialDateRange:
+          _selectedDateRange ??
+          DateTimeRange(
+            start: DateTime.now().subtract(const Duration(days: 7)),
+            end: DateTime.now(),
+          ),
+      firstDate: DateTime(2023),
+      lastDate: DateTime.now(),
+    );
+    if (picked != null && picked != _selectedDateRange) {
+      setState(() {
+        _selectedDateRange = picked;
+      });
+      _fetchAttendance();
+    }
+  }
+
+  Future<void> _exportToExcel() async {
+    setState(() => _isExporting = true);
+    try {
+      var excel = Excel.createExcel();
+      Sheet sheet = excel['Attendance_Report'];
+      excel.delete('Sheet1');
+
+      // Headers
+      sheet.appendRow([
+        TextCellValue('Date'),
+        TextCellValue('Employee Name'),
+        TextCellValue('Shift'),
+        TextCellValue('Check In'),
+        TextCellValue('Check Out'),
+        TextCellValue('Shift Start'),
+        TextCellValue('Shift End'),
+        TextCellValue('Status'),
+        TextCellValue('Early Leave'),
+        TextCellValue('Overtime'),
+      ]);
+
+      for (var row in _attendance) {
+        final worker = row['workers'] as Map<String, dynamic>?;
+        final workerName = worker?['name'] ?? row['worker_id'];
+
+        sheet.appendRow([
+          TextCellValue(row['date']?.toString() ?? ''),
+          TextCellValue(workerName.toString()),
+          TextCellValue(row['shift_name']?.toString() ?? ''),
+          TextCellValue(
+            row['check_in'] != null
+                ? DateFormat(
+                    'hh:mm a',
+                  ).format(DateTime.parse(row['check_in']).toLocal())
+                : '',
+          ),
+          TextCellValue(
+            row['check_out'] != null
+                ? DateFormat(
+                    'hh:mm a',
+                  ).format(DateTime.parse(row['check_out']).toLocal())
+                : '',
+          ),
+          TextCellValue(row['shift_start_time']?.toString() ?? ''),
+          TextCellValue(row['shift_end_time']?.toString() ?? ''),
+          TextCellValue(row['status']?.toString() ?? 'On Time'),
+          TextCellValue(row['is_early_leave'] == true ? 'Yes' : 'No'),
+          TextCellValue(row['is_overtime'] == true ? 'Yes' : 'No'),
+        ]);
+      }
+
+      final bytes = excel.save();
+      if (bytes != null) {
+        final dateStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+        final fileName = 'Attendance_Report_$dateStr.xlsx';
+
+        if (kIsWeb) {
+          // Web download logic would go here if needed
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Excel export not supported on Web in this version',
+              ),
+            ),
+          );
+        } else {
+          final tempDir = await getTemporaryDirectory();
+          final file = io.File('${tempDir.path}/$fileName');
+          await file.writeAsBytes(bytes);
+          await share_plus.SharePlus.instance.share(
+            share_plus.ShareParams(
+              files: [share_plus.XFile(file.path)],
+              text: 'Attendance Report',
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Export error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Daily Attendance History',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: _isExporting ? null : _exportToExcel,
+                    icon: _isExporting
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.download),
+                    label: const Text('Export Excel'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      initialValue: _selectedEmployeeId,
+                      decoration: const InputDecoration(
+                        labelText: 'Filter by Employee',
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: null,
+                          child: Text('All Employees'),
+                        ),
+                        ..._employees.map((e) {
+                          return DropdownMenuItem(
+                            value: e['worker_id'].toString(),
+                            child: Text(e['name'].toString()),
+                          );
+                        }),
+                      ],
+                      onChanged: (val) {
+                        setState(() => _selectedEmployeeId = val);
+                        _fetchAttendance();
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  InkWell(
+                    onTap: _selectDateRange,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 14,
+                      ),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.calendar_today, size: 20),
+                          const SizedBox(width: 8),
+                          Text(
+                            _selectedDateRange == null
+                                ? 'Select Dates'
+                                : '${DateFormat('MMM dd').format(_selectedDateRange!.start)} - ${DateFormat('MMM dd').format(_selectedDateRange!.end)}',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (_selectedDateRange != null || _selectedEmployeeId != null)
+                    IconButton(
+                      icon: const Icon(Icons.clear, color: Colors.red),
+                      tooltip: 'Clear Filters',
+                      onPressed: () {
+                        setState(() {
+                          _selectedEmployeeId = null;
+                          _selectedDateRange = null;
+                        });
+                        _fetchAttendance();
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _attendance.isEmpty
+            ? const Center(child: Text('No attendance records found.'))
+            : ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _attendance.length,
+                itemBuilder: (context, index) {
+                  final record = _attendance[index];
+                  final worker = record['workers'] as Map<String, dynamic>?;
+                  final workerName = worker?['name'] ?? 'Unknown Worker';
+                  final status = record['status'] ?? 'On Time';
+
+                  Color statusColor = Colors.green;
+                  if (status.contains('Early Leave')) {
+                    statusColor = Colors.orange;
+                  }
+                  if (status.contains('Overtime')) statusColor = Colors.blue;
+                  if (status == 'Both') statusColor = Colors.purple;
+
+                  return Card(
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: statusColor.withValues(alpha: 0.1),
+                        child: Icon(Icons.person, color: statusColor),
+                      ),
+                      title: Text(
+                        workerName,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Date: ${record['date']} | Shift: ${record['shift_name'] ?? 'N/A'}',
+                          ),
+                          Text(
+                            'In: ${record['check_in'] != null ? DateFormat('hh:mm a').format(DateTime.parse(record['check_in']).toLocal()) : '--'} | '
+                            'Out: ${record['check_out'] != null ? DateFormat('hh:mm a').format(DateTime.parse(record['check_out']).toLocal()) : '--'}',
+                          ),
+                        ],
+                      ),
+                      trailing: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: statusColor.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: statusColor),
+                        ),
+                        child: Text(
+                          status,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+      ],
     );
   }
 }
@@ -166,43 +681,52 @@ class _ReportsTabState extends State<ReportsTab> {
   List<FlSpot> _lineSpots = [];
 
   Widget _metricTile(String title, String value, Color color, IconData icon) {
-    return Container(
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: Colors.black87),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isLandscape =
+            MediaQuery.of(context).orientation == Orientation.landscape;
+        return Container(
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(16),
           ),
-        ],
-      ),
+          padding: EdgeInsets.all(isLandscape ? 10 : 16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.black87, size: isLandscape ? 20 : 24),
+              SizedBox(width: isLandscape ? 8 : 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: isLandscape ? 10 : 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: isLandscape ? 14 : 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -835,10 +1359,16 @@ class _ReportsTabState extends State<ReportsTab> {
             child: GridView.count(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 2,
+              crossAxisCount:
+                  MediaQuery.of(context).orientation == Orientation.landscape
+                  ? 4
+                  : 2,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
-              childAspectRatio: 2.2,
+              childAspectRatio:
+                  MediaQuery.of(context).orientation == Orientation.landscape
+                  ? 2.8
+                  : 2.2,
               children: [
                 _metricTile(
                   'Extra Units (24h)',
@@ -966,7 +1496,11 @@ class _ReportsTabState extends State<ReportsTab> {
                 ),
                 const SizedBox(height: 8),
                 SizedBox(
-                  height: 240,
+                  height:
+                      MediaQuery.of(context).orientation ==
+                          Orientation.landscape
+                      ? 180
+                      : 240,
                   child: LineChart(
                     LineChartData(
                       lineTouchData: LineTouchData(
@@ -1098,7 +1632,11 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height: 240,
+                    height:
+                        MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 180
+                        : 240,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
@@ -1145,7 +1683,11 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height: 240,
+                    height:
+                        MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 180
+                        : 240,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
@@ -1192,7 +1734,11 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height: 200,
+                    height:
+                        MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 150
+                        : 200,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildExtraWeekGroups(_extraWeekLogs),
@@ -1835,7 +2381,7 @@ class _MachinesTabState extends State<MachinesTab> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
+      child: ListView(
         children: [
           ExpansionTile(
             title: Text(
@@ -1887,45 +2433,39 @@ class _MachinesTabState extends State<MachinesTab> {
             ],
           ),
           const SizedBox(height: 20),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    itemCount: _machines.length,
-                    itemBuilder: (context, index) {
-                      final machine = _machines[index];
-                      return Card(
-                        child: ListTile(
-                          leading: const Icon(Icons.precision_manufacturing),
-                          title: Text(
-                            '${machine['name']} (${machine['machine_id']})',
-                          ),
-                          subtitle: Text('Type: ${machine['type']}'),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.edit,
-                                  color: Colors.blue,
-                                ),
-                                onPressed: () => _editMachine(machine),
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.red,
-                                ),
-                                onPressed: () =>
-                                    _deleteMachine(machine['machine_id']),
-                              ),
-                            ],
-                          ),
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _machines.length,
+                  itemBuilder: (context, index) {
+                    final machine = _machines[index];
+                    return Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.precision_manufacturing),
+                        title: Text(
+                          '${machine['name']} (${machine['machine_id']})',
                         ),
-                      );
-                    },
-                  ),
-          ),
+                        subtitle: Text('Type: ${machine['type']}'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.blue),
+                              onPressed: () => _editMachine(machine),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () =>
+                                  _deleteMachine(machine['machine_id']),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
         ],
       ),
     );
@@ -2260,149 +2800,132 @@ class _ItemsTabState extends State<ItemsTab> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
+      child: ListView(
         children: [
-          Expanded(
-            flex: 6,
-            child: ListView(
+          Text(
+            _editingItem == null ? 'Add New Item' : 'Edit Item',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _itemIdController,
+            enabled: _editingItem == null,
+            decoration: const InputDecoration(labelText: 'Item ID (e.g. 5001)'),
+          ),
+          TextField(
+            controller: _itemNameController,
+            decoration: const InputDecoration(
+              labelText: 'Item Name (e.g. Shirt)',
+            ),
+          ),
+
+          const SizedBox(height: 20),
+          const Text(
+            'Operations',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
               children: [
-                Text(
-                  _editingItem == null ? 'Add New Item' : 'Edit Item',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
+                TextField(
+                  controller: _opNameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Operation Name (e.g. Collar)',
+                  ),
+                ),
+                TextField(
+                  controller: _opTargetController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    labelText: 'Target Quantity',
                   ),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: _itemIdController,
-                  enabled: _editingItem == null,
-                  decoration: const InputDecoration(
-                    labelText: 'Item ID (e.g. 5001)',
-                  ),
-                ),
-                TextField(
-                  controller: _itemNameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Item Name (e.g. Shirt)',
-                  ),
-                ),
-
-                const SizedBox(height: 20),
-                const Text(
-                  'Operations',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: _opNameController,
-                        decoration: const InputDecoration(
-                          labelText: 'Operation Name (e.g. Collar)',
-                        ),
-                      ),
-                      TextField(
-                        controller: _opTargetController,
-                        keyboardType: TextInputType.number,
-                        inputFormatters: [
-                          FilteringTextInputFormatter.digitsOnly,
-                        ],
-                        decoration: const InputDecoration(
-                          labelText: 'Target Quantity',
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          ElevatedButton.icon(
-                            onPressed: _pickFile,
-                            icon: const Icon(Icons.attach_file),
-                            label: const Text('Pick Image/PDF'),
-                          ),
-                          const SizedBox(width: 10),
-                          if (_opFile != null)
-                            Expanded(
-                              child: Text(
-                                _opFile!.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      ElevatedButton(
-                        onPressed: _addOperation,
-                        child: const Text('Add Operation'),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // Operation List Preview
-                if (_operations.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  ..._operations.map(
-                    (op) => ListTile(
-                      title: Text(op.name),
-                      subtitle: Text('Target: ${op.target}'),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (op.imageUrl != null || op.existingUrl != null)
-                            const Icon(Icons.image, color: Colors.blue),
-                          if (op.pdfUrl != null || op.existingPdfUrl != null)
-                            const Icon(Icons.picture_as_pdf, color: Colors.red),
-                          IconButton(
-                            icon: const Icon(
-                              Icons.remove_circle,
-                              color: Colors.red,
-                            ),
-                            onPressed: () {
-                              setState(() {
-                                _operations.remove(op);
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-
-                const SizedBox(height: 20),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: _editingItem == null ? _addItem : _updateItem,
-                      child: Text(
-                        _editingItem == null
-                            ? 'Save Item to Database'
-                            : 'Update Item',
-                      ),
+                    ElevatedButton.icon(
+                      onPressed: _pickFile,
+                      icon: const Icon(Icons.attach_file),
+                      label: const Text('Pick Image/PDF'),
                     ),
-                    if (_editingItem != null) ...[
-                      const SizedBox(width: 10),
-                      TextButton(
-                        onPressed: _clearItemForm,
-                        child: const Text('Cancel'),
+                    const SizedBox(width: 10),
+                    if (_opFile != null)
+                      Expanded(
+                        child: Text(
+                          _opFile!.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                    ],
                   ],
+                ),
+                const SizedBox(height: 10),
+                ElevatedButton(
+                  onPressed: _addOperation,
+                  child: const Text('Add Operation'),
                 ),
               ],
             ),
+          ),
+
+          // Operation List Preview
+          if (_operations.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            ..._operations.map(
+              (op) => ListTile(
+                title: Text(op.name),
+                subtitle: Text('Target: ${op.target}'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (op.imageUrl != null || op.existingUrl != null)
+                      const Icon(Icons.image, color: Colors.blue),
+                    if (op.pdfUrl != null || op.existingPdfUrl != null)
+                      const Icon(Icons.picture_as_pdf, color: Colors.red),
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle, color: Colors.red),
+                      onPressed: () {
+                        setState(() {
+                          _operations.remove(op);
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: _editingItem == null ? _addItem : _updateItem,
+                child: Text(
+                  _editingItem == null
+                      ? 'Save Item to Database'
+                      : 'Update Item',
+                ),
+              ),
+              if (_editingItem != null) ...[
+                const SizedBox(width: 10),
+                TextButton(
+                  onPressed: _clearItemForm,
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ],
           ),
           const Divider(thickness: 2),
           const Padding(
@@ -2412,46 +2935,39 @@ class _ItemsTabState extends State<ItemsTab> {
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
             ),
           ),
-          Expanded(
-            flex: 4,
-            child: _isLoadingItems
-                ? const Center(child: CircularProgressIndicator())
-                : _items.isEmpty
-                ? const Center(child: Text('No items found.'))
-                : ListView.builder(
-                    itemCount: _items.length,
-                    itemBuilder: (context, index) {
-                      final item = _items[index];
-                      // Count operations if possible
-                      final ops = item['operation_details'] as List? ?? [];
-                      return Card(
-                        child: ListTile(
-                          title: Text('${item['name']} (${item['item_id']})'),
-                          subtitle: Text('${ops.length} Operations'),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.edit,
-                                  color: Colors.blue,
-                                ),
-                                onPressed: () => _editItem(item),
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.red,
-                                ),
-                                onPressed: () => _deleteItem(item['item_id']),
-                              ),
-                            ],
-                          ),
+          _isLoadingItems
+              ? const Center(child: CircularProgressIndicator())
+              : _items.isEmpty
+              ? const Center(child: Text('No items found.'))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _items.length,
+                  itemBuilder: (context, index) {
+                    final item = _items[index];
+                    // Count operations if possible
+                    final ops = item['operation_details'] as List? ?? [];
+                    return Card(
+                      child: ListTile(
+                        title: Text('${item['name']} (${item['item_id']})'),
+                        subtitle: Text('${ops.length} Operations'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.blue),
+                              onPressed: () => _editItem(item),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () => _deleteItem(item['item_id']),
+                            ),
+                          ],
                         ),
-                      );
-                    },
-                  ),
-          ),
+                      ),
+                    );
+                  },
+                ),
         ],
       ),
     );
@@ -2609,7 +3125,7 @@ class _ShiftsTabState extends State<ShiftsTab> {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: Column(
+      child: ListView(
         children: [
           Text(
             _editingShift == null ? 'Add New Shift' : 'Edit Shift',
@@ -2675,85 +3191,78 @@ class _ShiftsTabState extends State<ShiftsTab> {
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
           ),
           const SizedBox(height: 10),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _shifts.isEmpty
-                ? const Center(child: Text('No shifts found.'))
-                : ListView.builder(
-                    itemCount: _shifts.length,
-                    itemBuilder: (context, index) {
-                      final shift = _shifts[index];
-                      return Card(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.indigo.shade100,
-                            child: const Icon(
-                              Icons.schedule,
-                              color: Colors.indigo,
-                            ),
-                          ),
-                          title: Text(
-                            shift['name'] ?? '',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Text(
-                            'Time: ${shift['start_time']} - ${shift['end_time']}',
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.edit,
-                                  color: Colors.blue,
-                                ),
-                                tooltip: 'Edit Shift',
-                                onPressed: () => _editShift(shift),
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.red,
-                                ),
-                                tooltip: 'Delete Shift',
-                                onPressed: () {
-                                  showDialog(
-                                    context: context,
-                                    builder: (context) => AlertDialog(
-                                      title: const Text('Delete Shift'),
-                                      content: const Text(
-                                        'Are you sure you want to delete this shift?',
-                                      ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context),
-                                          child: const Text('Cancel'),
-                                        ),
-                                        TextButton(
-                                          onPressed: () {
-                                            _deleteShift(shift['id']);
-                                            Navigator.pop(context);
-                                          },
-                                          child: const Text(
-                                            'Delete',
-                                            style: TextStyle(color: Colors.red),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _shifts.isEmpty
+              ? const Center(child: Text('No shifts found.'))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _shifts.length,
+                  itemBuilder: (context, index) {
+                    final shift = _shifts[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.indigo.shade100,
+                          child: const Icon(
+                            Icons.schedule,
+                            color: Colors.indigo,
                           ),
                         ),
-                      );
-                    },
-                  ),
-          ),
+                        title: Text(
+                          shift['name'] ?? '',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Text(
+                          'Time: ${shift['start_time']} - ${shift['end_time']}',
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.blue),
+                              tooltip: 'Edit Shift',
+                              onPressed: () => _editShift(shift),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              tooltip: 'Delete Shift',
+                              onPressed: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Delete Shift'),
+                                    content: const Text(
+                                      'Are you sure you want to delete this shift?',
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(context),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          _deleteShift(shift['id']);
+                                          Navigator.pop(context);
+                                        },
+                                        child: const Text(
+                                          'Delete',
+                                          style: TextStyle(color: Colors.red),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
         ],
       ),
     );
@@ -2816,24 +3325,26 @@ class _SecurityTabState extends State<SecurityTab> {
 
     if (_missingTable) {
       return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: const [
-              Icon(Icons.security, size: 64, color: Colors.grey),
-              SizedBox(height: 16),
-              Text(
-                'No login security available.',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              SizedBox(height: 8),
-              Text(
-                'Make sure the "owner_logs" table exists in Supabase.',
-                style: TextStyle(color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-            ],
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: const [
+                Icon(Icons.security, size: 64, color: Colors.grey),
+                SizedBox(height: 16),
+                Text(
+                  'No login security available.',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Make sure the "owner_logs" table exists in Supabase.',
+                  style: TextStyle(color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
           ),
         ),
       );
@@ -2841,21 +3352,23 @@ class _SecurityTabState extends State<SecurityTab> {
 
     if (_logs.isEmpty) {
       return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.security, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              'No login history found.',
-              style: TextStyle(color: Colors.grey),
-            ),
-            SizedBox(height: 8),
-            Text(
-              '(Make sure "owner_logs" table exists in Supabase)',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-          ],
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.security, size: 64, color: Colors.grey),
+              SizedBox(height: 16),
+              Text(
+                'No login history found.',
+                style: TextStyle(color: Colors.grey),
+              ),
+              SizedBox(height: 8),
+              Text(
+                '(Make sure "owner_logs" table exists in Supabase)',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
         ),
       );
     }
