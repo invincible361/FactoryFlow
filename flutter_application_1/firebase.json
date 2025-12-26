@@ -1,4 +1,18 @@
 {
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
   "appDistribution": [
     {
       "app": "1:37828631168:android:acd754981c60779b00a465",
