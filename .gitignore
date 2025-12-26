@@ -9,5 +9,6 @@ build/
 # Local Netlify folder
 .netlify
 
-# Flutter SDK
-flutter_application_1/flutter/
+# APK files
+*.apk
+FactoryFlow.apk

@@ -17,6 +17,12 @@ jobs:
       - name: Build Web
         run: flutter build web --release --base-href "/"
         working-directory: flutter_application_1
+      - name: Build APK
+        run: flutter build apk --release
+        working-directory: flutter_application_1
+      - name: Copy APK to Web folder
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/web/FactoryFlow.apk
+        working-directory: flutter_application_1
       - name: Deploy to Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
