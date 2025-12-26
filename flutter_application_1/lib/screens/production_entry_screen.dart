@@ -1282,7 +1282,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           detail.imageUrl!.startsWith('http')
                               ? Image.network(
                                   detail.imageUrl!,
-                                  height: 250,
+                                  height:
+                                      MediaQuery.of(context).orientation ==
+                                          Orientation.landscape
+                                      ? 150
+                                      : 250,
                                   width: double.infinity,
                                   fit: BoxFit.contain,
                                   loadingBuilder:
@@ -1291,7 +1295,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                           return child;
                                         }
                                         return SizedBox(
-                                          height: 250,
+                                          height:
+                                              MediaQuery.of(
+                                                    context,
+                                                  ).orientation ==
+                                                  Orientation.landscape
+                                              ? 150
+                                              : 250,
                                           child: Center(
                                             child: CircularProgressIndicator(
                                               value:
@@ -1313,7 +1323,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                 )
                               : Image.asset(
                                   'assets/images/${detail.imageUrl!}',
-                                  height: 250,
+                                  height:
+                                      MediaQuery.of(context).orientation ==
+                                          Orientation.landscape
+                                      ? 150
+                                      : 250,
                                   width: double.infinity,
                                   fit: BoxFit.contain,
                                   errorBuilder: (context, error, stackTrace) {
