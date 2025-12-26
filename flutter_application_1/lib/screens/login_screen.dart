@@ -7,7 +7,7 @@ import '../models/employee.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
-import 'dart:io' show Platform, File; // Only show Platform for non-web logic
+import 'dart:io' as io;
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -34,19 +34,19 @@ class _LoginScreenState extends State<LoginScreen> {
         final webInfo = await deviceInfo.webBrowserInfo;
         deviceName = '${webInfo.browserName.name} on ${webInfo.platform}';
         osVersion = webInfo.userAgent ?? 'Unknown Web UserAgent';
-      } else if (Platform.isAndroid) {
+      } else if (io.Platform.isAndroid) {
         final androidInfo = await deviceInfo.androidInfo;
         deviceName = '${androidInfo.manufacturer} ${androidInfo.model}';
         osVersion = 'Android ${androidInfo.version.release}';
-      } else if (Platform.isIOS) {
+      } else if (io.Platform.isIOS) {
         final iosInfo = await deviceInfo.iosInfo;
         deviceName = '${iosInfo.name} ${iosInfo.systemName}';
         osVersion = iosInfo.systemVersion;
-      } else if (Platform.isMacOS) {
+      } else if (io.Platform.isMacOS) {
         final macInfo = await deviceInfo.macOsInfo;
         deviceName = macInfo.model;
         osVersion = 'macOS ${macInfo.osRelease}';
-      } else if (Platform.isWindows) {
+      } else if (io.Platform.isWindows) {
         final winInfo = await deviceInfo.windowsInfo;
         deviceName = winInfo.computerName;
         osVersion = 'Windows';
@@ -589,7 +589,10 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         height: 48,
                         child: kIsWeb
                             ? Image.network(_logo!.path, fit: BoxFit.cover)
-                            : Image.file(File(_logo!.path), fit: BoxFit.cover),
+                            : Image.file(
+                                io.File(_logo!.path),
+                                fit: BoxFit.cover,
+                              ),
                       ),
                   ],
                 ),

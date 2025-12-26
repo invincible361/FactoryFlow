@@ -2,15 +2,14 @@ import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:image_picker/image_picker.dart' as picker;
 import 'package:excel/excel.dart' hide Border;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart' as share_plus;
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:file_picker/file_picker.dart';
 import '../models/item.dart';
-import 'dart:io'
-    show File; // Show File only for non-web logic if strictly needed
+import 'dart:io' as io;
 
 class AdminDashboardScreen extends StatefulWidget {
   final String organizationCode;
@@ -592,7 +591,9 @@ class _ReportsTabState extends State<ReportsTab> {
         TextCellValue('Item ID'),
         TextCellValue('Operation'),
         TextCellValue('Date'),
-        TextCellValue('Time'),
+        TextCellValue('In Time'),
+        TextCellValue('Out Time'),
+        TextCellValue('Working Hours'),
         TextCellValue('Machine ID'),
         TextCellValue('Quantity'),
         TextCellValue('Surplus/Deficit'),
@@ -609,14 +610,37 @@ class _ReportsTabState extends State<ReportsTab> {
         String status = diff >= 0 ? 'Surplus' : 'Deficit';
         final remarks = (log['remarks'] ?? '').toString();
         final createdAtStr = (log['created_at'] ?? '').toString();
+
+        final startTimeStr = (log['start_time'] ?? '').toString();
+        final endTimeStr = (log['end_time'] ?? '').toString();
+
         DateTime dt;
         try {
           dt = DateTime.parse(createdAtStr).toLocal();
         } catch (_) {
           dt = DateTime.now();
         }
+
+        String inTime = '-';
+        String outTime = '-';
+        String totalHours = '-';
+
+        if (startTimeStr.isNotEmpty) {
+          try {
+            final st = DateTime.parse(startTimeStr).toLocal();
+            inTime = DateFormat('hh:mm a').format(st);
+            if (endTimeStr.isNotEmpty) {
+              final et = DateTime.parse(endTimeStr).toLocal();
+              outTime = DateFormat('hh:mm a').format(et);
+              final duration = et.difference(st);
+              final hours = duration.inHours;
+              final minutes = duration.inMinutes.remainder(60);
+              totalHours = '${hours}h ${minutes}m';
+            }
+          } catch (_) {}
+        }
+
         final dateStr = DateFormat('yyyy-MM-dd').format(dt);
-        final timeStr = DateFormat('HH:mm').format(dt);
         final machineId = (log['machine_id'] ?? '').toString();
         detailsSheet.appendRow([
           TextCellValue(eName),
@@ -624,7 +648,9 @@ class _ReportsTabState extends State<ReportsTab> {
           TextCellValue(itemId),
           TextCellValue(opName),
           TextCellValue(dateStr),
-          TextCellValue(timeStr),
+          TextCellValue(inTime),
+          TextCellValue(outTime),
+          TextCellValue(totalHours),
           TextCellValue(machineId),
           IntCellValue(qty),
           IntCellValue(diff),
@@ -658,7 +684,7 @@ class _ReportsTabState extends State<ReportsTab> {
         final directory = await getTemporaryDirectory();
         final path =
             '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
-        final file = File(path);
+        final file = io.File(path);
         await file.writeAsBytes(bytes);
         final params = share_plus.ShareParams(
           files: [share_plus.XFile(path)],
@@ -970,9 +996,11 @@ class _ReportsTabState extends State<ReportsTab> {
                                 if (v % 3 != 0) {
                                   return const SizedBox.shrink();
                                 }
+                                final hour = v % 12 == 0 ? 12 : v % 12;
+                                final amPm = v < 12 ? 'AM' : 'PM';
                                 return Text(
-                                  '${v}h',
-                                  style: const TextStyle(fontSize: 11),
+                                  '$hour $amPm',
+                                  style: const TextStyle(fontSize: 10),
                                 );
                               } else if (_linePeriod == 'Week') {
                                 if ((v + 1) % 2 != 0) {
@@ -1232,6 +1260,31 @@ class _ReportsTabState extends State<ReportsTab> {
                       final employeeName = log['employeeName'] ?? 'Unknown';
                       final itemName = log['itemName'] ?? 'Unknown';
                       final remarks = log['remarks'] as String?;
+
+                      final startTimeStr = (log['start_time'] ?? '').toString();
+                      final endTimeStr = (log['end_time'] ?? '').toString();
+
+                      String workingHours = '';
+                      String inOutTime = '';
+
+                      if (startTimeStr.isNotEmpty) {
+                        try {
+                          final st = DateTime.parse(startTimeStr).toLocal();
+                          final inT = DateFormat('hh:mm a').format(st);
+                          if (endTimeStr.isNotEmpty) {
+                            final et = DateTime.parse(endTimeStr).toLocal();
+                            final outT = DateFormat('hh:mm a').format(et);
+                            inOutTime = 'In: $inT | Out: $outT';
+                            final duration = et.difference(st);
+                            final hours = duration.inHours;
+                            final minutes = duration.inMinutes.remainder(60);
+                            workingHours = 'Total: ${hours}h ${minutes}m';
+                          } else {
+                            inOutTime = 'In: $inT | Out: -';
+                          }
+                        } catch (_) {}
+                      }
+
                       return ListTile(
                         title: Text('$employeeName - $itemName'),
                         subtitle: Column(
@@ -1240,6 +1293,23 @@ class _ReportsTabState extends State<ReportsTab> {
                             Text(
                               '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
                             ),
+                            if (inOutTime.isNotEmpty)
+                              Text(
+                                inOutTime,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            if (workingHours.isNotEmpty)
+                              Text(
+                                workingHours,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.blue,
+                                  fontSize: 12,
+                                ),
+                              ),
                             if (remarks != null && remarks.isNotEmpty)
                               Padding(
                                 padding: const EdgeInsets.only(top: 4.0),
@@ -1255,7 +1325,7 @@ class _ReportsTabState extends State<ReportsTab> {
                           ],
                         ),
                         trailing: Text(
-                          DateFormat('MM/dd HH:mm').format(timestamp),
+                          DateFormat('MM/dd hh:mm a').format(timestamp),
                         ),
                       );
                     },
@@ -1640,10 +1710,55 @@ class _MachinesTabState extends State<MachinesTab> {
   final _nameController = TextEditingController();
   String _type = 'CNC';
 
+  Map<String, dynamic>? _editingMachine;
+
   @override
   void initState() {
     super.initState();
     _fetchMachines();
+  }
+
+  void _editMachine(Map<String, dynamic> machine) {
+    setState(() {
+      _editingMachine = machine;
+      _idController.text = machine['machine_id'];
+      _nameController.text = machine['name'];
+      _type = machine['type'];
+    });
+  }
+
+  Future<void> _updateMachine() async {
+    if (_editingMachine == null) return;
+    try {
+      await _supabase
+          .from('machines')
+          .update({'name': _nameController.text, 'type': _type})
+          .eq('machine_id', _editingMachine!['machine_id'])
+          .eq('organization_code', widget.organizationCode);
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Machine updated!')));
+        _clearForm();
+        _fetchMachines();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  void _clearForm() {
+    setState(() {
+      _editingMachine = null;
+      _idController.clear();
+      _nameController.clear();
+      _type = 'CNC';
+    });
   }
 
   Future<void> _fetchMachines() async {
@@ -1723,10 +1838,14 @@ class _MachinesTabState extends State<MachinesTab> {
       child: Column(
         children: [
           ExpansionTile(
-            title: const Text('Add New Machine'),
+            title: Text(
+              _editingMachine == null ? 'Add New Machine' : 'Edit Machine',
+            ),
+            initiallyExpanded: _editingMachine != null,
             children: [
               TextField(
                 controller: _idController,
+                enabled: _editingMachine == null,
                 decoration: const InputDecoration(labelText: 'Machine ID'),
               ),
               TextField(
@@ -1742,10 +1861,29 @@ class _MachinesTabState extends State<MachinesTab> {
                 decoration: const InputDecoration(labelText: 'Type'),
               ),
               const SizedBox(height: 10),
-              ElevatedButton(
-                onPressed: _addMachine,
-                child: const Text('Add Machine'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ElevatedButton(
+                    onPressed: _editingMachine == null
+                        ? _addMachine
+                        : _updateMachine,
+                    child: Text(
+                      _editingMachine == null
+                          ? 'Add Machine'
+                          : 'Update Machine',
+                    ),
+                  ),
+                  if (_editingMachine != null) ...[
+                    const SizedBox(width: 10),
+                    TextButton(
+                      onPressed: _clearForm,
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                ],
               ),
+              const SizedBox(height: 10),
             ],
           ),
           const SizedBox(height: 20),
@@ -1763,10 +1901,25 @@ class _MachinesTabState extends State<MachinesTab> {
                             '${machine['name']} (${machine['machine_id']})',
                           ),
                           subtitle: Text('Type: ${machine['type']}'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () =>
-                                _deleteMachine(machine['machine_id']),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.edit,
+                                  color: Colors.blue,
+                                ),
+                                onPressed: () => _editMachine(machine),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.red,
+                                ),
+                                onPressed: () =>
+                                    _deleteMachine(machine['machine_id']),
+                              ),
+                            ],
                           ),
                         ),
                       );
@@ -1803,7 +1956,9 @@ class _ItemsTabState extends State<ItemsTab> {
   // Operation Controllers
   final _opNameController = TextEditingController();
   final _opTargetController = TextEditingController();
-  picker.XFile? _opImage;
+  PlatformFile? _opFile;
+
+  Map<String, dynamic>? _editingItem;
 
   @override
   void initState() {
@@ -1834,14 +1989,137 @@ class _ItemsTabState extends State<ItemsTab> {
     }
   }
 
-  Future<void> _pickImage() async {
-    final imagePicker = picker.ImagePicker();
-    final picked = await imagePicker.pickImage(
-      source: picker.ImageSource.gallery,
+  void _editItem(Map<String, dynamic> item) {
+    setState(() {
+      _editingItem = item;
+      _itemIdController.text = item['item_id'];
+      _itemNameController.text = item['name'];
+      _operations = (item['operation_details'] as List? ?? [])
+          .map(
+            (op) => OperationDetail(
+              name: op['name'],
+              target: op['target'],
+              existingUrl: op['imageUrl'],
+              existingPdfUrl: op['pdfUrl'],
+            ),
+          )
+          .toList();
+    });
+  }
+
+  Future<void> _updateItem() async {
+    if (_editingItem == null) return;
+    try {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Updating...')));
+
+      List<Map<String, dynamic>> opJson = [];
+      for (var op in _operations) {
+        String? imageUrl = op.existingUrl;
+        String? pdfUrl = op.existingPdfUrl;
+
+        if (op.newFile != null) {
+          final fileName =
+              '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}_${op.newFile!.name}';
+          final bytes =
+              op.newFile!.bytes ??
+              await io.File(op.newFile!.path!).readAsBytes();
+
+          final isPdf = op.newFile!.name.toLowerCase().endsWith('.pdf');
+          final bucket = isPdf ? 'operation_documents' : 'operation_images';
+          final contentType = isPdf ? 'application/pdf' : 'image/jpeg';
+
+          try {
+            try {
+              await _supabase.storage
+                  .from(bucket)
+                  .uploadBinary(
+                    fileName,
+                    bytes,
+                    fileOptions: FileOptions(
+                      contentType: contentType,
+                      upsert: true,
+                    ),
+                  );
+            } on StorageException catch (se) {
+              if (se.message.contains('Bucket not found')) {
+                throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
+              }
+              rethrow;
+            }
+          } on StorageException catch (se) {
+            if (se.message.contains('Bucket not found')) {
+              throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
+            }
+            rethrow;
+          }
+
+          final publicUrl = _supabase.storage
+              .from(bucket)
+              .getPublicUrl(fileName);
+          if (isPdf) {
+            pdfUrl = publicUrl;
+          } else {
+            imageUrl = publicUrl;
+          }
+        }
+
+        opJson.add({
+          'name': op.name,
+          'target': op.target,
+          'imageUrl': imageUrl,
+          'pdfUrl': pdfUrl,
+        });
+      }
+
+      final opNames = _operations.map((o) => o.name).toList();
+
+      await _supabase
+          .from('items')
+          .update({
+            'name': _itemNameController.text,
+            'operation_details': opJson,
+            'operations': opNames,
+          })
+          .eq('item_id', _editingItem!['item_id']);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Item Updated Successfully!')),
+        );
+        _clearItemForm();
+        _fetchItems();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  void _clearItemForm() {
+    setState(() {
+      _editingItem = null;
+      _itemIdController.clear();
+      _itemNameController.clear();
+      _operations = [];
+      _opNameController.clear();
+      _opTargetController.clear();
+      _opFile = null;
+    });
+  }
+
+  Future<void> _pickFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
     );
-    if (picked != null) {
+    if (result != null) {
       setState(() {
-        _opImage = picked;
+        _opFile = result.files.first;
       });
     }
   }
@@ -1854,12 +2132,12 @@ class _ItemsTabState extends State<ItemsTab> {
         OperationDetail(
           name: _opNameController.text,
           target: int.tryParse(_opTargetController.text) ?? 0,
-          imageFile: _opImage,
+          newFile: _opFile,
         ),
       );
       _opNameController.clear();
       _opTargetController.clear();
-      _opImage = null;
+      _opFile = null;
     });
   }
 
@@ -1882,111 +2160,71 @@ class _ItemsTabState extends State<ItemsTab> {
         context,
       ).showSnackBar(const SnackBar(content: Text('Uploading...')));
 
-      // 1. Upload images first and get URLs
+      // 1. Upload files first and get URLs
       List<Map<String, dynamic>> opJson = [];
       for (var op in _operations) {
         String? imageUrl;
-        if (op.imageFile != null) {
+        String? pdfUrl;
+        if (op.newFile != null) {
           try {
-            // Ensure bucket exists (attempt to create if missing)
-            try {
-              final fileName =
-                  '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
-              final bytes = await op.imageFile!.readAsBytes();
+            final isPdf = op.newFile!.name.toLowerCase().endsWith('.pdf');
+            final bucket = isPdf ? 'operation_documents' : 'operation_images';
+            final contentType = isPdf ? 'application/pdf' : 'image/jpeg';
+            final fileName =
+                '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}_${op.newFile!.name}';
 
+            final bytes =
+                op.newFile!.bytes ??
+                await io.File(op.newFile!.path!).readAsBytes();
+
+            try {
               await _supabase.storage
-                  .from('operation_images')
+                  .from(bucket)
                   .uploadBinary(
                     fileName,
                     bytes,
-                    fileOptions: const FileOptions(
-                      contentType: 'image/jpeg',
+                    fileOptions: FileOptions(
+                      contentType: contentType,
                       upsert: true,
                     ),
                   );
-              imageUrl = _supabase.storage
-                  .from('operation_images')
-                  .getPublicUrl(fileName);
-            } catch (e) {
-              final errStr = e.toString();
-              // Check for RLS (403) or Bucket Missing (404)
-              if (errStr.contains('403') ||
-                  errStr.contains('row-level security') ||
-                  errStr.contains('Unauthorized')) {
-                if (mounted) _showRLSErrorDialog(context);
-              } else if (errStr.contains('Bucket not found') ||
-                  errStr.contains('404')) {
-                try {
-                  debugPrint('Bucket not found, attempting to create...');
-                  // Try creating bucket
-                  await _supabase.storage.createBucket(
-                    'operation_images',
-                    const BucketOptions(public: true),
-                  );
-
-                  // Retry upload
-                  final fileName =
-                      '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}.jpg';
-                  final bytes = await op.imageFile!.readAsBytes();
-                  await _supabase.storage
-                      .from('operation_images')
-                      .uploadBinary(
-                        fileName,
-                        bytes,
-                        fileOptions: const FileOptions(
-                          contentType: 'image/jpeg',
-                          upsert: true,
-                        ),
-                      );
-                  imageUrl = _supabase.storage
-                      .from('operation_images')
-                      .getPublicUrl(fileName);
-                } catch (createErr) {
-                  debugPrint('Failed to create bucket/upload: $createErr');
-                  if (createErr.toString().contains('403') ||
-                      createErr.toString().contains('row-level security') ||
-                      createErr.toString().contains('Unauthorized')) {
-                    if (mounted) _showRLSErrorDialog(context);
-                  } else if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'Error: "operation_images" bucket missing. Please create it in Supabase Storage.',
-                        ),
-                        duration: Duration(seconds: 5),
-                        backgroundColor: Colors.red,
-                      ),
-                    );
-                  }
-                }
-              } else {
-                debugPrint('Image upload failed: $e');
+            } on StorageException catch (se) {
+              if (se.message.contains('Bucket not found')) {
+                throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
               }
+              rethrow;
+            }
+
+            final publicUrl = _supabase.storage
+                .from(bucket)
+                .getPublicUrl(fileName);
+
+            if (isPdf) {
+              pdfUrl = publicUrl;
+            } else {
+              imageUrl = publicUrl;
             }
           } catch (e) {
-            debugPrint('Image upload critical error: $e');
+            debugPrint('File upload failed: $e');
           }
         }
         opJson.add({
           'name': op.name,
           'target': op.target,
           'imageUrl': imageUrl,
+          'pdfUrl': pdfUrl,
         });
       }
 
       // 2. Insert Item
-      // Note: 'operation' column seems to be required by schema (singular).
-      // We populate it with a comma-separated string of operations.
-      // We also populate 'operations' (plural array) if it exists.
       final opNames = _operations.map((o) => o.name).toList();
 
       await _supabase.from('items').insert({
         'item_id': _itemIdController.text,
         'name': _itemNameController.text,
         'operation_details': opJson,
-        'operations': opNames, // Standard array column
+        'operations': opNames,
         'organization_code': widget.organizationCode,
-        // 'operation': opNames.join(', '), // Removed due to PGRST204 (column missing)
       });
 
       if (mounted) {
@@ -2005,50 +2243,6 @@ class _ItemsTabState extends State<ItemsTab> {
         ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
-  }
-
-  void _showRLSErrorDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Permission Error (RLS)'),
-        content: const SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'The server rejected the image upload due to Row-Level Security (RLS) policies.',
-              ),
-              SizedBox(height: 10),
-              Text(
-                'To fix this, go to your Supabase Dashboard -> SQL Editor and run:',
-              ),
-              SizedBox(height: 10),
-              SelectableText(
-                '''insert into storage.buckets (id, name, public) values ('operation_images', 'operation_images', true);
-create policy "Public Access" on storage.objects for select using ( bucket_id = 'operation_images' );
-create policy "Authenticated Insert" on storage.objects for insert with check ( bucket_id = 'operation_images' );''',
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  backgroundColor: Color(0xFFEEEEEE),
-                ),
-              ),
-              SizedBox(height: 10),
-              Text(
-                'Alternatively, go to Storage -> Create "operation_images" bucket (Public) -> Add Policy for INSERT.',
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _deleteItem(String id) async {
@@ -2072,13 +2266,17 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
             flex: 6,
             child: ListView(
               children: [
-                const Text(
-                  'Add New Item',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                Text(
+                  _editingItem == null ? 'Add New Item' : 'Edit Item',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
                 ),
                 const SizedBox(height: 10),
                 TextField(
                   controller: _itemIdController,
+                  enabled: _editingItem == null,
                   decoration: const InputDecoration(
                     labelText: 'Item ID (e.g. 5001)',
                   ),
@@ -2123,24 +2321,18 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
                       Row(
                         children: [
                           ElevatedButton.icon(
-                            onPressed: _pickImage,
-                            icon: const Icon(Icons.image),
-                            label: const Text('Pick Image'),
+                            onPressed: _pickFile,
+                            icon: const Icon(Icons.attach_file),
+                            label: const Text('Pick Image/PDF'),
                           ),
                           const SizedBox(width: 10),
-                          if (_opImage != null)
-                            SizedBox(
-                              width: 40,
-                              height: 40,
-                              child: kIsWeb
-                                  ? Image.network(
-                                      _opImage!.path,
-                                      fit: BoxFit.cover,
-                                    )
-                                  : Image.file(
-                                      File(_opImage!.path),
-                                      fit: BoxFit.cover,
-                                    ),
+                          if (_opFile != null)
+                            Expanded(
+                              child: Text(
+                                _opFile!.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                         ],
                       ),
@@ -2160,21 +2352,54 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
                     (op) => ListTile(
                       title: Text(op.name),
                       subtitle: Text('Target: ${op.target}'),
-                      trailing: op.imageUrl != null
-                          ? const Icon(Icons.image, color: Colors.blue)
-                          : null,
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (op.imageUrl != null || op.existingUrl != null)
+                            const Icon(Icons.image, color: Colors.blue),
+                          if (op.pdfUrl != null || op.existingPdfUrl != null)
+                            const Icon(Icons.picture_as_pdf, color: Colors.red),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.remove_circle,
+                              color: Colors.red,
+                            ),
+                            onPressed: () {
+                              setState(() {
+                                _operations.remove(op);
+                              });
+                            },
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
 
                 const SizedBox(height: 20),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: _addItem,
-                  child: const Text('Save Item to Database'),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: _editingItem == null ? _addItem : _updateItem,
+                      child: Text(
+                        _editingItem == null
+                            ? 'Save Item to Database'
+                            : 'Update Item',
+                      ),
+                    ),
+                    if (_editingItem != null) ...[
+                      const SizedBox(width: 10),
+                      TextButton(
+                        onPressed: _clearItemForm,
+                        child: const Text('Cancel'),
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -2203,9 +2428,24 @@ create policy "Authenticated Insert" on storage.objects for insert with check ( 
                         child: ListTile(
                           title: Text('${item['name']} (${item['item_id']})'),
                           subtitle: Text('${ops.length} Operations'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => _deleteItem(item['item_id']),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.edit,
+                                  color: Colors.blue,
+                                ),
+                                onPressed: () => _editItem(item),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.red,
+                                ),
+                                onPressed: () => _deleteItem(item['item_id']),
+                              ),
+                            ],
                           ),
                         ),
                       );
@@ -2234,22 +2474,71 @@ class _ShiftsTabState extends State<ShiftsTab> {
   final _nameController = TextEditingController();
   final _startController = TextEditingController();
   final _endController = TextEditingController();
+  List<Map<String, dynamic>> _shifts = [];
+  bool _isLoading = true;
+  Map<String, dynamic>? _editingShift;
 
-  Future<void> _addShift() async {
+  @override
+  void initState() {
+    super.initState();
+    _fetchShifts();
+  }
+
+  Future<void> _fetchShifts() async {
+    setState(() => _isLoading = true);
     try {
-      await _supabase.from('shifts').insert({
+      final resp = await _supabase
+          .from('shifts')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .order('name', ascending: true);
+      setState(() {
+        _shifts = List<Map<String, dynamic>>.from(resp);
+        _isLoading = false;
+      });
+    } catch (e) {
+      debugPrint('Fetch shifts error: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _addOrUpdateShift() async {
+    if (_nameController.text.isEmpty ||
+        _startController.text.isEmpty ||
+        _endController.text.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please fill all fields')));
+      return;
+    }
+
+    try {
+      final data = {
         'name': _nameController.text,
         'start_time': _startController.text,
         'end_time': _endController.text,
         'organization_code': widget.organizationCode,
-      });
+      };
+
+      if (_editingShift == null) {
+        await _supabase.from('shifts').insert(data);
+      } else {
+        await _supabase
+            .from('shifts')
+            .update(data)
+            .eq('id', _editingShift!['id']);
+      }
+
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Shift added!')));
-        _nameController.clear();
-        _startController.clear();
-        _endController.clear();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _editingShift == null ? 'Shift added!' : 'Shift updated!',
+            ),
+          ),
+        );
+        _clearForm();
+        _fetchShifts();
       }
     } catch (e) {
       if (mounted) {
@@ -2260,32 +2549,211 @@ class _ShiftsTabState extends State<ShiftsTab> {
     }
   }
 
+  void _editShift(Map<String, dynamic> shift) {
+    setState(() {
+      _editingShift = shift;
+      _nameController.text = shift['name'] ?? '';
+      _startController.text = shift['start_time'] ?? '';
+      _endController.text = shift['end_time'] ?? '';
+    });
+  }
+
+  Future<void> _deleteShift(dynamic id) async {
+    try {
+      await _supabase.from('shifts').delete().eq('id', id);
+      _fetchShifts();
+    } catch (e) {
+      debugPrint('Delete shift error: $e');
+    }
+  }
+
+  void _clearForm() {
+    setState(() {
+      _editingShift = null;
+      _nameController.clear();
+      _startController.clear();
+      _endController.clear();
+    });
+  }
+
+  Future<void> _selectTime(
+    BuildContext context,
+    TextEditingController controller,
+  ) async {
+    final TimeOfDay? picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.now(),
+      builder: (context, child) {
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: false),
+          child: child!,
+        );
+      },
+    );
+    if (picked != null) {
+      final now = DateTime.now();
+      final dt = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        picked.hour,
+        picked.minute,
+      );
+      setState(() {
+        controller.text = DateFormat('hh:mm a').format(dt);
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
+          Text(
+            _editingShift == null ? 'Add New Shift' : 'Edit Shift',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          ),
+          const SizedBox(height: 10),
           TextField(
             controller: _nameController,
             decoration: const InputDecoration(
               labelText: 'Shift Name (e.g. Morning)',
+              border: OutlineInputBorder(),
             ),
           ),
-          TextField(
-            controller: _startController,
-            decoration: const InputDecoration(
-              labelText: 'Start Time (e.g. 08:00)',
-            ),
-          ),
-          TextField(
-            controller: _endController,
-            decoration: const InputDecoration(
-              labelText: 'End Time (e.g. 16:00)',
-            ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _startController,
+                  readOnly: true,
+                  onTap: () => _selectTime(context, _startController),
+                  decoration: const InputDecoration(
+                    labelText: 'Start Time',
+                    border: OutlineInputBorder(),
+                    suffixIcon: Icon(Icons.access_time),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: _endController,
+                  readOnly: true,
+                  onTap: () => _selectTime(context, _endController),
+                  decoration: const InputDecoration(
+                    labelText: 'End Time',
+                    border: OutlineInputBorder(),
+                    suffixIcon: Icon(Icons.access_time),
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
-          ElevatedButton(onPressed: _addShift, child: const Text('Add Shift')),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton(
+                onPressed: _addOrUpdateShift,
+                child: Text(
+                  _editingShift == null ? 'Add Shift' : 'Update Shift',
+                ),
+              ),
+              if (_editingShift != null) ...[
+                const SizedBox(width: 10),
+                TextButton(onPressed: _clearForm, child: const Text('Cancel')),
+              ],
+            ],
+          ),
+          const Divider(height: 32, thickness: 2),
+          const Text(
+            'Existing Shifts',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _shifts.isEmpty
+                ? const Center(child: Text('No shifts found.'))
+                : ListView.builder(
+                    itemCount: _shifts.length,
+                    itemBuilder: (context, index) {
+                      final shift = _shifts[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: Colors.indigo.shade100,
+                            child: const Icon(
+                              Icons.schedule,
+                              color: Colors.indigo,
+                            ),
+                          ),
+                          title: Text(
+                            shift['name'] ?? '',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: Text(
+                            'Time: ${shift['start_time']} - ${shift['end_time']}',
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.edit,
+                                  color: Colors.blue,
+                                ),
+                                tooltip: 'Edit Shift',
+                                onPressed: () => _editShift(shift),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.red,
+                                ),
+                                tooltip: 'Delete Shift',
+                                onPressed: () {
+                                  showDialog(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      title: const Text('Delete Shift'),
+                                      content: const Text(
+                                        'Are you sure you want to delete this shift?',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () {
+                                            _deleteShift(shift['id']);
+                                            Navigator.pop(context);
+                                          },
+                                          child: const Text(
+                                            'Delete',
+                                            style: TextStyle(color: Colors.red),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
         ],
       ),
     );
@@ -2407,7 +2875,7 @@ class _SecurityTabState extends State<SecurityTab> {
           child: ListTile(
             leading: const Icon(Icons.security, color: Colors.blue),
             title: Text(
-              'Logged in at ${DateFormat('yyyy-MM-dd HH:mm:ss').format(time)}',
+              'Logged in at ${DateFormat('yyyy-MM-dd hh:mm:ss a').format(time)}',
             ),
             subtitle: Text('Device: $device\nOS: $os'),
             isThreeLine: true,

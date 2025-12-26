@@ -1,6 +1,6 @@
 [build]
   publish = "flutter_application_1/build/web"
-  command = "./build_web.sh"
+  command = "../build_web.sh"
 
 [[redirects]]
   from = "/*"

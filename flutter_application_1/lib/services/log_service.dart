@@ -15,7 +15,8 @@ class LogService {
     _logs.insert(0, log); // Keep local copy for immediate UI update if needed
 
     try {
-      await Supabase.instance.client.from('production_logs').insert({
+      await Supabase.instance.client.from('production_logs').upsert({
+        'id': log.id,
         'worker_id': log.employeeId,
         'machine_id': log.machineId,
         'item_id': log.itemId,

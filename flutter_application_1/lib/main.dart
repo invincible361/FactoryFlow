@@ -44,6 +44,22 @@ class MyApp extends StatelessWidget {
           backgroundColor: Color(0xFF6C5CE7),
           foregroundColor: Colors.white,
           elevation: 0,
+          titleTextStyle: TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+          iconTheme: IconThemeData(color: Colors.white),
+          actionsIconTheme: IconThemeData(color: Colors.white),
+        ),
+        tabBarTheme: const TabBarThemeData(
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          labelStyle: TextStyle(fontWeight: FontWeight.bold),
+          unselectedLabelStyle: TextStyle(fontWeight: FontWeight.bold),
+          indicatorColor: Colors.white,
+          indicatorSize: TabBarIndicatorSize.label,
+          dividerColor: Colors.transparent,
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style:

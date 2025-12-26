@@ -1,4 +1,4 @@
-import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
 
 class Item {
   final String id;
@@ -12,26 +12,41 @@ class Item {
     required this.operations,
     this.operationDetails = const [],
   });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Item && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
 }
 
 class OperationDetail {
   final String name;
   final int target;
   final String? imageUrl;
-  final XFile? imageFile; // For local upload handling (Web compatible)
+  final String? pdfUrl;
+  final PlatformFile? newFile; // For local upload handling
+  final String? existingUrl; // To keep track of existing image URL during edit
+  final String? existingPdfUrl; // To keep track of existing PDF URL during edit
 
   OperationDetail({
     required this.name,
     required this.target,
     this.imageUrl,
-    this.imageFile,
+    this.pdfUrl,
+    this.newFile,
+    this.existingUrl,
+    this.existingPdfUrl,
   });
 
   factory OperationDetail.fromJson(Map<String, dynamic> json) {
     return OperationDetail(
       name: json['name'] ?? '',
       target: json['target'] ?? 0,
-      imageUrl: json['imageUrl'] ?? json['image_url'], // Handle both cases if needed
+      imageUrl: json['imageUrl'] ?? json['image_url'],
+      pdfUrl: json['pdfUrl'] ?? json['pdf_url'],
     );
   }
 
@@ -39,7 +54,8 @@ class OperationDetail {
     return {
       'name': name,
       'target': target,
-      'imageUrl': imageUrl, 
+      'imageUrl': imageUrl,
+      'pdfUrl': pdfUrl,
     };
   }
 }

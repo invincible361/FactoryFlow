@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:uuid/uuid.dart';
+import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
@@ -50,6 +52,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   bool _isTimerRunning = false;
   String? _factoryName;
   String? _logoUrl;
+  String? _currentLogId;
   Widget _metricTile(String title, String value, Color color, IconData icon) {
     return Container(
       decoration: BoxDecoration(
@@ -123,7 +126,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     _checkLocation();
     _fetchOrganizationName();
     _fetchTodayExtraUnits();
-    // _loadPersistedState will be called inside _fetchData to ensure lists are ready
+    // Start a timer to refresh the current time display
+    Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _loadPersistedState() async {
@@ -134,6 +140,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final operation = prefs.getString('persisted_operation');
       final shift = prefs.getString('persisted_shift');
       final startTimeStr = prefs.getString('persisted_start_time');
+      final currentLogId = prefs.getString('persisted_current_log_id');
       final isTimerRunning =
           prefs.getBool('persisted_is_timer_running') ?? false;
 
@@ -151,6 +158,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           }
           _selectedOperation = operation;
           _selectedShift = shift;
+          if (currentLogId != null && currentLogId.startsWith('log_')) {
+            // Migration: Old format log IDs are not valid UUIDs.
+            // We clear it to avoid Supabase errors.
+            prefs.remove('persisted_current_log_id');
+          } else {
+            _currentLogId = currentLogId;
+          }
 
           if (isTimerRunning && startTimeStr != null) {
             _startTime = DateTime.parse(startTimeStr);
@@ -210,6 +224,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         );
       } else {
         await prefs.remove('persisted_start_time');
+      }
+
+      if (_currentLogId != null) {
+        await prefs.setString('persisted_current_log_id', _currentLogId!);
+      } else {
+        await prefs.remove('persisted_current_log_id');
       }
     } catch (e) {
       debugPrint('Error persisting state: $e');
@@ -289,12 +309,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           .from('shifts')
           .select()
           .eq('organization_code', widget.employee.organizationCode!);
-      final shiftsList = List<Map<String, dynamic>>.from(shiftsResponse).where((
-        s,
-      ) {
-        final n = (s['name'] ?? '').toString().toLowerCase();
-        return n == 'morning' || n == 'evening';
-      }).toList();
+      final shiftsList = List<Map<String, dynamic>>.from(shiftsResponse);
 
       if (mounted) {
         setState(() {
@@ -375,7 +390,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     }
   }
 
-  void _startTimer() {
+  Future<void> _startTimer() async {
     if (_selectedMachine == null ||
         _selectedItem == null ||
         _selectedOperation == null) {
@@ -387,11 +402,39 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       return;
     }
 
+    final logId = const Uuid().v4();
+
     setState(() {
       _isTimerRunning = true;
       _startTime = DateTime.now();
       _elapsed = Duration.zero;
+      _currentLogId = logId;
     });
+
+    // Save initial log for "In" time visibility
+    try {
+      final initialLog = ProductionLog(
+        id: logId,
+        employeeId: widget.employee.id,
+        machineId: _selectedMachine!.id,
+        itemId: _selectedItem!.id,
+        operation: _selectedOperation!,
+        quantity: 0,
+        timestamp: _startTime!,
+        startTime: _startTime,
+        endTime: null,
+        latitude: _currentPosition?.latitude ?? 0.0,
+        longitude: _currentPosition?.longitude ?? 0.0,
+        shiftName: _selectedShift ?? _getShiftName(_startTime!),
+        performanceDiff: 0,
+        organizationCode: widget.employee.organizationCode,
+        remarks: 'Production started...',
+      );
+      await LogService().addLog(initialLog);
+    } catch (e) {
+      debugPrint('Error saving initial log: $e');
+    }
+
     _persistState();
 
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -404,17 +447,46 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   }
 
   String _getShiftName(DateTime time) {
-    // Shift 1: 7:30 AM to 7:30 PM (Day)
-    // Shift 2: 7:30 PM to 7:30 AM (Night)
-
+    // We will now try to fetch the actual shift name from the database based on the time
+    // If not found, we fallback to the default logic
     final minutes = time.hour * 60 + time.minute;
+
+    for (final shift in _shifts) {
+      try {
+        final startStr = shift['start_time'] as String;
+        final endStr = shift['end_time'] as String;
+
+        // Parse "hh:mm a" format
+        final format = DateFormat('hh:mm a');
+        final startDt = format.parse(startStr);
+        final endDt = format.parse(endStr);
+
+        final startMinutes = startDt.hour * 60 + startDt.minute;
+        final endMinutes = endDt.hour * 60 + endDt.minute;
+
+        if (startMinutes < endMinutes) {
+          if (minutes >= startMinutes && minutes < endMinutes) {
+            return shift['name'] + ' (' + startStr + ' - ' + endStr + ')';
+          }
+        } else {
+          // Crosses midnight
+          if (minutes >= startMinutes || minutes < endMinutes) {
+            return shift['name'] + ' (' + startStr + ' - ' + endStr + ')';
+          }
+        }
+      } catch (e) {
+        debugPrint('Error parsing shift time: $e');
+      }
+    }
+
+    // Fallback logic
     final dayStart = 7 * 60 + 30; // 450
     final dayEnd = 19 * 60 + 30; // 1170
 
     if (minutes >= dayStart && minutes < dayEnd) {
-      return 'Day Shift (7:30 AM - 7:30 PM)';
+      return 'Day Shift (07:30 AM - 07:30 PM)';
     } else {
-      return 'Night Shift (7:30 PM - 7:30 AM)';
+      return 'Night Shift (07:30 PM - 07:30 AM)';
     }
   }
 
@@ -437,125 +509,128 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Production Finished'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Duration: ${_formatDuration(_elapsed)}',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _quantityController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Enter Quantity Produced',
-                border: OutlineInputBorder(),
+      builder: (context) {
+        final currentContext = context;
+        return AlertDialog(
+          title: const Text('Production Finished'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Duration: ${_formatDuration(_elapsed)}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _remarksController,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Remarks (Optional)',
-                hintText: 'Add any issues or notes here...',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.comment),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _quantityController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Enter Quantity Produced',
+                  border: OutlineInputBorder(),
+                ),
               ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _resumeTimer(); // Restart timer if cancelled
-              Navigator.pop(context);
-            },
-            child: const Text('Cancel'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _remarksController,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Remarks (Optional)',
+                  hintText: 'Add any issues or notes here...',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.comment),
+                ),
+              ),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () {
-              if (_quantityController.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Please enter quantity')),
-                );
-                return;
-              }
-              final quantity = int.tryParse(_quantityController.text);
-              if (quantity == null) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Invalid quantity')),
-                );
-                return;
-              }
+          actions: [
+            TextButton(
+              onPressed: () {
+                _resumeTimer(); // Restart timer if cancelled
+                Navigator.pop(currentContext);
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (_quantityController.text.isEmpty) {
+                  ScaffoldMessenger.of(currentContext).showSnackBar(
+                    const SnackBar(content: Text('Please enter quantity')),
+                  );
+                  return;
+                }
+                final quantity = int.tryParse(_quantityController.text);
+                if (quantity == null) {
+                  ScaffoldMessenger.of(currentContext).showSnackBar(
+                    const SnackBar(content: Text('Invalid quantity')),
+                  );
+                  return;
+                }
 
-              // Target Validation
-              final detail = _getCurrentOperationDetail();
-              if (detail != null && detail.target > 0) {
-                final diff = quantity - detail.target;
-                final isTargetMet = diff >= 0;
+                // Target Validation
+                final detail = _getCurrentOperationDetail();
+                if (detail != null && detail.target > 0) {
+                  final diff = quantity - detail.target;
+                  final isTargetMet = diff >= 0;
 
-                Navigator.pop(context); // Close input dialog
+                  Navigator.pop(currentContext); // Close input dialog
 
-                // Show Result Dialog
-                showDialog(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (context) => AlertDialog(
-                    title: Text(
-                      isTargetMet ? 'Target Met! 🎉' : 'Target Missed ⚠️',
-                    ),
-                    content: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        isTargetMet
-                            ? const Icon(
-                                Icons.sentiment_very_satisfied,
-                                size: 60,
-                                color: Colors.green,
-                              )
-                            : const Icon(
-                                Icons.sentiment_dissatisfied,
-                                size: 60,
-                                color: Colors.orange,
-                              ),
-                        const SizedBox(height: 16),
-                        Text(
+                  // Show Result Dialog
+                  showDialog(
+                    context: currentContext,
+                    barrierDismissible: false,
+                    builder: (context) => AlertDialog(
+                      title: Text(
+                        isTargetMet ? 'Target Met! 🎉' : 'Target Missed ⚠️',
+                      ),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                           isTargetMet
-                              ? 'Produced: $quantity (Target: ${detail.target})\nSurplus: +$diff'
-                              : 'Produced: $quantity (Target: ${detail.target})\nDeficit: $diff',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: isTargetMet ? Colors.green : Colors.red,
-                            fontSize: 16,
+                              ? const Icon(
+                                  Icons.sentiment_very_satisfied,
+                                  size: 60,
+                                  color: Colors.green,
+                                )
+                              : const Icon(
+                                  Icons.sentiment_dissatisfied,
+                                  size: 60,
+                                  color: Colors.orange,
+                                ),
+                          const SizedBox(height: 16),
+                          Text(
+                            isTargetMet
+                                ? 'Produced: $quantity (Target: ${detail.target})\nSurplus: +$diff'
+                                : 'Produced: $quantity (Target: ${detail.target})\nDeficit: $diff',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: isTargetMet ? Colors.green : Colors.red,
+                              fontSize: 16,
+                            ),
                           ),
+                        ],
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () {
+                            Navigator.pop(context);
+                            _saveLog(endTime, diff);
+                          },
+                          child: const Text('Save Log'),
                         ),
                       ],
                     ),
-                    actions: [
-                      TextButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          _saveLog(endTime, diff);
-                        },
-                        child: const Text('Save Log'),
-                      ),
-                    ],
-                  ),
-                );
-              } else {
-                Navigator.pop(context);
-                _saveLog(endTime, 0);
-              }
-            },
-            child: const Text('Submit'),
-          ),
-        ],
-      ),
+                  );
+                } else {
+                  Navigator.pop(currentContext);
+                  _saveLog(endTime, 0);
+                }
+              },
+              child: const Text('Submit'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -587,7 +662,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       }
 
       final log = ProductionLog(
-        id: DateTime.now().toIso8601String(),
+        id: (_currentLogId != null && !_currentLogId!.startsWith('log_'))
+            ? _currentLogId!
+            : const Uuid().v4(),
         employeeId: widget.employee.id,
         machineId: _selectedMachine!.id,
         itemId: _selectedItem!.id,
@@ -598,7 +675,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         endTime: endTime,
         latitude: position.latitude,
         longitude: position.longitude,
-        shiftName: _selectedShift ?? _getShiftName(DateTime.now()),
+        shiftName:
+            _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
         performanceDiff: performanceDiff,
         organizationCode: widget.employee.organizationCode,
         remarks: _remarksController.text.isNotEmpty
@@ -608,30 +686,19 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
       await LogService().addLog(log);
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Log saved successfully to database!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      // Reset State
-      setState(() {
-        _isTimerRunning = false;
-        _selectedOperation = null;
-        _selectedItem = null;
-        _selectedMachine = null;
-        _quantityController.clear();
-        _remarksController.clear();
-        _elapsed = Duration.zero;
-      });
-      _clearPersistedState();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Production Log Saved Successfully!')),
+        );
+        _resetForm();
+        _fetchTodayExtraUnits();
+      }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error saving log: $e')));
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -639,6 +706,22 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         });
       }
     }
+  }
+
+  void _resetForm() {
+    _timer?.cancel();
+    setState(() {
+      _isTimerRunning = false;
+      _startTime = null;
+      _elapsed = Duration.zero;
+      _currentLogId = null;
+      _quantityController.clear();
+      _remarksController.clear();
+      _selectedOperation = null;
+      _selectedItem = null;
+      _selectedMachine = null;
+    });
+    _clearPersistedState();
   }
 
   List<String> _getFilteredOperations() {
@@ -758,12 +841,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                 childAspectRatio: 2.0,
                 children: [
                   _metricTile(
-                    'Shift',
+                    'Current Time',
+                    DateFormat('hh:mm:ss a').format(DateTime.now()),
+                    Colors.blue.shade100,
+                    Icons.access_time,
+                  ),
+                  _metricTile(
+                    'Shift Timer',
                     _isTimerRunning
                         ? '${_elapsed.inHours}h ${_elapsed.inMinutes % 60}m'
                         : 'Not started',
-                    Colors.blue.shade100,
-                    Icons.schedule,
+                    Colors.orange.shade100,
+                    Icons.timer,
                   ),
                   _metricTile(
                     'Location',
@@ -776,7 +865,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                   _metricTile(
                     'Machine',
                     _selectedMachine != null ? _selectedMachine!.name : 'None',
-                    Colors.orange.shade100,
+                    Colors.blueGrey.shade100,
                     Icons.precision_manufacturing,
                   ),
                   _metricTile(
@@ -1304,9 +1393,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                   if (v % 3 != 0) {
                                     return const SizedBox.shrink();
                                   }
+                                  final hour = v % 12 == 0 ? 12 : v % 12;
+                                  final amPm = v < 12 ? 'AM' : 'PM';
                                   return Text(
-                                    '${v}h',
-                                    style: const TextStyle(fontSize: 11),
+                                    '$hour $amPm',
+                                    style: const TextStyle(fontSize: 10),
                                   );
                                 } else if (period == 'Week') {
                                   if ((v + 1) % 2 != 0) {
