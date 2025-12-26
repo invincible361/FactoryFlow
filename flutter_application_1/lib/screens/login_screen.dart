@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:geolocator/geolocator.dart';
 import '../models/employee.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
@@ -82,9 +83,13 @@ class _LoginScreenState extends State<LoginScreen> {
       });
 
       try {
-        final username = _usernameController.text;
-        final password = _passwordController.text;
-        final orgCode = _orgCodeController.text;
+        final username = _usernameController.text.trim();
+        final password = _passwordController.text.trim();
+        final orgCode = _orgCodeController.text.trim();
+
+        if (username.isEmpty || password.isEmpty || orgCode.isEmpty) {
+          throw StateError('All fields are required');
+        }
 
         // 1. Owner Login (Admin for organization)
         final orgResp = await Supabase.instance.client
@@ -185,12 +190,31 @@ class _LoginScreenState extends State<LoginScreen> {
               errorMessage.contains('column')) {
             errorMessage =
                 'Database schema mismatch. Please run the migration script.';
+          } else if (errorMessage.contains('Location services are disabled')) {
+            errorMessage =
+                'Location services are disabled. Please enable them in your device settings to log in.';
+          } else if (errorMessage.contains('Location permissions are denied')) {
+            errorMessage =
+                'Location permissions are required for workers to log in. Please grant permission.';
+          } else if (errorMessage.contains('permanently denied')) {
+            errorMessage =
+                'Location permissions are permanently denied. Please enable them in App Settings.';
           }
         }
 
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(errorMessage)));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            action: (errorMessage.contains('Location'))
+                ? SnackBarAction(
+                    label: 'Settings',
+                    onPressed: () {
+                      Geolocator.openLocationSettings();
+                    },
+                  )
+                : null,
+          ),
+        );
         setState(() {
           _isLoading = false;
         });

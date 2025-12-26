@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:uuid/uuid.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1529,18 +1528,38 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     return List<Map<String, dynamic>>.from(response);
   }
 
+  Future<List<Map<String, dynamic>>> _fetchEmployeeAttendance(
+    DateTime from,
+  ) async {
+    final supabase = Supabase.instance.client;
+    final response = await supabase
+        .from('attendance')
+        .select()
+        .eq('worker_id', widget.employee.id)
+        .eq('organization_code', widget.employee.organizationCode ?? '')
+        .gte('date', DateFormat('yyyy-MM-dd').format(from))
+        .order('date', ascending: true);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
   void _openProductivity() async {
     final now = DateTime.now();
     final dayFrom = DateTime(now.year, now.month, now.day);
     final weekFrom = now.subtract(const Duration(days: 6));
     final monthFrom = now.subtract(const Duration(days: 29));
+
+    // Fetch logs
     final dayLogs = await _fetchEmployeeLogs(dayFrom);
     final weekLogs = await _fetchEmployeeLogs(weekFrom);
     final monthLogs = await _fetchEmployeeLogs(monthFrom);
-    final extraWeeks = await _fetchEmployeeLogs(
-      now.subtract(const Duration(days: 7 * 8)),
-    );
+
+    // Fetch attendance
+    final dayAtt = await _fetchEmployeeAttendance(dayFrom);
+    final weekAtt = await _fetchEmployeeAttendance(weekFrom);
+    final monthAtt = await _fetchEmployeeAttendance(monthFrom);
+
     if (!mounted) return;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1549,291 +1568,282 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             List<Map<String, dynamic>> logs;
+            List<Map<String, dynamic>> att;
             if (period == 'Day') {
               logs = dayLogs;
+              att = dayAtt;
             } else if (period == 'Month') {
               logs = monthLogs;
+              att = monthAtt;
             } else {
               logs = weekLogs;
-            }
-            List<BarChartGroupData> groups = [];
-            if (period == 'Day') {
-              final buckets = List<double>.filled(24, 0);
-              for (final l in logs) {
-                final t = DateTime.tryParse(
-                  (l['created_at'] ?? '').toString(),
-                )?.toLocal();
-                if (t != null) {
-                  buckets[t.hour] += (l['quantity'] ?? 0) * 1.0;
-                }
-              }
-              for (int i = 0; i < buckets.length; i++) {
-                groups.add(
-                  BarChartGroupData(
-                    x: i,
-                    barRods: [BarChartRodData(toY: buckets[i])],
-                  ),
-                );
-              }
-            } else {
-              int days = period == 'Week' ? 7 : 30;
-              final buckets = List<double>.filled(days, 0);
-              for (final l in logs) {
-                final t = DateTime.tryParse(
-                  (l['created_at'] ?? '').toString(),
-                )?.toLocal();
-                if (t != null) {
-                  final idx = period == 'Week'
-                      ? now.difference(t).inDays
-                      : now.difference(t).inDays;
-                  final pos = days - 1 - idx;
-                  if (pos >= 0 && pos < days) {
-                    buckets[pos] += (l['quantity'] ?? 0) * 1.0;
-                  }
-                }
-              }
-              for (int i = 0; i < buckets.length; i++) {
-                groups.add(
-                  BarChartGroupData(
-                    x: i,
-                    barRods: [BarChartRodData(toY: buckets[i])],
-                  ),
-                );
-              }
+              att = weekAtt;
             }
 
-            final extraBuckets = List<double>.filled(8, 0);
-            for (final l in extraWeeks) {
-              final t = DateTime.tryParse(
-                (l['created_at'] ?? '').toString(),
-              )?.toLocal();
-              if (t != null) {
-                final wStart = DateTime(
-                  t.year,
-                  t.month,
-                  t.day,
-                ).subtract(Duration(days: t.weekday - 1));
-                final weeksAgo =
-                    DateTime(
-                      now.year,
-                      now.month,
-                      now.day,
-                    ).difference(wStart).inDays ~/
-                    7;
-                final pos = 7 - weeksAgo;
-                final diff = (l['performance_diff'] ?? 0) as int;
-                if (diff > 0 && pos >= 0 && pos < 8) {
-                  extraBuckets[pos] += diff * 1.0;
+            // Aggregate data by date
+            final Map<String, Map<String, dynamic>> dailyData = {};
+
+            // Initialize dailyData with attendance
+            for (var a in att) {
+              final dateStr = a['date']?.toString() ?? '';
+              if (dateStr.isEmpty) continue;
+
+              double hoursWorked = 0;
+              if (a['check_in'] != null && a['check_out'] != null) {
+                final cin = DateTime.tryParse(a['check_in'].toString());
+                final cout = DateTime.tryParse(a['check_out'].toString());
+                if (cin != null && cout != null) {
+                  hoursWorked = cout.difference(cin).inMinutes / 60.0;
                 }
               }
-            }
-            final extraGroups = [
-              for (int i = 0; i < extraBuckets.length; i++)
-                BarChartGroupData(
-                  x: i,
-                  barRods: [
-                    BarChartRodData(toY: extraBuckets[i], color: Colors.green),
-                  ],
-                ),
-            ];
 
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 16,
-                right: 16,
-                top: 16,
-                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        const Text(
-                          'Productivity',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const Spacer(),
-                        DropdownButton<String>(
-                          value: period,
-                          items: const [
-                            DropdownMenuItem<String>(
-                              value: 'Day',
-                              child: Text('Day'),
-                            ),
-                            DropdownMenuItem<String>(
-                              value: 'Week',
-                              child: Text('Week'),
-                            ),
-                            DropdownMenuItem<String>(
-                              value: 'Month',
-                              child: Text('Month'),
-                            ),
-                          ],
-                          onChanged: (v) {
-                            if (v != null) setModalState(() => period = v);
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      height:
-                          MediaQuery.of(context).orientation ==
-                              Orientation.landscape
-                          ? 150
-                          : 240,
-                      child: BarChart(
-                        BarChartData(
-                          barGroups: groups,
-                          gridData: FlGridData(
-                            show: true,
-                            drawVerticalLine: false,
-                          ),
-                          borderData: FlBorderData(show: false),
-                          barTouchData: BarTouchData(
-                            enabled: true,
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipItem:
-                                  (group, groupIndex, rod, rodIndex) {
-                                    return BarTooltipItem(
-                                      rod.toY.toStringAsFixed(0),
-                                      const TextStyle(color: Colors.white),
-                                    );
-                                  },
-                            ),
-                          ),
-                          titlesData: FlTitlesData(
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 28,
-                                getTitlesWidget: (value, meta) {
-                                  final v = value.toInt();
-                                  if (period == 'Day') {
-                                    if (v % 3 != 0) {
-                                      return const SizedBox.shrink();
-                                    }
-                                    final hour = v % 12 == 0 ? 12 : v % 12;
-                                    final amPm = v < 12 ? 'AM' : 'PM';
-                                    return Text(
-                                      '$hour $amPm',
-                                      style: const TextStyle(fontSize: 10),
-                                    );
-                                  } else if (period == 'Week') {
-                                    if ((v + 1) % 2 != 0) {
-                                      return const SizedBox.shrink();
-                                    }
-                                    return Text(
-                                      '${v + 1}',
-                                      style: const TextStyle(fontSize: 11),
-                                    );
-                                  } else {
-                                    if ((v + 1) % 5 != 0) {
-                                      return const SizedBox.shrink();
-                                    }
-                                    return Text(
-                                      '${v + 1}',
-                                      style: const TextStyle(fontSize: 11),
-                                    );
-                                  }
-                                },
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 44,
-                              ),
-                            ),
-                            topTitles: AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                            rightTitles: AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Weekly Extra Work',
+              dailyData[dateStr] = {
+                'date': dateStr,
+                'check_in': a['check_in'],
+                'check_out': a['check_out'],
+                'hours_worked': hoursWorked,
+                'prod_time': 0.0,
+                'surplus': 0,
+                'deficit': 0,
+                'total_qty': 0,
+              };
+            }
+
+            // Add logs data
+            for (var l in logs) {
+              final createdAt = DateTime.tryParse(
+                l['created_at']?.toString() ?? '',
+              );
+              if (createdAt == null) continue;
+              final dateStr = DateFormat('yyyy-MM-dd').format(createdAt);
+
+              dailyData.putIfAbsent(
+                dateStr,
+                () => {
+                  'date': dateStr,
+                  'check_in': null,
+                  'check_out': null,
+                  'hours_worked': 0.0,
+                  'prod_time': 0.0,
+                  'surplus': 0,
+                  'deficit': 0,
+                  'total_qty': 0,
+                },
+              );
+
+              final data = dailyData[dateStr]!;
+
+              // Production time
+              if (l['startTime'] != null && l['endTime'] != null) {
+                final start = DateTime.tryParse(l['startTime'].toString());
+                final end = DateTime.tryParse(l['endTime'].toString());
+                if (start != null && end != null) {
+                  data['prod_time'] += end.difference(start).inMinutes / 60.0;
+                }
+              }
+
+              // Surplus/Deficit
+              final diff = (l['performance_diff'] ?? 0) as int;
+              if (diff > 0) {
+                data['surplus'] += diff;
+              } else if (diff < 0) {
+                data['deficit'] += diff.abs();
+              }
+
+              data['total_qty'] += (l['quantity'] ?? 0) as int;
+            }
+
+            final sortedDates = dailyData.keys.toList()
+              ..sort((a, b) => b.compareTo(a));
+
+            return Container(
+              height: MediaQuery.of(context).size.height * 0.8,
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        'Worker Report',
                         style: TextStyle(
-                          fontSize: 16,
+                          fontSize: 20,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      height: 220,
-                      child: BarChart(
-                        BarChartData(
-                          barGroups: extraGroups,
-                          gridData: FlGridData(
-                            show: true,
-                            drawVerticalLine: false,
+                      const Spacer(),
+                      DropdownButton<String>(
+                        value: period,
+                        items: const [
+                          DropdownMenuItem(value: 'Day', child: Text('Day')),
+                          DropdownMenuItem(value: 'Week', child: Text('Week')),
+                          DropdownMenuItem(
+                            value: 'Month',
+                            child: Text('Month'),
                           ),
-                          borderData: FlBorderData(show: false),
-                          barTouchData: BarTouchData(
-                            enabled: true,
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipItem:
-                                  (group, groupIndex, rod, rodIndex) {
-                                    return BarTooltipItem(
-                                      rod.toY.toStringAsFixed(0),
-                                      const TextStyle(color: Colors.white),
-                                    );
-                                  },
-                            ),
-                          ),
-                          titlesData: FlTitlesData(
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 26,
-                                getTitlesWidget: (value, meta) {
-                                  final v = value.toInt();
-                                  if ((v + 1) % 2 != 0) {
-                                    return const SizedBox.shrink();
-                                  }
-                                  return Text(
-                                    'W${v + 1}',
-                                    style: const TextStyle(fontSize: 11),
-                                  );
-                                },
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 44,
-                              ),
-                            ),
-                            topTitles: AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                            rightTitles: AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                          ),
-                        ),
+                        ],
+                        onChanged: (v) {
+                          if (v != null) setModalState(() => period = v);
+                        },
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
+                  const Divider(),
+                  Expanded(
+                    child: sortedDates.isEmpty
+                        ? const Center(
+                            child: Text('No records found for this period.'),
+                          )
+                        : ListView.builder(
+                            itemCount: sortedDates.length,
+                            itemBuilder: (context, index) {
+                              final date = sortedDates[index];
+                              final data = dailyData[date]!;
+                              final hoursWorked =
+                                  data['hours_worked'] as double;
+                              final prodTime = data['prod_time'] as double;
+                              final surplus = data['surplus'] as int;
+                              final deficit = data['deficit'] as int;
+
+                              return Card(
+                                margin: const EdgeInsets.symmetric(vertical: 8),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text(
+                                            DateFormat(
+                                              'EEE, MMM d, yyyy',
+                                            ).format(DateTime.parse(date)),
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          if (data['check_in'] != null)
+                                            const Chip(
+                                              label: Text(
+                                                'Present',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                              backgroundColor: Colors.green,
+                                              padding: EdgeInsets.zero,
+                                              visualDensity:
+                                                  VisualDensity.compact,
+                                            )
+                                          else
+                                            const Chip(
+                                              label: Text(
+                                                'Absent',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                              backgroundColor: Colors.red,
+                                              padding: EdgeInsets.zero,
+                                              visualDensity:
+                                                  VisualDensity.compact,
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          _reportInfoTile(
+                                            'Hours Worked',
+                                            '${hoursWorked.toStringAsFixed(1)}h',
+                                            Icons.work_outline,
+                                          ),
+                                          _reportInfoTile(
+                                            'Prod. Time',
+                                            '${prodTime.toStringAsFixed(1)}h',
+                                            Icons.timer_outlined,
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          _reportInfoTile(
+                                            'Surplus',
+                                            '+$surplus',
+                                            Icons.trending_up,
+                                            color: Colors.green,
+                                          ),
+                                          _reportInfoTile(
+                                            'Deficit',
+                                            '-$deficit',
+                                            Icons.trending_down,
+                                            color: Colors.red,
+                                          ),
+                                        ],
+                                      ),
+                                      if (data['check_in'] != null) ...[
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          'Attendance: ${DateFormat('hh:mm a').format(DateTime.parse(data['check_in'].toString()).toLocal())} - '
+                                          '${data['check_out'] != null ? DateFormat('hh:mm a').format(DateTime.parse(data['check_out'].toString()).toLocal()) : "Active"}',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.grey[600],
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
               ),
             );
           },
         );
       },
+    );
+  }
+
+  Widget _reportInfoTile(
+    String label,
+    String value,
+    IconData icon, {
+    Color? color,
+  }) {
+    return Expanded(
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color ?? Colors.blueGrey),
+          const SizedBox(width: 4),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(fontSize: 10, color: Colors.grey),
+              ),
+              Text(
+                value,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

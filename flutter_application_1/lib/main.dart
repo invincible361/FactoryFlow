@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -162,6 +163,13 @@ Future<void> _handleShiftEndReminder() async {
 }
 
 Future<void> _showNotification(String title, String body) async {
+  if (kIsWeb ||
+      !(Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isMacOS ||
+          Platform.isWindows)) {
+    return;
+  }
   final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
   const androidDetails = AndroidNotificationDetails(
     'factory_flow_channel',
@@ -173,6 +181,7 @@ Future<void> _showNotification(String title, String body) async {
   const notificationDetails = NotificationDetails(
     android: androidDetails,
     iOS: iosDetails,
+    macOS: iosDetails,
   );
   await flutterLocalNotificationsPlugin.show(
     0,
@@ -186,21 +195,28 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Initialize Notifications
-  final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-  const iosInit = DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-  const initSettings = InitializationSettings(
-    android: androidInit,
-    iOS: iosInit,
-  );
-  await flutterLocalNotificationsPlugin.initialize(initSettings);
+  if (!kIsWeb &&
+      (Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isMacOS ||
+          Platform.isWindows)) {
+    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const iosInit = DarwinInitializationSettings(
+      requestAlertPermission: true,
+      requestBadgePermission: true,
+      requestSoundPermission: true,
+    );
+    const initSettings = InitializationSettings(
+      android: androidInit,
+      iOS: iosInit,
+      macOS: iosInit,
+    );
+    await flutterLocalNotificationsPlugin.initialize(initSettings);
+  }
 
   // Initialize Workmanager
-  if (!kIsWeb) {
+  if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
     await Workmanager().initialize(callbackDispatcher);
   }
 

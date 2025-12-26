@@ -46,31 +46,33 @@ ALTER TABLE public.owner_logs ENABLE ROW LEVEL SECURITY;
 -- Workers policies
 DROP POLICY IF EXISTS "Allow public read for login" ON public.workers;
 CREATE POLICY "Allow public read for login" ON public.workers FOR SELECT USING (true);
-DROP POLICY IF EXISTS "Allow all for anon" ON public.workers;
-CREATE POLICY "Allow all for anon" ON public.workers FOR ALL USING (true);
+DROP POLICY IF EXISTS "Allow worker self access" ON public.workers;
+CREATE POLICY "Allow worker self access" ON public.workers FOR ALL USING (
+    (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')::text = worker_id::text
+);
 
 -- Organizations policies
 DROP POLICY IF EXISTS "Allow public read for org check" ON public.organizations;
 CREATE POLICY "Allow public read for org check" ON public.organizations FOR SELECT USING (true);
-DROP POLICY IF EXISTS "Allow all for anon" ON public.organizations;
-CREATE POLICY "Allow all for anon" ON public.organizations FOR ALL USING (true);
 
 -- Production Logs policies
 DROP POLICY IF EXISTS "Allow all for anon" ON public.production_logs;
-CREATE POLICY "Allow all for anon" ON public.production_logs FOR ALL USING (true);
+CREATE POLICY "Allow worker access to own logs" ON public.production_logs FOR ALL USING (
+    (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')::text = worker_id::text
+);
 
 -- Machines policies
 DROP POLICY IF EXISTS "Allow all for anon" ON public.machines;
-CREATE POLICY "Allow all for anon" ON public.machines FOR ALL USING (true);
+CREATE POLICY "Allow public read for machines" ON public.machines FOR SELECT USING (true);
 
 -- Items policies
 DROP POLICY IF EXISTS "Allow all for anon" ON public.items;
-CREATE POLICY "Allow all for anon" ON public.items FOR ALL USING (true);
+CREATE POLICY "Allow public read for items" ON public.items FOR SELECT USING (true);
 
 -- Shifts policies
 DROP POLICY IF EXISTS "Allow all for anon" ON public.shifts;
-CREATE POLICY "Allow all for anon" ON public.shifts FOR ALL USING (true);
+CREATE POLICY "Allow public read for shifts" ON public.shifts FOR SELECT USING (true);
 
 -- Owner Logs policies
 DROP POLICY IF EXISTS "Allow all for anon" ON public.owner_logs;
-CREATE POLICY "Allow all for anon" ON public.owner_logs FOR ALL USING (true);
+CREATE POLICY "Allow authenticated insert for owner logs" ON public.owner_logs FOR INSERT WITH CHECK (true);
