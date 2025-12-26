@@ -1,6 +1,6 @@
 [build]
   publish = "flutter_application_1/build/web"
-  command = "echo 'Build handled by GitHub Actions'"
+  command = "./build_web.sh"
 
 [[redirects]]
   from = "/*"
