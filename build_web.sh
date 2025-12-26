@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-# Use a temporary directory for Flutter to avoid issues with existing files
-FLUTTER_PATH="/tmp/flutter"
+# Use a local directory for Flutter to ensure persistence within the build environment
+FLUTTER_PATH="$(pwd)/.flutter"
 
 if [ ! -d "$FLUTTER_PATH" ]; then
   echo "Cloning Flutter stable..."
   git clone https://github.com/flutter/flutter.git -b stable --depth 1 "$FLUTTER_PATH"
 fi
 
-export PATH="$PATH:$FLUTTER_PATH/bin"
+export PATH="$FLUTTER_PATH/bin:$PATH"
 
 echo "Flutter version:"
 flutter --version
@@ -17,18 +17,13 @@ flutter --version
 echo "Enabling web..."
 flutter config --enable-web
 
-echo "Pre-caching web artifacts..."
-flutter precache --web
-
-# Navigate to app directory if not already there
-if [ -d "flutter_application_1" ]; then
-  cd flutter_application_1
-fi
+# Navigate to app directory
+cd flutter_application_1
 
 echo "Getting dependencies..."
 flutter pub get
 
 echo "Building web release..."
-flutter build web --release
+flutter build web --release --base-href "/"
 
 echo "Build complete."
