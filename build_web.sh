@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Use the current directory for Flutter
-FLUTTER_PATH="$(pwd)/flutter"
+# Use a temporary directory for Flutter to avoid issues with existing files
+FLUTTER_PATH="/tmp/flutter"
 
 if [ ! -d "$FLUTTER_PATH" ]; then
   echo "Cloning Flutter stable..."
