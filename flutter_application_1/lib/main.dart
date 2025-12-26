@@ -201,7 +201,7 @@ void main() async {
 
   // Initialize Workmanager
   if (!kIsWeb) {
-    await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
+    await Workmanager().initialize(callbackDispatcher);
   }
 
   try {
