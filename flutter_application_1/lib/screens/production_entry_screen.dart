@@ -466,12 +466,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
         if (startMinutes < endMinutes) {
           if (minutes >= startMinutes && minutes < endMinutes) {
-            return shift['name'] + ' (' + startStr + ' - ' + endStr + ')';
+            return "${shift['name']} ($startStr - $endStr)";
           }
         } else {
           // Crosses midnight
           if (minutes >= startMinutes || minutes < endMinutes) {
-            return shift['name'] + ' (' + startStr + ' - ' + endStr + ')';
+            return "${shift['name']} ($startStr - $endStr)";
           }
         }
       } catch (e) {
