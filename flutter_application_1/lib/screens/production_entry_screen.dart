@@ -210,6 +210,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
             _startTime = DateTime.parse(startTimeStr);
             _isTimerRunning = true;
             _resumeTimer();
+            _initializeBackgroundTasks();
           }
         });
       }

@@ -8,11 +8,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'screens/login_screen.dart';
 
 // Background task identifiers
 const String syncLocationTask = "syncLocationTask";
 const String shiftEndReminderTask = "shiftEndReminderTask";
+
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  debugPrint("Handling a background message: ${message.messageId}");
+}
 
 @pragma('vm:entry-point')
 void callbackDispatcher() {
@@ -36,8 +44,9 @@ Future<void> _handleBackgroundLocation() async {
   final prefs = await SharedPreferences.getInstance();
   final workerId = prefs.getString('worker_id');
   final orgCode = prefs.getString('org_code');
+  final isTimerRunning = prefs.getBool('persisted_is_timer_running') ?? false;
 
-  if (workerId == null || orgCode == null) return;
+  if (workerId == null || orgCode == null || !isTimerRunning) return;
 
   try {
     final position = await Geolocator.getCurrentPosition();
@@ -193,6 +202,15 @@ Future<void> _showNotification(String title, String body) async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Firebase
+  try {
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    debugPrint('Firebase initialized successfully');
+  } catch (e) {
+    debugPrint('Firebase initialization error: $e');
+  }
 
   // Initialize Notifications
   if (!kIsWeb &&

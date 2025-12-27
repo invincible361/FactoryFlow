@@ -238,7 +238,9 @@ class _LoginScreenState extends State<LoginScreen> {
                       ScrollViewKeyboardDismissBehavior.onDrag,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
-                      minHeight: viewportConstraints.maxHeight,
+                      minHeight: viewportConstraints.maxHeight > 0
+                          ? viewportConstraints.maxHeight
+                          : 0,
                     ),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -272,6 +274,13 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (value == null || value.isEmpty) {
                               return 'Please enter organization code';
                             }
+                            if (value.length < 3) {
+                              return 'Organization code too short';
+                            }
+                            // Only allow alphanumeric characters
+                            if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(value)) {
+                              return 'Invalid characters in organization code';
+                            }
                             return null;
                           },
                         ),
@@ -284,6 +293,9 @@ class _LoginScreenState extends State<LoginScreen> {
                           validator: (value) {
                             if (value == null || value.isEmpty) {
                               return 'Please enter username';
+                            }
+                            if (value.length < 3) {
+                              return 'Username too short';
                             }
                             return null;
                           },
