@@ -290,7 +290,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (value == null || value.isEmpty) {
                               return 'Please enter organization code';
                             }
-                            if (value.length < 3) {
+                            if (value.length < 2) {
                               return 'Organization code too short';
                             }
                             // Only allow alphanumeric characters
@@ -310,7 +310,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (value == null || value.isEmpty) {
                               return 'Please enter username';
                             }
-                            if (value.length < 3) {
+                            if (value.length < 2) {
                               return 'Username too short';
                             }
                             return null;
@@ -550,8 +550,11 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         decoration: const InputDecoration(
                           labelText: 'Factory Code',
                         ),
-                        validator: (v) =>
-                            (v == null || v.trim().isEmpty) ? 'Required' : null,
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (v.trim().length < 2) return 'Too short';
+                          return null;
+                        },
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -561,8 +564,11 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         decoration: const InputDecoration(
                           labelText: 'Factory Name',
                         ),
-                        validator: (v) =>
-                            (v == null || v.trim().isEmpty) ? 'Required' : null,
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (v.trim().length < 2) return 'Too short';
+                          return null;
+                        },
                       ),
                     ),
                   ],
@@ -631,9 +637,11 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                     Expanded(
                       child: TextFormField(
                         controller: _ownerUserController,
-                        decoration: const InputDecoration(
-                          labelText: 'Owner Username',
-                        ),
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (v.trim().length < 2) return 'Too short';
+                          return null;
+                        },
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -644,6 +652,11 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                           labelText: 'Owner Password',
                         ),
                         obscureText: true,
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) return 'Required';
+                          if (v.trim().length < 2) return 'Too short';
+                          return null;
+                        },
                       ),
                     ),
                   ],
