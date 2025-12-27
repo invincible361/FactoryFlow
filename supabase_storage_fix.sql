@@ -1,19 +1,31 @@
--- 1. Create the bucket 'operation-images' if it doesn't exist, and ensure it is PUBLIC
+-- 1. Create the buckets if they don't exist, and ensure they are PUBLIC
 insert into storage.buckets (id, name, public)
-values ('operation-images', 'operation-images', true)
+values 
+  ('operation_images', 'operation_images', true),
+  ('operation_documents', 'operation_documents', true)
 on conflict (id) do update
 set public = true;
 
 -- 2. Remove existing policies to avoid conflicts
-drop policy if exists "Public Access" on storage.objects;
-drop policy if exists "Public Upload" on storage.objects;
+drop policy if exists "Public Access Images" on storage.objects;
+drop policy if exists "Public Upload Images" on storage.objects;
+drop policy if exists "Public Access Documents" on storage.objects;
+drop policy if exists "Public Upload Documents" on storage.objects;
 
--- 3. Allow EVERYONE to VIEW images in this bucket (Required for Worker App)
-create policy "Public Access"
+-- 3. Allow EVERYONE to VIEW files in these buckets
+create policy "Public Access Images"
   on storage.objects for select
-  using ( bucket_id = 'operation-images' );
+  using ( bucket_id = 'operation_images' );
 
--- 4. Allow EVERYONE to UPLOAD images to this bucket (Required for Admin App without Auth)
-create policy "Public Upload"
+create policy "Public Access Documents"
+  on storage.objects for select
+  using ( bucket_id = 'operation_documents' );
+
+-- 4. Allow EVERYONE to UPLOAD files to these buckets
+create policy "Public Upload Images"
   on storage.objects for insert
-  with check ( bucket_id = 'operation-images' );
+  with check ( bucket_id = 'operation_images' );
+
+create policy "Public Upload Documents"
+  on storage.objects for insert
+  with check ( bucket_id = 'operation_documents' );

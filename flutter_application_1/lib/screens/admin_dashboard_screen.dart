@@ -2500,6 +2500,51 @@ class _ItemsTabState extends State<ItemsTab> {
 
   Map<String, dynamic>? _editingItem;
 
+  Future<String?> _uploadToBucketWithAutoCreate(
+    String bucket,
+    String fileName,
+    Uint8List bytes,
+    String contentType,
+  ) async {
+    try {
+      try {
+        await _supabase.storage
+            .from(bucket)
+            .uploadBinary(
+              fileName,
+              bytes,
+              fileOptions: FileOptions(contentType: contentType, upsert: true),
+            );
+      } on StorageException catch (se) {
+        if (se.message.contains('Bucket not found') || se.statusCode == '404') {
+          // Attempt to create the bucket if it's missing
+          await _supabase.storage.createBucket(
+            bucket,
+            const BucketOptions(public: true),
+          );
+
+          // Retry the upload
+          await _supabase.storage
+              .from(bucket)
+              .uploadBinary(
+                fileName,
+                bytes,
+                fileOptions: FileOptions(
+                  contentType: contentType,
+                  upsert: true,
+                ),
+              );
+        } else {
+          rethrow;
+        }
+      }
+      return _supabase.storage.from(bucket).getPublicUrl(fileName);
+    } catch (e) {
+      debugPrint('Upload error for bucket $bucket: $e');
+      rethrow;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -2570,34 +2615,13 @@ class _ItemsTabState extends State<ItemsTab> {
           final bucket = isPdf ? 'operation_documents' : 'operation_images';
           final contentType = isPdf ? 'application/pdf' : 'image/jpeg';
 
-          try {
-            try {
-              await _supabase.storage
-                  .from(bucket)
-                  .uploadBinary(
-                    fileName,
-                    bytes,
-                    fileOptions: FileOptions(
-                      contentType: contentType,
-                      upsert: true,
-                    ),
-                  );
-            } on StorageException catch (se) {
-              if (se.message.contains('Bucket not found')) {
-                throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
-              }
-              rethrow;
-            }
-          } on StorageException catch (se) {
-            if (se.message.contains('Bucket not found')) {
-              throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
-            }
-            rethrow;
-          }
+          final publicUrl = await _uploadToBucketWithAutoCreate(
+            bucket,
+            fileName,
+            bytes,
+            contentType,
+          );
 
-          final publicUrl = _supabase.storage
-              .from(bucket)
-              .getPublicUrl(fileName);
           if (isPdf) {
             pdfUrl = publicUrl;
           } else {
@@ -2717,27 +2741,12 @@ class _ItemsTabState extends State<ItemsTab> {
                 op.newFile!.bytes ??
                 await io.File(op.newFile!.path!).readAsBytes();
 
-            try {
-              await _supabase.storage
-                  .from(bucket)
-                  .uploadBinary(
-                    fileName,
-                    bytes,
-                    fileOptions: FileOptions(
-                      contentType: contentType,
-                      upsert: true,
-                    ),
-                  );
-            } on StorageException catch (se) {
-              if (se.message.contains('Bucket not found')) {
-                throw 'Storage Bucket "$bucket" not found. Please create it in Supabase dashboard (Storage -> New Bucket) and set it to Public.';
-              }
-              rethrow;
-            }
-
-            final publicUrl = _supabase.storage
-                .from(bucket)
-                .getPublicUrl(fileName);
+            final publicUrl = await _uploadToBucketWithAutoCreate(
+              bucket,
+              fileName,
+              bytes,
+              contentType,
+            );
 
             if (isPdf) {
               pdfUrl = publicUrl;
@@ -2746,6 +2755,7 @@ class _ItemsTabState extends State<ItemsTab> {
             }
           } catch (e) {
             debugPrint('File upload failed: $e');
+            rethrow; // Rethrow to show in UI
           }
         }
         opJson.add({

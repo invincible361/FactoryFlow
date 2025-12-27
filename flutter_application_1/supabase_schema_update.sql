@@ -10,10 +10,10 @@ ALTER TABLE items ADD COLUMN operation_details JSONB DEFAULT '[]'::jsonb;
 -- 2. Modify 'production_logs' table to store Shift Name
 ALTER TABLE production_logs ADD COLUMN shift_name TEXT;
 
--- 3. Create a Storage Bucket for Images
--- Go to Storage -> Create a new bucket named 'operation-images'
--- Make sure it's Public
--- Add a policy to allow authenticated uploads (or public if you prefer for dev)
+-- 3. Create Storage Buckets for Images and Documents
+-- Go to Storage -> Create new buckets named 'operation_images' and 'operation_documents'
+-- Make sure they are Public
+-- Add policies to allow public uploads and access (see supabase_storage_fix.sql for details)
 
 -- 4. (Optional) Data Migration if you already have data
 -- This is just an example, you might not need it if starting fresh
