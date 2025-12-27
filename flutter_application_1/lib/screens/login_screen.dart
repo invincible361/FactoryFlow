@@ -121,7 +121,27 @@ class _LoginScreenState extends State<LoginScreen> {
 
         // 2. Employee Login Checks
         // Check location first
-        final position = await _locationService.getCurrentLocation();
+        Position? position;
+        try {
+          position = await _locationService.getCurrentLocation();
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Location error: $e. Please enable location services.',
+              ),
+              backgroundColor: Colors.red,
+            ),
+          );
+          setState(() => _isLoading = false);
+          return;
+        }
+
+        if (position == null) {
+          throw StateError('Could not determine your location.');
+        }
+
         final isInside = _locationService.isInside(
           position,
           orgLat,

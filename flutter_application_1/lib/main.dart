@@ -121,6 +121,10 @@ Future<void> _handleBackgroundLocation() async {
           await prefs.remove('active_boundary_event_id');
         }
         await prefs.setBool('was_inside', true);
+        await _showNotification(
+          "Back in Bounds",
+          "You have returned to the factory premises.",
+        );
       }
     }
   } catch (e) {
@@ -131,20 +135,23 @@ Future<void> _handleBackgroundLocation() async {
 Future<void> _handleShiftEndReminder() async {
   final prefs = await SharedPreferences.getInstance();
   final isTimerRunning = prefs.getBool('persisted_is_timer_running') ?? false;
+  final selectedShiftName = prefs.getString('persisted_shift');
 
-  if (!isTimerRunning) return;
+  if (!isTimerRunning || selectedShiftName == null) return;
 
   final orgCode = prefs.getString('org_code');
   if (orgCode == null) return;
 
   try {
     final now = DateTime.now();
-    final shifts = await Supabase.instance.client
+    final shift = await Supabase.instance.client
         .from('shifts')
         .select()
-        .eq('organization_code', orgCode);
+        .eq('organization_code', orgCode)
+        .eq('name', selectedShiftName)
+        .maybeSingle();
 
-    for (final shift in shifts) {
+    if (shift != null) {
       final endTimeStr = shift['end_time'] as String;
       final format = DateFormat('hh:mm a');
       final endDt = format.parse(endTimeStr);
@@ -156,18 +163,30 @@ Future<void> _handleShiftEndReminder() async {
         endDt.hour,
         endDt.minute,
       );
-      final diff = shiftEndToday.difference(now);
+
+      // Handle night shift end time crossing midnight
+      final startDt = format.parse(shift['start_time'] as String);
+      DateTime adjustedShiftEnd = shiftEndToday;
+      if (endDt.isBefore(startDt)) {
+        // If end time is before start time, it belongs to the next day
+        // unless we are already in that next day's early hours.
+        if (now.hour >= startDt.hour) {
+          adjustedShiftEnd = shiftEndToday.add(const Duration(days: 1));
+        }
+      }
+
+      final diff = adjustedShiftEnd.difference(now);
 
       // Notify 15 minutes before shift ends if production is still running
       if (diff.inMinutes > 0 && diff.inMinutes <= 15) {
         await _showNotification(
           "Shift Ending Soon",
-          "Your shift ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
+          "Your shift ($selectedShiftName) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
         );
       }
     }
   } catch (e) {
-    debugPrint('Shift end reminder error: $e');
+    debugPrint('Shift reminder error: $e');
   }
 }
 
