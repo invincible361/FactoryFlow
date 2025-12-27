@@ -1,0 +1,50 @@
+name: Build Windows App 
+
+on: 
+  push: 
+    branches: [ "main" ] 
+  workflow_dispatch: 
+
+jobs: 
+  build-windows: 
+    runs-on: windows-latest 
+
+    steps: 
+      - name: Checkout code 
+        uses: actions/checkout@v4 
+
+      - name: Setup Flutter 
+        uses: subosito/flutter-action@v2 
+        with: 
+          flutter-version: 'stable' 
+          channel: 'stable' 
+
+      - name: Enable Windows 
+        run: flutter config --enable-windows-desktop 
+
+      - name: Install dependencies 
+        run: |
+          cd flutter_application_1
+          flutter pub get 
+
+      - name: Build Windows EXE 
+        run: |
+          cd flutter_application_1
+          flutter build windows --release 
+
+      - name: Build MSIX Installer 
+        run: |
+          cd flutter_application_1
+          flutter pub run msix:create 
+
+      - name: Upload EXE 
+        uses: actions/upload-artifact@v4 
+        with: 
+          name: FactoryFlow-Windows-EXE 
+          path: flutter_application_1/build/windows/runner/Release/ 
+
+      - name: Upload MSIX 
+        uses: actions/upload-artifact@v4 
+        with: 
+          name: FactoryFlow-Windows-MSIX 
+          path: flutter_application_1/build/windows/msix/ 
