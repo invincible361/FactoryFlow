@@ -1813,13 +1813,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                             style: TextStyle(fontSize: 16, color: Colors.blue),
                           ),
                           const SizedBox(height: 10),
-                          Text(
-                            _formatDuration(_elapsed),
-                            style: const TextStyle(
-                              fontSize: 48,
-                              fontWeight: FontWeight.bold,
-                              fontFamily: 'Monospace',
-                            ),
+                          ValueListenableBuilder<Duration>(
+                            valueListenable: _elapsedTimeNotifier,
+                            builder: (context, elapsed, _) {
+                              return Text(
+                                _formatDuration(elapsed),
+                                style: const TextStyle(
+                                  fontSize: 48,
+                                  fontWeight: FontWeight.bold,
+                                  fontFamily: 'Monospace',
+                                ),
+                              );
+                            },
                           ),
                         ],
                       ),
