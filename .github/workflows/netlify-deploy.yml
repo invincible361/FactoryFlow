@@ -26,16 +26,6 @@ jobs:
       - name: Build Flutter Web (release)
         run: flutter build web --release
 
-      - name: Verify Netlify Secrets
-        run: |
-          if [ -z "${{ secrets.NETLIFY_SITE_ID }}" ]; then
-            echo "Error: NETLIFY_SITE_ID is not set in GitHub Secrets."
-            exit 1
-          fi
-          if [ -z "${{ secrets.NETLIFY_AUTH_TOKEN }}" ]; then
-            echo "Error: NETLIFY_AUTH_TOKEN is not set in GitHub Secrets."
-            exit 1
-          fi
-
       - name: Deploy to Netlify (Production)
+        if: "${{ secrets.NETLIFY_SITE_ID != '' && secrets.NETLIFY_AUTH_TOKEN != '' }}"
         run: npx netlify-cli deploy --dir=build/web --prod --site="${{ secrets.NETLIFY_SITE_ID }}" --auth="${{ secrets.NETLIFY_AUTH_TOKEN }}"
