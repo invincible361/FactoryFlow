@@ -34,7 +34,7 @@ jobs:
       - name: Build MSIX Installer 
         run: |
           cd flutter_application_1
-          flutter pub run msix:create --no-install-certificate 
+          flutter pub run msix:create 
 
       - name: Upload EXE 
         uses: actions/upload-artifact@v4 
