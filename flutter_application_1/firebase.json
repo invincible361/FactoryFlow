@@ -18,6 +18,11 @@
       "app": "1:37828631168:android:acd754981c60779b00a465",
       "groups": ["testers"],
       "file": "build/app/outputs/flutter-apk/app-release.apk"
+    },
+    {
+      "app": "1:37828631168:web:f72ff24711efb1df00a465",
+      "groups": ["testers"],
+      "file": "build/web"
     }
   ]
 }

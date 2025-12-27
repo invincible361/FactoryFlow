@@ -31,6 +31,20 @@
 
   <title>FactoryFlow</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- Firebase configuration -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCH3pU33ZINtOh_Fb4ajUFOsuVh2iTY1ps",
+      authDomain: "factoryflow-46d05.firebaseapp.com",
+      projectId: "factoryflow-46d05",
+      storageBucket: "factoryflow-46d05.firebasestorage.app",
+      messagingSenderId: "37828631168",
+      appId: "1:37828631168:web:f72ff24711efb1df00a465"
+    };
+    firebase.initializeApp(firebaseConfig);
+  </script>
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>
