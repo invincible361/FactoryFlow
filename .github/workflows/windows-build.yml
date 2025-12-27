@@ -40,10 +40,12 @@ jobs:
         uses: actions/upload-artifact@v4 
         with: 
           name: FactoryFlow-Windows-EXE 
-          path: flutter_application_1/build/windows/runner/Release/ 
+          path: flutter_application_1/build/windows/x64/runner/Release/
+          if-no-files-found: error
 
       - name: Upload MSIX 
         uses: actions/upload-artifact@v4 
         with: 
           name: FactoryFlow-Windows-MSIX 
-          path: flutter_application_1/build/windows/msix/ 
+          path: flutter_application_1/build/windows/x64/runner/Release/*.msix
+          if-no-files-found: error
