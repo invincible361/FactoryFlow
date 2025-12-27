@@ -23,6 +23,21 @@ subprojects {
     tasks.withType<JavaCompile>().configureEach {
         sourceCompatibility = "17"
         targetCompatibility = "17"
+        options.compilerArgs.add("-Xlint:-options")
+    }
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        kotlinOptions {
+            jvmTarget = "17"
+        }
+    }
+    afterEvaluate {
+        if (project.hasProperty("android")) {
+            val android = project.extensions.getByName("android") as com.android.build.gradle.BaseExtension
+            android.compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_17
+                targetCompatibility = JavaVersion.VERSION_17
+            }
+        }
     }
 }
 
