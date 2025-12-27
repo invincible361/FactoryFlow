@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import 'utils/time_utils.dart';
 import 'screens/login_screen.dart';
 
 // Background task identifiers
@@ -95,7 +96,7 @@ Future<void> _handleBackgroundLocation() async {
 
           String? durationStr;
           if (event != null) {
-            final exitTime = DateTime.parse(event['exit_time']);
+            final exitTime = TimeUtils.parseToLocal(event['exit_time']);
             final diff = entryTime.difference(exitTime);
             durationStr = "${diff.inMinutes} mins";
           }
@@ -103,7 +104,7 @@ Future<void> _handleBackgroundLocation() async {
           await Supabase.instance.client
               .from('worker_boundary_events')
               .update({
-                'entry_time': entryTime.toIso8601String(),
+                'entry_time': entryTime.toUtc().toIso8601String(),
                 'entry_latitude': position.latitude,
                 'entry_longitude': position.longitude,
                 'duration_minutes': durationStr,
@@ -169,11 +170,17 @@ Future<void> _handleShiftEndReminder() async {
 
       final diff = adjustedShiftEnd.difference(now);
 
-      // Notify 15 minutes before shift ends if production is still running
+      // Notify if shift ends in <= 15 minutes OR if shift has already ended
       if (diff.inMinutes > 0 && diff.inMinutes <= 15) {
         await _showNotification(
           "Shift Ending Soon",
           "Your shift ($selectedShiftName) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
+        );
+      } else if (diff.isNegative) {
+        // Shift has already ended
+        await _showNotification(
+          "Shift Ended",
+          "Your shift ($selectedShiftName) has ended, but production is still running. Please close your production tasks.",
         );
       }
     }
@@ -190,25 +197,31 @@ Future<void> _showNotification(String title, String body) async {
           Platform.isWindows)) {
     return;
   }
-  final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-  const androidDetails = AndroidNotificationDetails(
-    'factory_flow_channel',
-    'FactoryFlow Notifications',
-    importance: Importance.max,
-    priority: Priority.high,
-  );
-  const iosDetails = DarwinNotificationDetails();
-  const notificationDetails = NotificationDetails(
-    android: androidDetails,
-    iOS: iosDetails,
-    macOS: iosDetails,
-  );
-  await flutterLocalNotificationsPlugin.show(
-    0,
-    title,
-    body,
-    notificationDetails,
-  );
+  try {
+    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+    const androidDetails = AndroidNotificationDetails(
+      'factory_flow_channel',
+      'FactoryFlow Notifications',
+      importance: Importance.max,
+      priority: Priority.high,
+      icon: 'launcher_icon',
+    );
+    const iosDetails = DarwinNotificationDetails();
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+      macOS: iosDetails,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecond,
+      title,
+      body,
+      details,
+    );
+  } catch (e) {
+    debugPrint('Error showing notification: $e');
+  }
 }
 
 void main() async {
@@ -220,19 +233,38 @@ void main() async {
           Platform.isIOS ||
           Platform.isMacOS ||
           Platform.isWindows)) {
-    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const iosInit = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
-    const initSettings = InitializationSettings(
-      android: androidInit,
-      iOS: iosInit,
-      macOS: iosInit,
-    );
-    await flutterLocalNotificationsPlugin.initialize(initSettings);
+    try {
+      final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+      const androidInit = AndroidInitializationSettings('launcher_icon');
+      const iosInit = DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
+      const initSettings = InitializationSettings(
+        android: androidInit,
+        iOS: iosInit,
+        macOS: iosInit,
+      );
+      await flutterLocalNotificationsPlugin.initialize(initSettings);
+
+      // Specifically for Android 13+ and iOS permissions
+      if (Platform.isAndroid) {
+        await flutterLocalNotificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.requestNotificationsPermission();
+      } else if (Platform.isIOS) {
+        await flutterLocalNotificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin
+            >()
+            ?.requestPermissions(alert: true, badge: true, sound: true);
+      }
+    } catch (e) {
+      debugPrint('Error initializing notifications: $e');
+    }
   }
 
   // Initialize Workmanager

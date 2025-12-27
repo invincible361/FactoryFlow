@@ -1,3 +1,5 @@
+import '../utils/time_utils.dart';
+
 class ProductionLog {
   final String id;
   final String employeeId;
@@ -41,9 +43,9 @@ class ProductionLog {
       'itemId': itemId,
       'operation': operation,
       'quantity': quantity,
-      'timestamp': timestamp.toIso8601String(),
-      'startTime': startTime?.toIso8601String(),
-      'endTime': endTime?.toIso8601String(),
+      'timestamp': timestamp.toUtc().toIso8601String(),
+      'startTime': startTime?.toUtc().toIso8601String(),
+      'endTime': endTime?.toUtc().toIso8601String(),
       'latitude': latitude,
       'longitude': longitude,
       'shiftName': shiftName,
@@ -61,9 +63,13 @@ class ProductionLog {
       itemId: json['itemId'],
       operation: json['operation'],
       quantity: json['quantity'],
-      timestamp: DateTime.parse(json['timestamp']),
-      startTime: json['startTime'] != null ? DateTime.parse(json['startTime']) : null,
-      endTime: json['endTime'] != null ? DateTime.parse(json['endTime']) : null,
+      timestamp: TimeUtils.parseToLocal(json['timestamp']),
+      startTime: json['startTime'] != null
+          ? TimeUtils.parseToLocal(json['startTime'])
+          : null,
+      endTime: json['endTime'] != null
+          ? TimeUtils.parseToLocal(json['endTime'])
+          : null,
       latitude: json['latitude'],
       longitude: json['longitude'],
       shiftName: json['shiftName'],

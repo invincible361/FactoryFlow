@@ -7,7 +7,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/time_utils.dart';
 import 'package:workmanager/workmanager.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../main.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
@@ -25,7 +27,8 @@ class ProductionEntryScreen extends StatefulWidget {
   State<ProductionEntryScreen> createState() => _ProductionEntryScreenState();
 }
 
-class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
+class _ProductionEntryScreenState extends State<ProductionEntryScreen>
+    with WidgetsBindingObserver {
   final _formKey = GlobalKey<FormState>();
   final LocationService _locationService = LocationService();
 
@@ -48,6 +51,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   Position? _currentPosition;
   String _locationStatus = 'Checking location...';
   bool _isLocationLoading = false;
+  bool? _isInside; // Track inside/outside state more robustly
 
   // Timer State
   Timer? _timer;
@@ -57,6 +61,15 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   String? _factoryName;
   String? _logoUrl;
   String? _currentLogId;
+
+  // Notifiers for lag optimization
+  final ValueNotifier<DateTime> _currentTimeNotifier = ValueNotifier<DateTime>(
+    DateTime.now(),
+  );
+  final ValueNotifier<Duration> _elapsedTimeNotifier = ValueNotifier<Duration>(
+    Duration.zero,
+  );
+  Timer? _uiUpdateTimer;
   Widget _metricTile(String title, String value, Color color, IconData icon) {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -134,14 +147,45 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _requestNotificationPermissions();
     _fetchData();
     _checkLocation();
     _fetchOrganizationName();
     _fetchTodayExtraUnits();
-    // Start a timer to refresh the current time display
-    Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) setState(() {});
+    // Start a UI update timer to refresh time-based notifiers without full screen setState
+    _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      _currentTimeNotifier.value = DateTime.now();
+      if (_isTimerRunning && _startTime != null) {
+        _elapsed = DateTime.now().difference(_startTime!);
+        _elapsedTimeNotifier.value = _elapsed;
+
+        // Check location and shift end every 60 seconds while timer is running in foreground
+        if (timer.tick % 60 == 0) {
+          _checkLocation();
+          _checkShiftEndForeground();
+        }
+      }
     });
+  }
+
+  Future<void> _requestNotificationPermissions() async {
+    if (kIsWeb) return;
+
+    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+    if (Platform.isAndroid) {
+      await flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >()
+          ?.requestNotificationsPermission();
+    } else if (Platform.isIOS) {
+      await flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin
+          >()
+          ?.requestPermissions(alert: true, badge: true, sound: true);
+    }
   }
 
   Future<void> _initializeBackgroundTasks() async {
@@ -208,7 +252,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
           }
 
           if (isTimerRunning && startTimeStr != null) {
-            _startTime = DateTime.parse(startTimeStr);
+            _startTime = TimeUtils.parseToLocal(startTimeStr);
             _isTimerRunning = true;
             _resumeTimer();
             _initializeBackgroundTasks();
@@ -221,13 +265,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   }
 
   void _resumeTimer() {
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        setState(() {
-          _elapsed = DateTime.now().difference(_startTime!);
-        });
-      }
+    setState(() {
+      _isTimerRunning = true;
     });
   }
 
@@ -320,7 +359,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final machinesResponse = await supabase
           .from('machines')
           .select()
-          .eq('organization_code', widget.employee.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!)
+          .order('name', ascending: true);
       final machinesList = (machinesResponse as List).map((data) {
         return Machine(
           id: data['machine_id'],
@@ -335,7 +375,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final itemsResponse = await supabase
           .from('items')
           .select()
-          .eq('organization_code', widget.employee.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!)
+          .order('name', ascending: true);
       final itemsList = (itemsResponse as List).map((data) {
         return Item(
           id: data['item_id'],
@@ -350,7 +391,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final shiftsResponse = await supabase
           .from('shifts')
           .select()
-          .eq('organization_code', widget.employee.organizationCode!);
+          .eq('organization_code', widget.employee.organizationCode!)
+          .order('name', ascending: true);
 
       // Deduplicate shifts by name to prevent dropdown crashes
       final List<Map<String, dynamic>> shiftsList = [];
@@ -388,10 +430,106 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
   @override
   void dispose() {
+    _uiUpdateTimer?.cancel();
+    _currentTimeNotifier.dispose();
+    _elapsedTimeNotifier.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _quantityController.dispose();
     _remarksController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _sendBackgroundReminder();
+    }
+  }
+
+  Future<void> _sendBackgroundReminder() async {
+    final prefs = await SharedPreferences.getInstance();
+    final isTimerRunning = prefs.getBool('persisted_is_timer_running') ?? false;
+
+    if (isTimerRunning) {
+      await _showLocalNotification(
+        "Production Still Running",
+        "Your production timer is still active. Please remember to update or close your production when finished.",
+      );
+    }
+  }
+
+  Future<void> _showLocalNotification(String title, String body) async {
+    if (kIsWeb) return;
+
+    try {
+      final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+      const androidDetails = AndroidNotificationDetails(
+        'factory_flow_reminder',
+        'FactoryFlow Reminders',
+        importance: Importance.max,
+        priority: Priority.high,
+        icon: 'launcher_icon',
+      );
+      const iosDetails = DarwinNotificationDetails();
+      const notificationDetails = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+
+      await flutterLocalNotificationsPlugin.show(
+        DateTime.now().millisecond,
+        title,
+        body,
+        notificationDetails,
+      );
+    } catch (e) {
+      debugPrint('Error showing local notification: $e');
+    }
+  }
+
+  Future<void> _checkShiftEndForeground() async {
+    if (!_isTimerRunning || _selectedShift == null) return;
+
+    try {
+      final now = DateTime.now();
+      final shift = _shifts.firstWhere((s) => s['name'] == _selectedShift);
+      final endTimeStr = shift['end_time'] as String;
+      final format = DateFormat('hh:mm a');
+      final endDt = format.parse(endTimeStr);
+
+      DateTime shiftEndToday = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        endDt.hour,
+        endDt.minute,
+      );
+
+      final startDt = format.parse(shift['start_time'] as String);
+      if (endDt.isBefore(startDt)) {
+        if (now.hour >= startDt.hour) {
+          shiftEndToday = shiftEndToday.add(const Duration(days: 1));
+        }
+      }
+
+      final diff = shiftEndToday.difference(now);
+
+      if (diff.inMinutes > 0 && diff.inMinutes <= 15) {
+        await _showLocalNotification(
+          "Shift Ending Soon",
+          "Your shift ($_selectedShift) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
+        );
+      } else if (diff.isNegative) {
+        await _showLocalNotification(
+          "Shift Ended",
+          "Your shift ($_selectedShift) has ended, but production is still running. Please close your production tasks.",
+        );
+      }
+    } catch (e) {
+      debugPrint('Foreground shift reminder error: $e');
+    }
   }
 
   Future<void> _checkLocation() async {
@@ -422,10 +560,81 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       }
 
       if (mounted) {
+        final wasInside = _isInside;
         setState(() {
           _currentPosition = position;
+          _isInside = isInside;
           _locationStatus = isInside ? 'Inside Factory ✅' : 'Outside Factory ❌';
         });
+
+        // Log out-of-bounds event if production is running
+        if (_isTimerRunning) {
+          final prefs = await SharedPreferences.getInstance();
+          final now = DateTime.now();
+
+          // wasInside is null on first check, treat as true to avoid false exit log
+          // or we can use the persisted 'was_inside' if available
+          final effectiveWasInside =
+              wasInside ?? prefs.getBool('was_inside') ?? true;
+
+          if (effectiveWasInside && !isInside) {
+            // Just moved out
+            final eventId = const Uuid().v4();
+            await Supabase.instance.client
+                .from('production_outofbounds')
+                .insert({
+                  'id': eventId,
+                  'worker_id': widget.employee.id,
+                  'worker_name': widget.employee.name,
+                  'organization_code': widget.employee.organizationCode,
+                  'date': DateFormat('yyyy-MM-dd').format(now),
+                  'exit_time': now.toUtc().toIso8601String(),
+                  'exit_latitude': position.latitude,
+                  'exit_longitude': position.longitude,
+                });
+            await prefs.setString('active_boundary_event_id', eventId);
+            await prefs.setBool('was_inside', false);
+            await _showLocalNotification(
+              "Out of Bounds",
+              "You have left the factory premises while production is running.",
+            );
+          } else if (!effectiveWasInside && isInside) {
+            // Just came back
+            final eventId = prefs.getString('active_boundary_event_id');
+            if (eventId != null) {
+              final entryTime = DateTime.now();
+              // Fetch exit time to calculate duration
+              final event = await Supabase.instance.client
+                  .from('production_outofbounds')
+                  .select('exit_time')
+                  .eq('id', eventId)
+                  .maybeSingle();
+
+              String? durationStr;
+              if (event != null) {
+                final exitTime = TimeUtils.parseToLocal(event['exit_time']);
+                final diff = entryTime.difference(exitTime);
+                durationStr = "${diff.inMinutes} mins";
+              }
+
+              await Supabase.instance.client
+                  .from('production_outofbounds')
+                  .update({
+                    'entry_time': entryTime.toUtc().toIso8601String(),
+                    'entry_latitude': position.latitude,
+                    'entry_longitude': position.longitude,
+                    'duration_minutes': durationStr,
+                  })
+                  .eq('id', eventId);
+              await prefs.remove('active_boundary_event_id');
+              await prefs.setBool('was_inside', true);
+              await _showLocalNotification(
+                "Back in Bounds",
+                "You have returned to the factory premises.",
+              );
+            }
+          }
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -466,6 +675,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     // Start background tasks only when production starts
     await _initializeBackgroundTasks();
 
+    // Check location immediately
+    _checkLocation();
+
     // Record attendance check-in
     await _updateAttendance(isCheckOut: false);
 
@@ -494,14 +706,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     }
 
     _persistState();
-
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        setState(() {
-          _elapsed = DateTime.now().difference(_startTime!);
-        });
-      }
-    });
   }
 
   String _getShiftName(DateTime time) {
@@ -554,6 +758,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       final dateStr = DateFormat('yyyy-MM-dd').format(now);
       final supabase = Supabase.instance.client;
 
+      // Ensure we have the latest shift info
       final shift = _shifts.firstWhere(
         (s) => s['name'] == _selectedShift,
         orElse: () => <String, dynamic>{},
@@ -569,20 +774,36 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
       };
 
       if (!isCheckOut) {
+        // For Start Production, always record check_in if it's the first production of the shift
         final existing = await supabase
             .from('attendance')
             .select()
             .eq('worker_id', widget.employee.id)
             .eq('date', dateStr)
             .eq('organization_code', widget.employee.organizationCode!)
+            .eq('shift_name', _selectedShift!)
             .maybeSingle();
 
         if (existing == null) {
-          payload['check_in'] = now.toIso8601String();
+          payload['check_in'] = now.toUtc().toIso8601String();
+          payload['status'] = 'On Time'; // Default status on check-in
           await supabase.from('attendance').insert(payload);
+        } else if (existing['check_in'] == null) {
+          // If record exists (e.g. from previous shift overlap) but check_in is missing
+          await supabase
+              .from('attendance')
+              .update({
+                'check_in': now.toUtc().toIso8601String(),
+                'status': 'On Time',
+              })
+              .eq('worker_id', widget.employee.id)
+              .eq('date', dateStr)
+              .eq('organization_code', widget.employee.organizationCode!)
+              .eq('shift_name', _selectedShift!);
         }
       } else {
-        payload['check_out'] = now.toIso8601String();
+        // For End Production, record/update check_out
+        payload['check_out'] = now.toUtc().toIso8601String();
 
         if (shift.isNotEmpty) {
           try {
@@ -599,7 +820,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
             );
 
             if (shiftEndDt.isBefore(shiftStartDt)) {
-              // Night shift logic
+              // Night shift logic: if now is after start or before end
               if (now.hour >= shiftStartDt.hour || now.hour < shiftEndDt.hour) {
                 if (now.hour >= shiftStartDt.hour) {
                   shiftEndToday = shiftEndToday.add(const Duration(days: 1));
@@ -613,7 +834,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
             payload['is_early_leave'] = isEarly;
             payload['is_overtime'] = isOvertime;
-            payload['status'] = isEarly && isOvertime
+            payload['status'] = (isEarly && isOvertime)
                 ? 'Both'
                 : (isEarly
                       ? 'Early Leave'
@@ -625,7 +846,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
 
         await supabase
             .from('attendance')
-            .upsert(payload, onConflict: 'worker_id,date,organization_code');
+            .upsert(
+              payload,
+              onConflict: 'worker_id,date,organization_code,shift_name',
+            );
       }
     } catch (e) {
       debugPrint('Error updating attendance: $e');
@@ -641,6 +865,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     } catch (e) {
       return null;
     }
+  }
+
+  String _formatTime(DateTime? time) {
+    if (time == null) return '--:--';
+    return TimeUtils.formatTo12Hour(time, format: 'hh:mm:ss a');
   }
 
   void _stopTimerAndFinish() {
@@ -777,6 +1006,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
   }
 
   String _formatDuration(Duration d) {
+    if (d.isNegative) d = Duration.zero;
     String twoDigits(int n) => n.toString().padLeft(2, "0");
     String twoDigitMinutes = twoDigits(d.inMinutes.remainder(60));
     String twoDigitSeconds = twoDigits(d.inSeconds.remainder(60));
@@ -910,10 +1140,19 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
     try {
       final now = DateTime.now();
       final shift = _shifts.firstWhere((s) => s['name'] == _selectedShift);
+      final startStr = shift['start_time'] as String;
       final endStr = shift['end_time'] as String;
       final format = DateFormat('hh:mm a');
+      final startDt = format.parse(startStr);
       final endDt = format.parse(endStr);
 
+      DateTime shiftStart = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        startDt.hour,
+        startDt.minute,
+      );
       DateTime shiftEnd = DateTime(
         now.year,
         now.month,
@@ -922,18 +1161,43 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         endDt.minute,
       );
 
-      // Handle night shift crossing midnight
-      final startStr = shift['start_time'] as String;
-      final startDt = format.parse(startStr);
       if (endDt.isBefore(startDt)) {
-        // If end time is earlier than start time, it means end time is on the next day
+        // Night shift crossing midnight
         if (now.hour >= startDt.hour) {
+          // We are in the evening part of the shift
           shiftEnd = shiftEnd.add(const Duration(days: 1));
+        } else if (now.hour < endDt.hour ||
+            (now.hour == endDt.hour && now.minute < endDt.minute)) {
+          // We are in the morning part of the shift
+          // shiftEnd is already today, which is correct
+        } else {
+          // It's after the shift ended in the morning but before it starts in the evening
+          final shiftStartToday = DateTime(
+            now.year,
+            now.month,
+            now.day,
+            startDt.hour,
+            startDt.minute,
+          );
+          final diffToStart = shiftStartToday.difference(now);
+          final hours = diffToStart.inHours;
+          final minutes = diffToStart.inMinutes % 60;
+          return 'Starts in $hours hrs $minutes mins';
+        }
+      } else {
+        // Regular day shift
+        if (now.isBefore(shiftStart)) {
+          final diff = shiftStart.difference(now);
+          final hours = diff.inHours;
+          final minutes = diff.inMinutes % 60;
+          return 'Starts in $hours hrs $minutes mins';
         }
       }
 
       final diff = shiftEnd.difference(now);
-      if (diff.isNegative) return 'Shift Ended';
+      if (diff.isNegative) {
+        return 'Shift Ended';
+      }
 
       final hours = diff.inHours;
       final minutes = diff.inMinutes % 60;
@@ -1034,19 +1298,29 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                     ? 2.5
                     : 2.0,
                 children: [
-                  _metricTile(
-                    'Current Time',
-                    DateFormat('hh:mm:ss a').format(DateTime.now()),
-                    Colors.blue.shade100,
-                    Icons.access_time,
+                  ValueListenableBuilder<DateTime>(
+                    valueListenable: _currentTimeNotifier,
+                    builder: (context, time, _) {
+                      return _metricTile(
+                        'Current Time',
+                        _formatTime(time),
+                        Colors.blue.shade100,
+                        Icons.access_time,
+                      );
+                    },
                   ),
-                  _metricTile(
-                    'Shift Timer',
-                    _isTimerRunning
-                        ? '${_elapsed.inHours}h ${_elapsed.inMinutes % 60}m'
-                        : 'Not started',
-                    Colors.orange.shade100,
-                    Icons.timer,
+                  ValueListenableBuilder<Duration>(
+                    valueListenable: _elapsedTimeNotifier,
+                    builder: (context, elapsed, _) {
+                      return _metricTile(
+                        'Shift Timer',
+                        _isTimerRunning
+                            ? _formatDuration(elapsed)
+                            : 'Not started',
+                        Colors.orange.shade100,
+                        Icons.timer,
+                      );
+                    },
                   ),
                   _metricTile(
                     'Location',
@@ -1155,7 +1429,29 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                       : null,
                   items: _shifts.map((s) {
                     final name = s['name']?.toString() ?? '';
-                    return DropdownMenuItem(value: name, child: Text(name));
+                    final startTime = s['start_time']?.toString() ?? '';
+                    final endTime = s['end_time']?.toString() ?? '';
+                    final isEnded = TimeUtils.hasShiftEnded(endTime, startTime);
+
+                    return DropdownMenuItem(
+                      value: name,
+                      enabled: !isEnded,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(name),
+                          if (isEnded)
+                            const Text(
+                              ' (Ended)',
+                              style: TextStyle(
+                                color: Colors.red,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
                   }).toList(),
                   onChanged: _isTimerRunning
                       ? null
@@ -1177,13 +1473,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                           color: Colors.blue,
                         ),
                         const SizedBox(width: 8),
-                        Text(
-                          _getShiftTimeLeft(),
-                          style: const TextStyle(
-                            color: Colors.blue,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                          ),
+                        ValueListenableBuilder<DateTime>(
+                          valueListenable: _currentTimeNotifier,
+                          builder: (context, _, child) {
+                            return Text(
+                              _getShiftTimeLeft(),
+                              style: const TextStyle(
+                                color: Colors.blue,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            );
+                          },
                         ),
                       ],
                     ),
@@ -1349,17 +1650,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                         mode: LaunchMode.externalApplication,
                                       );
                                     } else {
-                                      if (mounted) {
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text(
-                                              'Could not open document URL',
-                                            ),
+                                      if (!context.mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Could not open document URL',
                                           ),
-                                        );
-                                      }
+                                        ),
+                                      );
                                     }
                                   },
                                   icon: const Icon(Icons.picture_as_pdf),
@@ -1576,7 +1876,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
         .eq('worker_id', widget.employee.id)
         .eq('organization_code', widget.employee.organizationCode ?? '')
         .gte('date', DateFormat('yyyy-MM-dd').format(from))
-        .order('date', ascending: true);
+        .order('date', ascending: false);
     return List<Map<String, dynamic>>.from(response);
   }
 
@@ -1755,9 +2055,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                             MainAxisAlignment.spaceBetween,
                                         children: [
                                           Text(
-                                            DateFormat(
-                                              'EEE, MMM d, yyyy',
-                                            ).format(DateTime.parse(date)),
+                                            TimeUtils.formatTo12Hour(
+                                              date,
+                                              format: 'EEE, MMM d, yyyy',
+                                            ),
                                             style: const TextStyle(
                                               fontWeight: FontWeight.bold,
                                               fontSize: 16,
@@ -1828,8 +2129,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                       if (data['check_in'] != null) ...[
                                         const SizedBox(height: 8),
                                         Text(
-                                          'Attendance: ${DateFormat('hh:mm a').format(DateTime.parse(data['check_in'].toString()).toLocal())} - '
-                                          '${data['check_out'] != null ? DateFormat('hh:mm a').format(DateTime.parse(data['check_out'].toString()).toLocal()) : "Active"}',
+                                          'Attendance: ${TimeUtils.formatTo12Hour(data['check_in'], format: 'hh:mm a')} - '
+                                          '${data['check_out'] != null ? TimeUtils.formatTo12Hour(data['check_out'], format: 'hh:mm a') : "Active"}',
                                           style: TextStyle(
                                             fontSize: 12,
                                             color: Colors.grey[600],
