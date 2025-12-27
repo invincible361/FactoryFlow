@@ -290,9 +290,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (value == null || value.isEmpty) {
                               return 'Please enter organization code';
                             }
-                            if (value.length < 2) {
-                              return 'Organization code too short';
-                            }
                             // Only allow alphanumeric characters
                             if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(value)) {
                               return 'Invalid characters in organization code';
@@ -309,9 +306,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           validator: (value) {
                             if (value == null || value.isEmpty) {
                               return 'Please enter username';
-                            }
-                            if (value.length < 2) {
-                              return 'Username too short';
                             }
                             return null;
                           },
@@ -552,7 +546,6 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         ),
                         validator: (v) {
                           if (v == null || v.trim().isEmpty) return 'Required';
-                          if (v.trim().length < 2) return 'Too short';
                           return null;
                         },
                       ),
@@ -566,7 +559,6 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         ),
                         validator: (v) {
                           if (v == null || v.trim().isEmpty) return 'Required';
-                          if (v.trim().length < 2) return 'Too short';
                           return null;
                         },
                       ),
@@ -639,7 +631,6 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         controller: _ownerUserController,
                         validator: (v) {
                           if (v == null || v.trim().isEmpty) return 'Required';
-                          if (v.trim().length < 2) return 'Too short';
                           return null;
                         },
                       ),
@@ -654,7 +645,6 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                         obscureText: true,
                         validator: (v) {
                           if (v == null || v.trim().isEmpty) return 'Required';
-                          if (v.trim().length < 2) return 'Too short';
                           return null;
                         },
                       ),
