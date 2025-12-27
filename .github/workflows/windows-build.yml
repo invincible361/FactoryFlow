@@ -36,6 +36,10 @@ jobs:
           cd flutter_application_1
           flutter pub run msix:create --install-certificate false
 
+      - name: List files for debugging
+        run: |
+          dir flutter_application_1\build\windows\ /s
+
       - name: Upload EXE 
         uses: actions/upload-artifact@v4 
         with: 
