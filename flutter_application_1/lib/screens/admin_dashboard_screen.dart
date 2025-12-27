@@ -2646,7 +2646,8 @@ class _ItemsTabState extends State<ItemsTab> {
             'operation_details': opJson,
             'operations': opNames,
           })
-          .eq('item_id', _editingItem!['item_id']);
+          .eq('item_id', _editingItem!['item_id'])
+          .eq('organization_code', widget.organizationCode);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2797,7 +2798,11 @@ class _ItemsTabState extends State<ItemsTab> {
 
   Future<void> _deleteItem(String id) async {
     try {
-      await _supabase.from('items').delete().eq('item_id', id);
+      await _supabase
+          .from('items')
+          .delete()
+          .eq('item_id', id)
+          .eq('organization_code', widget.organizationCode);
       if (mounted) {
         _fetchItems();
       }

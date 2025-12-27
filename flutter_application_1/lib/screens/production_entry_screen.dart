@@ -12,6 +12,7 @@ import '../main.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
 import '../models/employee.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/item.dart';
 import '../services/location_service.dart';
 import '../services/log_service.dart';
@@ -1334,6 +1335,42 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen> {
                                     return _buildErrorWidget();
                                   },
                                 ),
+                          if (detail.pdfUrl != null &&
+                              detail.pdfUrl!.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 16.0),
+                              child: Center(
+                                child: ElevatedButton.icon(
+                                  onPressed: () async {
+                                    final url = Uri.parse(detail.pdfUrl!);
+                                    if (await canLaunchUrl(url)) {
+                                      await launchUrl(
+                                        url,
+                                        mode: LaunchMode.externalApplication,
+                                      );
+                                    } else {
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                              'Could not open document URL',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  },
+                                  icon: const Icon(Icons.picture_as_pdf),
+                                  label: const Text('View Operation Document'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.red[700],
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ),
                           if (detail.target > 0)
                             Center(
                               child: Container(
