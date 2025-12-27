@@ -121,7 +121,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
         // 2. Employee Login Checks
         // Check location first
-        Position? position;
+        final Position position;
         try {
           position = await _locationService.getCurrentLocation();
         } catch (e) {
@@ -136,10 +136,6 @@ class _LoginScreenState extends State<LoginScreen> {
           );
           setState(() => _isLoading = false);
           return;
-        }
-
-        if (position == null) {
-          throw StateError('Could not determine your location.');
         }
 
         final isInside = _locationService.isInside(
