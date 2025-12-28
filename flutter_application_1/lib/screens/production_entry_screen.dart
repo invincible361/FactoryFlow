@@ -1416,6 +1416,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             onPressed: _openProductivity,
           ),
           IconButton(
+            icon: const Icon(Icons.system_update),
+            tooltip: 'Check for Updates',
+            onPressed: () => UpdateService.checkForUpdates(context),
+          ),
+          IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
             onPressed: () {
