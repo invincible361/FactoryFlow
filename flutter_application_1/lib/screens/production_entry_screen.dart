@@ -150,6 +150,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _requestNotificationPermissions();
+    _loadPersistedState();
     _fetchData();
     _checkLocation();
     _fetchOrganizationName();
@@ -284,6 +285,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   void _resumeTimer() {
     setState(() {
       _isTimerRunning = true;
+      if (_startTime != null) {
+        _elapsed = DateTime.now().difference(_startTime!);
+        _elapsedTimeNotifier.value = _elapsed;
+      }
     });
   }
 
@@ -461,6 +466,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _persistState();
       _sendBackgroundReminder();
     }
   }
@@ -710,7 +716,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _checkLocation();
 
     // Record attendance check-in
-    await _updateAttendance(isCheckOut: false);
+    await _updateAttendance(isCheckOut: false, eventTime: _startTime);
 
     // Save initial log for "In" time visibility
     try {
@@ -812,9 +818,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     return <String, dynamic>{};
   }
 
-  Future<void> _updateAttendance({bool isCheckOut = false}) async {
+  Future<void> _updateAttendance({
+    bool isCheckOut = false,
+    DateTime? eventTime,
+  }) async {
     try {
-      final now = DateTime.now();
+      final now = eventTime ?? DateTime.now();
       // Use start time for date key if checking out to ensure we update the same record
       final effectiveDate = (isCheckOut && _startTime != null)
           ? _startTime!
@@ -1208,7 +1217,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       await LogService().addLog(log);
 
       // Record attendance check-out
-      await _updateAttendance(isCheckOut: true);
+      await _updateAttendance(isCheckOut: true, eventTime: endTime);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
