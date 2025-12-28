@@ -1385,7 +1385,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                         const Icon(Icons.factory, size: 28),
                   ),
                 const SizedBox(width: 10),
-                const Text('Log Production'),
+                const Flexible(
+                  child: Text(
+                    'Log Production',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 6),
