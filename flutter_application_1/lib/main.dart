@@ -89,17 +89,20 @@ Future<void> _handleBackgroundLocation() async {
         lng,
       );
 
+      final workerName = prefs.getString('worker_name') ?? 'Unknown Worker';
       bool isInside = distance <= radius;
       bool wasInside = prefs.getBool('was_inside') ?? true;
 
       if (wasInside && !isInside) {
         // Just went out
         final eventId = const Uuid().v4();
-        await Supabase.instance.client.from('worker_boundary_events').insert({
+        await Supabase.instance.client.from('production_outofbounds').insert({
           'id': eventId,
           'worker_id': workerId,
+          'worker_name': workerName,
           'organization_code': orgCode,
-          'exit_time': DateTime.now().toIso8601String(),
+          'date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+          'exit_time': DateTime.now().toUtc().toIso8601String(),
           'exit_latitude': position.latitude,
           'exit_longitude': position.longitude,
         });
@@ -107,8 +110,8 @@ Future<void> _handleBackgroundLocation() async {
         await prefs.setBool('was_inside', false);
 
         await _showNotification(
-          "Out of Bounds",
-          "You have left the factory premises. Your exit has been recorded.",
+          "Return to Factory!",
+          "You have left the factory area during production. Please return immediately.",
         );
       } else if (!wasInside && isInside) {
         // Just came back
@@ -117,7 +120,7 @@ Future<void> _handleBackgroundLocation() async {
           final entryTime = DateTime.now();
           // Fetch exit time to calculate duration
           final event = await Supabase.instance.client
-              .from('worker_boundary_events')
+              .from('production_outofbounds')
               .select('exit_time')
               .eq('id', eventId)
               .maybeSingle();
@@ -130,7 +133,7 @@ Future<void> _handleBackgroundLocation() async {
           }
 
           await Supabase.instance.client
-              .from('worker_boundary_events')
+              .from('production_outofbounds')
               .update({
                 'entry_time': entryTime.toUtc().toIso8601String(),
                 'entry_latitude': position.latitude,

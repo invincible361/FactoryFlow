@@ -9,6 +9,7 @@ import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
 import '../services/update_service.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'dart:io' as io;
 
 class LoginScreen extends StatefulWidget {
@@ -25,14 +26,25 @@ class _LoginScreenState extends State<LoginScreen> {
   final _orgCodeController = TextEditingController();
   final LocationService _locationService = LocationService();
   bool _isLoading = false;
+  String _appVersion = '';
 
   @override
   void initState() {
     super.initState();
+    _fetchAppVersion();
     // Check for updates on startup
     WidgetsBinding.instance.addPostFrameCallback((_) {
       UpdateService.checkForUpdates(context);
     });
+  }
+
+  Future<void> _fetchAppVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) {
+      setState(() {
+        _appVersion = 'v${info.version}';
+      });
+    }
   }
 
   Future<void> _recordOwnerLogin(String organizationCode) async {
@@ -335,13 +347,31 @@ class _LoginScreenState extends State<LoginScreen> {
                           },
                         ),
                         const SizedBox(height: 24),
-                        if (_isLoading)
-                          const CircularProgressIndicator()
-                        else
-                          ElevatedButton(
-                            onPressed: _login,
-                            child: const Text('Login'),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 50,
+                          child: ElevatedButton(
+                            onPressed: _isLoading ? null : _login,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.indigo,
+                              foregroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            child: _isLoading
+                                ? const CircularProgressIndicator(
+                                    color: Colors.white,
+                                  )
+                                : const Text(
+                                    'Login',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
                           ),
+                        ),
                         const SizedBox(height: 24),
                         ElevatedButton(
                           onPressed: () {
@@ -353,6 +383,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           },
                           child: const Text('Register Factory'),
                         ),
+                        if (_appVersion.isNotEmpty) ...[
+                          const SizedBox(height: 20),
+                          Text(
+                            _appVersion,
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

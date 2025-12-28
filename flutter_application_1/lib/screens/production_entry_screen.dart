@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/item.dart';
 import '../services/location_service.dart';
 import '../services/log_service.dart';
+import '../services/update_service.dart';
 
 class ProductionEntryScreen extends StatefulWidget {
   final Employee employee;
@@ -153,6 +154,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _checkLocation();
     _fetchOrganizationName();
     _fetchTodayExtraUnits();
+    // Check for updates
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkForUpdates(context);
+    });
     // Start a UI update timer to refresh time-based notifiers without full screen setState
     _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
@@ -199,6 +204,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   Future<void> _initializeBackgroundTasks() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('worker_id', widget.employee.id);
+    await prefs.setString(
+      'worker_name',
+      widget.employee.name,
+    ); // Store name for background tasks
     if (widget.employee.organizationCode != null) {
       await prefs.setString('org_code', widget.employee.organizationCode!);
     }
@@ -603,8 +612,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             await prefs.setString('active_boundary_event_id', eventId);
             await prefs.setBool('was_inside', false);
             await _showLocalNotification(
-              "Out of Bounds",
-              "You have left the factory premises while production is running.",
+              "Return to Factory!",
+              "You have left the factory area during production. Please return immediately.",
             );
           } else if (!effectiveWasInside && isInside) {
             // Just came back
