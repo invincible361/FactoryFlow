@@ -243,6 +243,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       final operation = prefs.getString('persisted_operation');
       final shift = prefs.getString('persisted_shift');
       final startTimeStr = prefs.getString('persisted_start_time');
+      final startTimeMs = prefs.getInt('persisted_start_time_ms');
       final currentLogId = prefs.getString('persisted_current_log_id');
       final isTimerRunning =
           prefs.getBool('persisted_is_timer_running') ?? false;
@@ -269,8 +270,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             _currentLogId = currentLogId;
           }
 
-          if (isTimerRunning && startTimeStr != null) {
-            _startTime = TimeUtils.parseToLocal(startTimeStr);
+          if (isTimerRunning && (startTimeMs != null || startTimeStr != null)) {
+            if (startTimeMs != null) {
+              _startTime = DateTime.fromMillisecondsSinceEpoch(
+                startTimeMs,
+              ).toLocal();
+            } else {
+              try {
+                _startTime = DateTime.parse(startTimeStr!).toLocal();
+              } catch (_) {
+                _startTime = TimeUtils.parseToLocal(startTimeStr);
+              }
+            }
             _isTimerRunning = true;
             _resumeTimer();
             _initializeBackgroundTasks();
@@ -325,8 +336,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           'persisted_start_time',
           _startTime!.toIso8601String(),
         );
+        await prefs.setInt(
+          'persisted_start_time_ms',
+          _startTime!.millisecondsSinceEpoch,
+        );
       } else {
         await prefs.remove('persisted_start_time');
+        await prefs.remove('persisted_start_time_ms');
       }
 
       if (_currentLogId != null) {
@@ -348,6 +364,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       await prefs.remove('persisted_shift');
       await prefs.remove('persisted_is_timer_running');
       await prefs.remove('persisted_start_time');
+      await prefs.remove('persisted_start_time_ms');
     } catch (e) {
       debugPrint('Error clearing persisted state: $e');
     }
@@ -615,6 +632,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                   'exit_latitude': position.latitude,
                   'exit_longitude': position.longitude,
                 });
+            await _updateAttendance(isCheckOut: true, eventTime: now);
             await prefs.setString('active_boundary_event_id', eventId);
             await prefs.setBool('was_inside', false);
             await _showLocalNotification(
@@ -735,7 +753,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         shiftName: _selectedShift ?? _getShiftName(_startTime!),
         performanceDiff: 0,
         organizationCode: widget.employee.organizationCode,
-        remarks: 'Production started...',
+        remarks: null,
       );
       await LogService().addLog(initialLog);
     } catch (e) {
@@ -932,12 +950,26 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           }
         }
 
-        await supabase
+        final existing = await supabase
             .from('attendance')
-            .upsert(
-              payload,
-              onConflict: 'worker_id,date,organization_code,shift_name',
-            );
+            .select()
+            .eq('worker_id', widget.employee.id)
+            .eq('date', dateStr)
+            .eq('organization_code', widget.employee.organizationCode!)
+            .eq('shift_name', targetShiftName)
+            .maybeSingle();
+
+        if (existing == null) {
+          await supabase.from('attendance').insert(payload);
+        } else if (existing['check_out'] == null) {
+          await supabase
+              .from('attendance')
+              .update(payload)
+              .eq('worker_id', widget.employee.id)
+              .eq('date', dateStr)
+              .eq('organization_code', widget.employee.organizationCode!)
+              .eq('shift_name', targetShiftName);
+        }
       }
     } catch (e) {
       debugPrint('Error updating attendance: $e');
