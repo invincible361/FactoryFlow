@@ -772,7 +772,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   Future<void> _updateAttendance({bool isCheckOut = false}) async {
     try {
       final now = DateTime.now();
-      final dateStr = DateFormat('yyyy-MM-dd').format(now);
+      // Use start time for date key if checking out to ensure we update the same record
+      final effectiveDate = (isCheckOut && _startTime != null)
+          ? _startTime!
+          : now;
+      final dateStr = DateFormat('yyyy-MM-dd').format(effectiveDate);
       final supabase = Supabase.instance.client;
 
       // Ensure we have the latest shift info
@@ -962,56 +966,26 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
                   Navigator.pop(currentContext); // Close input dialog
 
-                  // Show Result Dialog
-                  showDialog(
-                    context: currentContext,
-                    barrierDismissible: false,
-                    builder: (context) => AlertDialog(
-                      title: Text(
-                        isTargetMet ? 'Target Met! 🎉' : 'Target Missed ⚠️',
-                      ),
-                      content: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          isTargetMet
-                              ? const Icon(
-                                  Icons.sentiment_very_satisfied,
-                                  size: 60,
-                                  color: Colors.green,
-                                )
-                              : const Icon(
-                                  Icons.sentiment_dissatisfied,
-                                  size: 60,
-                                  color: Colors.orange,
-                                ),
-                          const SizedBox(height: 16),
-                          Text(
-                            isTargetMet
-                                ? 'Produced: $quantity (Target: ${detail.target})\nSurplus: +$diff'
-                                : 'Produced: $quantity (Target: ${detail.target})\nDeficit: $diff',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: isTargetMet ? Colors.green : Colors.red,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ],
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _saveLog(endTime, diff);
-                          },
-                          child: const Text('Save Log'),
-                        ),
-                      ],
-                    ),
+                  // Show Summary/Confirmation Dialog
+                  _showConfirmationDialog(
+                    currentContext,
+                    quantity,
+                    _remarksController.text,
+                    endTime,
+                    detail,
+                    diff,
                   );
                 } else {
                   Navigator.pop(currentContext);
-                  _saveLog(endTime, 0);
+                  // Even if no target, show confirmation
+                  _showConfirmationDialog(
+                    currentContext,
+                    quantity,
+                    _remarksController.text,
+                    endTime,
+                    null,
+                    0,
+                  );
                 }
               },
               child: const Text('Submit'),
@@ -1019,6 +993,106 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           ],
         );
       },
+    );
+  }
+
+  void _showConfirmationDialog(
+    BuildContext context,
+    int quantity,
+    String remarks,
+    DateTime endTime,
+    OperationDetail? detail,
+    int diff,
+  ) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Confirm Production'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildSummaryRow(
+                  'In Time',
+                  TimeUtils.formatTo12Hour(_startTime, format: 'hh:mm a'),
+                ),
+                _buildSummaryRow(
+                  'Out Time',
+                  TimeUtils.formatTo12Hour(endTime, format: 'hh:mm a'),
+                ),
+                _buildSummaryRow('Total Work Hours', _formatDuration(_elapsed)),
+                const Divider(),
+                _buildSummaryRow('Produced Quantity', quantity.toString()),
+                if (detail != null && detail.target > 0)
+                  _buildSummaryRow(
+                    'Target Status',
+                    diff >= 0 ? 'Met (+$diff)' : 'Missed ($diff)',
+                    color: diff >= 0 ? Colors.green : Colors.red,
+                  ),
+                const Divider(),
+                _buildSummaryRow(
+                  'Remarks',
+                  remarks.isNotEmpty ? remarks : 'None',
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Please confirm these details. You cannot edit them after saving.',
+                  style: TextStyle(
+                    fontStyle: FontStyle.italic,
+                    fontSize: 12,
+                    color: Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                // Re-open input dialog if they want to edit?
+                // For now just cancel back to running timer is safer or just stop?
+                // The user said "confirmation they can only see not edit".
+                // So if they want to change, they probably need to go back.
+                // But _stopTimerAndFinish has already stopped the timer visually (though _timer is active in background technically until cancel).
+                // Actually _stopTimerAndFinish calls _timer?.cancel().
+                // If they cancel here, we should probably resume.
+                _resumeTimer();
+              },
+              child: const Text('Edit / Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _saveLog(endTime, diff);
+              },
+              child: const Text('Confirm & Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSummaryRow(String label, String value, {Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text('$label:', style: const TextStyle(fontWeight: FontWeight.w500)),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: TextStyle(fontWeight: FontWeight.bold, color: color),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

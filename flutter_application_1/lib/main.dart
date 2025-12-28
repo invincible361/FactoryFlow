@@ -265,6 +265,12 @@ void main() async {
           Platform.isMacOS ||
           Platform.isWindows)) {
     try {
+      // Initialize Workmanager
+      await Workmanager().initialize(
+        callbackDispatcher,
+        isInDebugMode: kDebugMode, // Set to false in production
+      );
+
       final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
       const androidInit = AndroidInitializationSettings('launcher_icon');
       const iosInit = DarwinInitializationSettings(
