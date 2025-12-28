@@ -155,10 +155,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _fetchTodayExtraUnits();
     // Start a UI update timer to refresh time-based notifiers without full screen setState
     _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       _currentTimeNotifier.value = DateTime.now();
       if (_isTimerRunning && _startTime != null) {
         _elapsed = DateTime.now().difference(_startTime!);
         _elapsedTimeNotifier.value = _elapsed;
+
+        // Explicitly trigger a rebuild of the current frame if it's not happening
+        // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
+        _elapsedTimeNotifier.notifyListeners();
 
         // Check location and shift end every 60 seconds while timer is running in foreground
         if (timer.tick % 60 == 0) {

@@ -8,6 +8,7 @@ import '../models/employee.dart';
 import 'production_entry_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
+import '../services/update_service.dart';
 import 'dart:io' as io;
 
 class LoginScreen extends StatefulWidget {
@@ -24,6 +25,15 @@ class _LoginScreenState extends State<LoginScreen> {
   final _orgCodeController = TextEditingController();
   final LocationService _locationService = LocationService();
   bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Check for updates on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkForUpdates(context);
+    });
+  }
 
   Future<void> _recordOwnerLogin(String organizationCode) async {
     final deviceInfo = DeviceInfoPlugin();

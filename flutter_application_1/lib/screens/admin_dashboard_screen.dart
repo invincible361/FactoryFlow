@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -32,7 +33,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 8, vsync: this);
+    _tabController = TabController(length: 10, vsync: this);
     _fetchOrganization();
   }
 
@@ -125,7 +126,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
             Tab(text: 'Attendance'),
             Tab(text: 'Machines'),
             Tab(text: 'Items'),
+            Tab(text: 'Operations'),
             Tab(text: 'Shifts'),
+            Tab(text: 'Profile'),
             Tab(text: 'Security'),
             Tab(text: 'Out of Bounds'),
           ],
@@ -139,10 +142,446 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           AttendanceTab(organizationCode: widget.organizationCode),
           MachinesTab(organizationCode: widget.organizationCode),
           ItemsTab(organizationCode: widget.organizationCode),
+          OperationsTab(organizationCode: widget.organizationCode),
           ShiftsTab(organizationCode: widget.organizationCode),
+          ProfileTab(
+            organizationCode: widget.organizationCode,
+            onProfileUpdated: _fetchOrganization,
+          ),
           SecurityTab(organizationCode: widget.organizationCode),
           OutOfBoundsTab(organizationCode: widget.organizationCode),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. PROFILE TAB
+// ---------------------------------------------------------------------------
+class ProfileTab extends StatefulWidget {
+  final String organizationCode;
+  final VoidCallback? onProfileUpdated;
+  const ProfileTab({
+    super.key,
+    required this.organizationCode,
+    this.onProfileUpdated,
+  });
+
+  @override
+  State<ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<ProfileTab> {
+  final _supabase = Supabase.instance.client;
+  final _formKey = GlobalKey<FormState>();
+
+  late TextEditingController _orgNameController;
+  late TextEditingController _facNameController;
+  late TextEditingController _addressController;
+  late TextEditingController _latController;
+  late TextEditingController _lngController;
+  late TextEditingController _radiusController;
+  late TextEditingController _acreController;
+  late TextEditingController _passwordController;
+  late TextEditingController _logoUrlController;
+
+  bool _isLoading = true;
+  bool _isSaving = false;
+  PlatformFile? _logoFile;
+
+  @override
+  void initState() {
+    super.initState();
+    _orgNameController = TextEditingController();
+    _facNameController = TextEditingController();
+    _addressController = TextEditingController();
+    _latController = TextEditingController();
+    _lngController = TextEditingController();
+    _radiusController = TextEditingController();
+    _acreController = TextEditingController();
+    _passwordController = TextEditingController();
+    _logoUrlController = TextEditingController();
+    _fetchProfile();
+  }
+
+  @override
+  void dispose() {
+    _orgNameController.dispose();
+    _facNameController.dispose();
+    _addressController.dispose();
+    _latController.dispose();
+    _lngController.dispose();
+    _radiusController.dispose();
+    _acreController.dispose();
+    _passwordController.dispose();
+    _logoUrlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchProfile() async {
+    setState(() => _isLoading = true);
+    try {
+      final data = await _supabase
+          .from('organizations')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .maybeSingle();
+
+      if (data != null && mounted) {
+        setState(() {
+          _orgNameController.text = data['organization_name'] ?? '';
+          _facNameController.text = data['factory_name'] ?? '';
+          _addressController.text = data['address'] ?? '';
+          _latController.text = (data['latitude'] ?? 0).toString();
+          _lngController.text = (data['longitude'] ?? 0).toString();
+          _radiusController.text = (data['radius_meters'] ?? 500).toString();
+          _passwordController.text = data['owner_password'] ?? '';
+          _logoUrlController.text = data['logo_url'] ?? '';
+
+          // Reverse calculate acres for display
+          double radius = double.tryParse(_radiusController.text) ?? 500;
+          _acreController.text = ((radius * radius * pi) / 4046.8564)
+              .toStringAsFixed(4);
+
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch profile error: $e');
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _calculateRadiusFromAcres(String value) {
+    double? acres = double.tryParse(value);
+    if (acres != null) {
+      // Radius (m) = √( Acre × 4046.8564 / π )
+      double radius = sqrt((acres * 4046.8564) / pi);
+      // Adding 15m buffer as recommended
+      double finalRadius = radius + 15;
+      setState(() {
+        _radiusController.text = finalRadius.toStringAsFixed(2);
+      });
+    }
+  }
+
+  Future<void> _pickLogo() async {
+    final result = await FilePicker.platform.pickFiles(type: FileType.image);
+    if (result != null && mounted) {
+      setState(() {
+        _logoFile = result.files.first;
+      });
+    }
+  }
+
+  Future<String?> _uploadLogo() async {
+    if (_logoFile == null) return _logoUrlController.text;
+
+    final fileName =
+        '${DateTime.now().millisecondsSinceEpoch}_logo_${_logoFile!.name}';
+    final bytes =
+        _logoFile!.bytes ?? await io.File(_logoFile!.path!).readAsBytes();
+
+    return await _uploadToBucketWithAutoCreate(
+      'organization_logos',
+      fileName,
+      bytes,
+      'image/jpeg',
+    );
+  }
+
+  Future<String?> _uploadToBucketWithAutoCreate(
+    String bucket,
+    String fileName,
+    Uint8List bytes,
+    String contentType,
+  ) async {
+    try {
+      try {
+        await _supabase.storage
+            .from(bucket)
+            .uploadBinary(
+              fileName,
+              bytes,
+              fileOptions: FileOptions(contentType: contentType, upsert: true),
+            );
+      } on StorageException catch (se) {
+        if (se.message.contains('Bucket not found') || se.statusCode == '404') {
+          // Attempt to create the bucket if it's missing
+          try {
+            await _supabase.storage.createBucket(
+              bucket,
+              const BucketOptions(public: true),
+            );
+          } catch (ce) {
+            debugPrint('Error creating bucket $bucket: $ce');
+            // Provide a clearer error message for the user
+            throw 'Bucket "$bucket" not found and could not be created automatically. Please create it in the Supabase dashboard.';
+          }
+
+          // Retry the upload
+          await _supabase.storage
+              .from(bucket)
+              .uploadBinary(
+                fileName,
+                bytes,
+                fileOptions: FileOptions(
+                  contentType: contentType,
+                  upsert: true,
+                ),
+              );
+        } else {
+          rethrow;
+        }
+      }
+
+      return _supabase.storage.from(bucket).getPublicUrl(fileName);
+    } catch (e) {
+      debugPrint('Upload error for bucket $bucket: $e');
+      return null;
+    }
+  }
+
+  Future<void> _updateProfile() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _isSaving = true);
+    try {
+      final logoUrl = await _uploadLogo();
+
+      await _supabase
+          .from('organizations')
+          .update({
+            'organization_name': _orgNameController.text,
+            'factory_name': _facNameController.text,
+            'address': _addressController.text,
+            'latitude': double.tryParse(_latController.text) ?? 0,
+            'longitude': double.tryParse(_lngController.text) ?? 0,
+            'radius_meters': double.tryParse(_radiusController.text) ?? 500,
+            'owner_password': _passwordController.text,
+            'logo_url': logoUrl,
+          })
+          .eq('organization_code', widget.organizationCode);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Profile updated successfully!')),
+        );
+        if (widget.onProfileUpdated != null) {
+          widget.onProfileUpdated!();
+        }
+      }
+    } catch (e) {
+      debugPrint('Update profile error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error updating profile: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) return const Center(child: CircularProgressIndicator());
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Form(
+        key: _formKey,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Organization Profile',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            TextFormField(
+              controller: _orgNameController,
+              decoration: const InputDecoration(
+                labelText: 'Organization Name',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.business),
+              ),
+              validator: (v) => v!.isEmpty ? 'Required' : null,
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _facNameController,
+              decoration: const InputDecoration(
+                labelText: 'Factory Name',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.factory),
+              ),
+              validator: (v) => v!.isEmpty ? 'Required' : null,
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                if (_logoFile != null || _logoUrlController.text.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: _logoFile != null
+                          ? (kIsWeb
+                                ? Image.memory(
+                                    _logoFile!.bytes!,
+                                    height: 60,
+                                    width: 60,
+                                    fit: BoxFit.cover,
+                                  )
+                                : Image.file(
+                                    io.File(_logoFile!.path!),
+                                    height: 60,
+                                    width: 60,
+                                    fit: BoxFit.cover,
+                                  ))
+                          : Image.network(
+                              _logoUrlController.text,
+                              height: 60,
+                              width: 60,
+                              fit: BoxFit.cover,
+                              errorBuilder: (ctx, err, st) =>
+                                  const Icon(Icons.factory, size: 60),
+                            ),
+                    ),
+                  ),
+                Expanded(
+                  child: TextFormField(
+                    controller: _logoUrlController,
+                    decoration: InputDecoration(
+                      labelText: 'Logo URL',
+                      border: const OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.image),
+                      hintText: 'https://example.com/logo.png',
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.upload_file),
+                        onPressed: _pickLogo,
+                        tooltip: 'Select Logo File',
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Security',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _passwordController,
+              decoration: const InputDecoration(
+                labelText: 'Admin Password',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.lock),
+              ),
+              obscureText: true,
+              validator: (v) => v!.length < 6 ? 'Min 6 characters' : null,
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Location & Geofencing',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Set your factory area in acres to automatically calculate the geofence radius.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _acreController,
+                    decoration: const InputDecoration(
+                      labelText: 'Factory Area (Acres)',
+                      border: OutlineInputBorder(),
+                      suffixText: 'Acres',
+                    ),
+                    keyboardType: TextInputType.number,
+                    onChanged: _calculateRadiusFromAcres,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _radiusController,
+                    decoration: const InputDecoration(
+                      labelText: 'Radius (Meters)',
+                      border: OutlineInputBorder(),
+                      suffixText: 'm',
+                      helperText: 'Includes 15m GPS buffer',
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _latController,
+                    decoration: const InputDecoration(
+                      labelText: 'Latitude',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: TextFormField(
+                    controller: _lngController,
+                    decoration: const InputDecoration(
+                      labelText: 'Longitude',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _addressController,
+              decoration: const InputDecoration(
+                labelText: 'Factory Address',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.location_on),
+              ),
+              maxLines: 2,
+            ),
+            const SizedBox(height: 32),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _isSaving ? null : _updateProfile,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo,
+                  foregroundColor: Colors.white,
+                ),
+                child: _isSaving
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text(
+                        'Update Profile & Settings',
+                        style: TextStyle(fontSize: 16),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 50),
+          ],
+        ),
       ),
     );
   }
@@ -410,7 +849,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
           .from('workers')
           .select('worker_id, name')
           .eq('organization_code', widget.organizationCode)
-          .order('name');
+          .order('name', ascending: true);
       setState(() {
         _employees = List<Map<String, dynamic>>.from(resp);
       });
@@ -2709,13 +3148,15 @@ class _ItemsTabState extends State<ItemsTab> {
   // New Item Controllers
   final _itemIdController = TextEditingController();
   final _itemNameController = TextEditingController();
+  final _searchController = TextEditingController();
   List<OperationDetail> _operations = [];
+  String _searchQuery = '';
 
   // Operation Controllers
   final _opNameController = TextEditingController();
   final _opTargetController = TextEditingController();
   PlatformFile? _opFile;
-
+  int? _editingOperationIndex;
   Map<String, dynamic>? _editingItem;
 
   Future<String?> _uploadToBucketWithAutoCreate(
@@ -2736,10 +3177,16 @@ class _ItemsTabState extends State<ItemsTab> {
       } on StorageException catch (se) {
         if (se.message.contains('Bucket not found') || se.statusCode == '404') {
           // Attempt to create the bucket if it's missing
-          await _supabase.storage.createBucket(
-            bucket,
-            const BucketOptions(public: true),
-          );
+          try {
+            await _supabase.storage.createBucket(
+              bucket,
+              const BucketOptions(public: true),
+            );
+          } catch (ce) {
+            debugPrint('Error creating bucket $bucket: $ce');
+            // Provide a clearer error message for the user
+            throw 'Bucket "$bucket" not found and could not be created automatically. Please create it in the Supabase dashboard.';
+          }
 
           // Retry the upload
           await _supabase.storage
@@ -2796,6 +3243,7 @@ class _ItemsTabState extends State<ItemsTab> {
   void _editItem(Map<String, dynamic> item) {
     setState(() {
       _editingItem = item;
+      _editingOperationIndex = null;
       _itemIdController.text = item['item_id'];
       _itemNameController.text = item['name'];
       _operations = (item['operation_details'] as List? ?? [])
@@ -2887,6 +3335,7 @@ class _ItemsTabState extends State<ItemsTab> {
   void _clearItemForm() {
     setState(() {
       _editingItem = null;
+      _editingOperationIndex = null;
       _itemIdController.clear();
       _itemNameController.clear();
       _operations = [];
@@ -2912,17 +3361,93 @@ class _ItemsTabState extends State<ItemsTab> {
     if (_opNameController.text.isEmpty) return;
 
     setState(() {
-      _operations.add(
-        OperationDetail(
-          name: _opNameController.text,
-          target: int.tryParse(_opTargetController.text) ?? 0,
-          newFile: _opFile,
-        ),
+      final newOp = OperationDetail(
+        name: _opNameController.text,
+        target: int.tryParse(_opTargetController.text) ?? 0,
+        newFile: _opFile,
+        existingUrl: _editingOperationIndex != null
+            ? _operations[_editingOperationIndex!].existingUrl
+            : null,
+        existingPdfUrl: _editingOperationIndex != null
+            ? _operations[_editingOperationIndex!].existingPdfUrl
+            : null,
       );
+
+      if (_editingOperationIndex != null) {
+        _operations[_editingOperationIndex!] = newOp;
+        _editingOperationIndex = null;
+      } else {
+        _operations.add(newOp);
+      }
+
       _opNameController.clear();
       _opTargetController.clear();
       _opFile = null;
     });
+  }
+
+  void _editOperationInList(int index) {
+    final op = _operations[index];
+    setState(() {
+      _editingOperationIndex = index;
+      _opNameController.text = op.name;
+      _opTargetController.text = op.target.toString();
+      _opFile = null; // Reset file when editing
+    });
+  }
+
+  void _viewItemDetails(Map<String, dynamic> item) {
+    final ops = (item['operation_details'] as List? ?? [])
+        .map((op) => OperationDetail.fromJson(op))
+        .toList();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${item['name']} (${item['item_id']})'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Text(
+                'Operations:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 10),
+              ...ops.map(
+                (op) => ListTile(
+                  title: Text(op.name),
+                  subtitle: Text('Target: ${op.target}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (op.imageUrl != null)
+                        const Icon(Icons.image, color: Colors.blue),
+                      if (op.pdfUrl != null)
+                        const Icon(Icons.picture_as_pdf, color: Colors.red),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _editItem(item);
+            },
+            child: const Text('Edit Item'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _addItem() async {
@@ -3032,6 +3557,13 @@ class _ItemsTabState extends State<ItemsTab> {
 
   @override
   Widget build(BuildContext context) {
+    final filteredItems = _items.where((item) {
+      final name = (item['name'] ?? '').toString().toLowerCase();
+      final id = (item['item_id'] ?? '').toString().toLowerCase();
+      return name.contains(_searchQuery.toLowerCase()) ||
+          id.contains(_searchQuery.toLowerCase());
+    }).toList();
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: ListView(
@@ -3054,9 +3586,9 @@ class _ItemsTabState extends State<ItemsTab> {
           ),
 
           const SizedBox(height: 20),
-          const Text(
-            'Operations',
-            style: TextStyle(fontWeight: FontWeight.bold),
+          Text(
+            _editingOperationIndex == null ? 'Operations' : 'Edit Operation',
+            style: const TextStyle(fontWeight: FontWeight.bold),
           ),
           Container(
             padding: const EdgeInsets.all(8),
@@ -3100,9 +3632,32 @@ class _ItemsTabState extends State<ItemsTab> {
                   ],
                 ),
                 const SizedBox(height: 10),
-                ElevatedButton(
-                  onPressed: _addOperation,
-                  child: const Text('Add Operation'),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _addOperation,
+                      child: Text(
+                        _editingOperationIndex == null
+                            ? 'Add Operation'
+                            : 'Update Operation',
+                      ),
+                    ),
+                    if (_editingOperationIndex != null) ...[
+                      const SizedBox(width: 10),
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _editingOperationIndex = null;
+                            _opNameController.clear();
+                            _opTargetController.clear();
+                            _opFile = null;
+                          });
+                        },
+                        child: const Text('Cancel'),
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -3111,28 +3666,41 @@ class _ItemsTabState extends State<ItemsTab> {
           // Operation List Preview
           if (_operations.isNotEmpty) ...[
             const SizedBox(height: 10),
-            ..._operations.map(
-              (op) => ListTile(
-                title: Text(op.name),
-                subtitle: Text('Target: ${op.target}'),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (op.imageUrl != null || op.existingUrl != null)
-                      const Icon(Icons.image, color: Colors.blue),
-                    if (op.pdfUrl != null || op.existingPdfUrl != null)
-                      const Icon(Icons.picture_as_pdf, color: Colors.red),
-                    IconButton(
-                      icon: const Icon(Icons.remove_circle, color: Colors.red),
-                      onPressed: () {
-                        setState(() {
-                          _operations.remove(op);
-                        });
-                      },
-                    ),
-                  ],
-                ),
-              ),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _operations.length,
+              itemBuilder: (context, index) {
+                final op = _operations[index];
+                return ListTile(
+                  title: Text(op.name),
+                  subtitle: Text('Target: ${op.target}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (op.imageUrl != null || op.existingUrl != null)
+                        const Icon(Icons.image, color: Colors.blue),
+                      if (op.pdfUrl != null || op.existingPdfUrl != null)
+                        const Icon(Icons.picture_as_pdf, color: Colors.red),
+                      IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.blue),
+                        onPressed: () => _editOperationInList(index),
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.remove_circle,
+                          color: Colors.red,
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            _operations.removeAt(index);
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
           ],
 
@@ -3162,23 +3730,41 @@ class _ItemsTabState extends State<ItemsTab> {
             ],
           ),
           const Divider(thickness: 2),
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8.0),
-            child: Text(
-              'Existing Items',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Existing Items',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+                SizedBox(
+                  width: 200,
+                  height: 40,
+                  child: TextField(
+                    onChanged: (val) => setState(() => _searchQuery = val),
+                    decoration: const InputDecoration(
+                      hintText: 'Search items...',
+                      prefixIcon: Icon(Icons.search),
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           _isLoadingItems
               ? const Center(child: CircularProgressIndicator())
-              : _items.isEmpty
+              : filteredItems.isEmpty
               ? const Center(child: Text('No items found.'))
               : ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _items.length,
+                  itemCount: filteredItems.length,
                   itemBuilder: (context, index) {
-                    final item = _items[index];
+                    final item = filteredItems[index];
                     // Count operations if possible
                     final ops = item['operation_details'] as List? ?? [];
                     return Card(
@@ -3189,12 +3775,22 @@ class _ItemsTabState extends State<ItemsTab> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             IconButton(
+                              icon: const Icon(
+                                Icons.visibility,
+                                color: Colors.green,
+                              ),
+                              onPressed: () => _viewItemDetails(item),
+                              tooltip: 'View Operations',
+                            ),
+                            IconButton(
                               icon: const Icon(Icons.edit, color: Colors.blue),
                               onPressed: () => _editItem(item),
+                              tooltip: 'Edit Item',
                             ),
                             IconButton(
                               icon: const Icon(Icons.delete, color: Colors.red),
                               onPressed: () => _deleteItem(item['item_id']),
+                              tooltip: 'Delete Item',
                             ),
                           ],
                         ),
@@ -3209,7 +3805,146 @@ class _ItemsTabState extends State<ItemsTab> {
 }
 
 // ---------------------------------------------------------------------------
-// 5. SHIFTS TAB
+// 5. OPERATIONS TAB
+// ---------------------------------------------------------------------------
+class OperationsTab extends StatefulWidget {
+  final String organizationCode;
+  const OperationsTab({super.key, required this.organizationCode});
+
+  @override
+  State<OperationsTab> createState() => _OperationsTabState();
+}
+
+class _OperationsTabState extends State<OperationsTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _items = [];
+  bool _isLoading = true;
+  String _searchQuery = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchOperations();
+  }
+
+  Future<void> _fetchOperations() async {
+    setState(() => _isLoading = true);
+    try {
+      final response = await _supabase
+          .from('items')
+          .select('item_id, name, operation_details')
+          .eq('organization_code', widget.organizationCode)
+          .order('name', ascending: true);
+      if (mounted) {
+        setState(() {
+          _items = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        debugPrint('Fetch operations error: $e');
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Flatten operations from all items
+    List<Map<String, dynamic>> allOperations = [];
+    for (var item in _items) {
+      final ops = item['operation_details'] as List? ?? [];
+      for (var op in ops) {
+        allOperations.add({
+          'item_id': item['item_id'],
+          'item_name': item['name'],
+          'op_name': op['name'],
+          'target': op['target'],
+          'imageUrl': op['imageUrl'],
+          'pdfUrl': op['pdfUrl'],
+        });
+      }
+    }
+
+    final filteredOps = allOperations.where((op) {
+      final opName = op['op_name'].toString().toLowerCase();
+      final itemName = op['item_name'].toString().toLowerCase();
+      final itemId = op['item_id'].toString().toLowerCase();
+      final query = _searchQuery.toLowerCase();
+      return opName.contains(query) ||
+          itemName.contains(query) ||
+          itemId.contains(query);
+    }).toList();
+
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'All Operations',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+              SizedBox(
+                width: 250,
+                child: TextField(
+                  onChanged: (val) => setState(() => _searchQuery = val),
+                  decoration: const InputDecoration(
+                    hintText: 'Search by operation or item...',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : filteredOps.isEmpty
+                ? const Center(child: Text('No operations found.'))
+                : ListView.builder(
+                    itemCount: filteredOps.length,
+                    itemBuilder: (context, index) {
+                      final op = filteredOps[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        child: ListTile(
+                          title: Text(op['op_name']),
+                          subtitle: Text(
+                            'Item: ${op['item_name']} (${op['item_id']})\nTarget: ${op['target']}',
+                          ),
+                          isThreeLine: true,
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (op['imageUrl'] != null)
+                                const Icon(Icons.image, color: Colors.blue),
+                              if (op['pdfUrl'] != null)
+                                const Icon(
+                                  Icons.picture_as_pdf,
+                                  color: Colors.red,
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. SHIFTS TAB
 // ---------------------------------------------------------------------------
 class ShiftsTab extends StatefulWidget {
   final String organizationCode;
