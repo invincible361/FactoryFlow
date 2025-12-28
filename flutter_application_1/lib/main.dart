@@ -10,10 +10,12 @@ import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import 'utils/time_utils.dart';
 import 'screens/login_screen.dart';
+import 'services/update_service.dart';
 
 // Background task identifiers
 const String syncLocationTask = "syncLocationTask";
 const String shiftEndReminderTask = "shiftEndReminderTask";
+const String checkForUpdateTask = "checkForUpdateTask";
 
 @pragma('vm:entry-point')
 void callbackDispatcher() {
@@ -28,9 +30,35 @@ void callbackDispatcher() {
       await _handleBackgroundLocation();
     } else if (task == shiftEndReminderTask) {
       await _handleShiftEndReminder();
+    } else if (task == checkForUpdateTask) {
+      // In background, we just check and show a notification if update available
+      // BuildContext is not available here, so we use a custom check
+      await _handleBackgroundUpdateCheck();
     }
     return Future.value(true);
   });
+}
+
+Future<void> _handleBackgroundUpdateCheck() async {
+  // Logic to check for updates in background and show notification
+  // This is similar to UpdateService but without UI
+  try {
+    final response = await UpdateService.fetchVersionData();
+    if (response != null) {
+      final latestVersion = response['latest_version'];
+      final packageInfo = await UpdateService.getPackageInfo();
+      final currentVersion = packageInfo.version;
+
+      if (UpdateService.isNewerVersion(currentVersion, latestVersion)) {
+        await _showNotification(
+          "New Update Available",
+          "A new version ($latestVersion) of FactoryFlow is available. Open the app to update.",
+        );
+      }
+    }
+  } catch (e) {
+    debugPrint('Background update check error: $e');
+  }
 }
 
 Future<void> _handleBackgroundLocation() async {
@@ -270,6 +298,16 @@ void main() async {
   // Initialize Workmanager
   if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
     await Workmanager().initialize(callbackDispatcher);
+
+    // Register the periodic update check task
+    // It will run every 2 hours in the background
+    await Workmanager().registerPeriodicTask(
+      "periodic-update-check",
+      checkForUpdateTask,
+      frequency: const Duration(hours: 2),
+      constraints: Constraints(networkType: NetworkType.connected),
+      existingWorkPolicy: ExistingPeriodicWorkPolicy.replace,
+    );
   }
 
   try {
