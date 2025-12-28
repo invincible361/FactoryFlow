@@ -689,6 +689,20 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       _currentLogId = logId;
     });
 
+    // Auto-select shift if not selected to ensure consistent attendance records
+    if (_selectedShift == null) {
+      final detectedShift = _findShiftByTime(_startTime!);
+      if (detectedShift.isNotEmpty) {
+        setState(() {
+          _selectedShift = detectedShift['name'];
+        });
+      } else {
+        setState(() {
+          _selectedShift = 'General';
+        });
+      }
+    }
+
     // Start background tasks only when production starts
     await _initializeBackgroundTasks();
 
@@ -769,6 +783,35 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     }
   }
 
+  Map<String, dynamic> _findShiftByTime(DateTime time) {
+    final minutes = time.hour * 60 + time.minute;
+    for (final shift in _shifts) {
+      try {
+        final startStr = shift['start_time'] as String;
+        final endStr = shift['end_time'] as String;
+        final format = DateFormat('hh:mm a');
+        final startDt = format.parse(startStr);
+        final endDt = format.parse(endStr);
+        final startMinutes = startDt.hour * 60 + startDt.minute;
+        final endMinutes = endDt.hour * 60 + endDt.minute;
+
+        if (startMinutes < endMinutes) {
+          if (minutes >= startMinutes && minutes < endMinutes) {
+            return shift;
+          }
+        } else {
+          // Crosses midnight
+          if (minutes >= startMinutes || minutes < endMinutes) {
+            return shift;
+          }
+        }
+      } catch (e) {
+        debugPrint('Error parsing shift for lookup: $e');
+      }
+    }
+    return <String, dynamic>{};
+  }
+
   Future<void> _updateAttendance({bool isCheckOut = false}) async {
     try {
       final now = DateTime.now();
@@ -779,17 +822,32 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       final dateStr = DateFormat('yyyy-MM-dd').format(effectiveDate);
       final supabase = Supabase.instance.client;
 
-      // Ensure we have the latest shift info
-      final shift = _shifts.firstWhere(
-        (s) => s['name'] == _selectedShift,
-        orElse: () => <String, dynamic>{},
-      );
+      // Determine shift name strictly
+      String targetShiftName = _selectedShift ?? '';
+      Map<String, dynamic> shift = {};
+
+      if (targetShiftName.isNotEmpty) {
+        shift = _shifts.firstWhere(
+          (s) => s['name'] == targetShiftName,
+          orElse: () => <String, dynamic>{},
+        );
+      }
+
+      // If no valid shift selected/found, try to detect from time
+      if (shift.isEmpty) {
+        shift = _findShiftByTime(effectiveDate);
+        if (shift.isNotEmpty) {
+          targetShiftName = shift['name'];
+        } else {
+          targetShiftName = 'General'; // Fallback to avoid null
+        }
+      }
 
       final payload = {
         'worker_id': widget.employee.id,
         'organization_code': widget.employee.organizationCode,
         'date': dateStr,
-        'shift_name': _selectedShift,
+        'shift_name': targetShiftName,
         'shift_start_time': shift['start_time'],
         'shift_end_time': shift['end_time'],
       };
@@ -802,7 +860,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             .eq('worker_id', widget.employee.id)
             .eq('date', dateStr)
             .eq('organization_code', widget.employee.organizationCode!)
-            .eq('shift_name', _selectedShift!)
+            .eq('shift_name', targetShiftName)
             .maybeSingle();
 
         if (existing == null) {
@@ -820,7 +878,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               .eq('worker_id', widget.employee.id)
               .eq('date', dateStr)
               .eq('organization_code', widget.employee.organizationCode!)
-              .eq('shift_name', _selectedShift!);
+              .eq('shift_name', targetShiftName);
         }
       } else {
         // For End Production, record/update check_out

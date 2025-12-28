@@ -304,21 +304,6 @@ void main() async {
     }
   }
 
-  // Initialize Workmanager
-  if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-    await Workmanager().initialize(callbackDispatcher);
-
-    // Register the periodic update check task
-    // It will run every 2 hours in the background
-    await Workmanager().registerPeriodicTask(
-      "periodic-update-check",
-      checkForUpdateTask,
-      frequency: const Duration(hours: 2),
-      constraints: Constraints(networkType: NetworkType.connected),
-      existingWorkPolicy: ExistingPeriodicWorkPolicy.replace,
-    );
-  }
-
   try {
     await Supabase.initialize(
       url: 'https://gxeglfjlxdpcliptmunu.supabase.co',
