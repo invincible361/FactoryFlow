@@ -13,12 +13,15 @@ class UpdateService {
 
   static Future<Map<String, dynamic>?> fetchVersionData() async {
     try {
+      debugPrint('UpdateService: Fetching version data from: $_versionUrl');
       final response = await http.get(Uri.parse(_versionUrl));
+      debugPrint('UpdateService: Response status code: ${response.statusCode}');
       if (response.statusCode == 200) {
+        debugPrint('UpdateService: Response body: ${response.body}');
         return json.decode(response.body);
       }
     } catch (e) {
-      debugPrint('Error fetching version data: $e');
+      debugPrint('UpdateService: Error fetching version data: $e');
     }
     return null;
   }
@@ -50,6 +53,7 @@ class UpdateService {
   }
 
   static Future<void> checkForUpdates(BuildContext context) async {
+    debugPrint('UpdateService: Checking for updates...');
     final data = await fetchVersionData();
     if (data != null) {
       final latestVersion = data['latest_version'];
@@ -59,11 +63,19 @@ class UpdateService {
       final packageInfo = await getPackageInfo();
       final currentVersion = packageInfo.version;
 
+      debugPrint('UpdateService: Current Version: $currentVersion');
+      debugPrint('UpdateService: Latest Version: $latestVersion');
+
       if (isNewerVersion(currentVersion, latestVersion)) {
+        debugPrint('UpdateService: New version available! Showing dialog...');
         if (context.mounted) {
           _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
         }
+      } else {
+        debugPrint('UpdateService: App is up to date.');
       }
+    } else {
+      debugPrint('UpdateService: Failed to fetch version data from GitHub.');
     }
   }
 
