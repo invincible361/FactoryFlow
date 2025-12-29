@@ -36,6 +36,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   Machine? _selectedMachine;
   Item? _selectedItem;
   String? _selectedOperation;
+  final List<Map<String, String?>> _extraEntries = [];
   final TextEditingController _quantityController = TextEditingController();
   final TextEditingController _remarksController = TextEditingController();
 
@@ -887,7 +888,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             .eq('worker_id', widget.employee.id)
             .eq('date', dateStr)
             .eq('organization_code', widget.employee.organizationCode!)
-            .eq('shift_name', targetShiftName)
             .maybeSingle();
 
         if (existing == null) {
@@ -901,11 +901,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               .update({
                 'check_in': now.toUtc().toIso8601String(),
                 'status': 'On Time',
+                'shift_name': targetShiftName,
+                'shift_start_time': shift['start_time'],
+                'shift_end_time': shift['end_time'],
               })
               .eq('worker_id', widget.employee.id)
               .eq('date', dateStr)
-              .eq('organization_code', widget.employee.organizationCode!)
-              .eq('shift_name', targetShiftName);
+              .eq('organization_code', widget.employee.organizationCode!);
         }
       } else {
         // For End Production, record/update check_out
@@ -956,19 +958,17 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             .eq('worker_id', widget.employee.id)
             .eq('date', dateStr)
             .eq('organization_code', widget.employee.organizationCode!)
-            .eq('shift_name', targetShiftName)
             .maybeSingle();
 
         if (existing == null) {
           await supabase.from('attendance').insert(payload);
-        } else if (existing['check_out'] == null) {
+        } else {
           await supabase
               .from('attendance')
               .update(payload)
               .eq('worker_id', widget.employee.id)
               .eq('date', dateStr)
-              .eq('organization_code', widget.employee.organizationCode!)
-              .eq('shift_name', targetShiftName);
+              .eq('organization_code', widget.employee.organizationCode!);
         }
       }
     } catch (e) {
@@ -996,12 +996,19 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _timer?.cancel();
     final endTime = DateTime.now();
 
-    // Show dialog to enter quantity
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) {
         final currentContext = context;
+        final qtyControllers = <TextEditingController>[];
+        final remarksControllers = <TextEditingController>[];
+        qtyControllers.add(TextEditingController());
+        remarksControllers.add(TextEditingController());
+        for (int i = 0; i < _extraEntries.length; i++) {
+          qtyControllers.add(TextEditingController());
+          remarksControllers.add(TextEditingController());
+        }
         return AlertDialog(
           title: const Text('Production Finished'),
           content: Column(
@@ -1013,24 +1020,56 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               ),
               const SizedBox(height: 16),
               TextField(
-                controller: _quantityController,
+                controller: qtyControllers[0],
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: 'Enter Quantity Produced',
+                  labelText: 'Base Machine Quantity',
                   border: OutlineInputBorder(),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
               TextField(
-                controller: _remarksController,
+                controller: remarksControllers[0],
                 maxLines: 2,
                 decoration: const InputDecoration(
-                  labelText: 'Remarks (Optional)',
-                  hintText: 'Add any issues or notes here...',
+                  labelText: 'Base Remarks (Optional)',
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.comment),
                 ),
               ),
+              if (_extraEntries.isNotEmpty)
+                ..._extraEntries.asMap().entries.map((e) {
+                  final i = e.key;
+                  final data = e.value;
+                  return Column(
+                    children: [
+                      const SizedBox(height: 12),
+                      Text(
+                        'Extra ${i + 1}: ${data['machineId'] ?? ''} / ${data['itemId'] ?? ''} / ${data['operation'] ?? ''}',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: qtyControllers[i + 1],
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Quantity',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: remarksControllers[i + 1],
+                        maxLines: 2,
+                        decoration: const InputDecoration(
+                          labelText: 'Remarks (Optional)',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.comment),
+                        ),
+                      ),
+                    ],
+                  );
+                }),
             ],
           ),
           actions: [
@@ -1043,14 +1082,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             ),
             ElevatedButton(
               onPressed: () {
-                if (_quantityController.text.isEmpty) {
+                if (qtyControllers.any((c) => c.text.isEmpty)) {
                   ScaffoldMessenger.of(currentContext).showSnackBar(
-                    const SnackBar(content: Text('Please enter quantity')),
+                    const SnackBar(
+                      content: Text('Please enter quantity for all entries'),
+                    ),
                   );
                   return;
                 }
-                final quantity = int.tryParse(_quantityController.text);
-                if (quantity == null) {
+                final baseQty = int.tryParse(qtyControllers[0].text);
+                if (baseQty == null) {
                   ScaffoldMessenger.of(currentContext).showSnackBar(
                     const SnackBar(content: Text('Invalid quantity')),
                   );
@@ -1060,16 +1101,15 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                 // Target Validation
                 final detail = _getCurrentOperationDetail();
                 if (detail != null && detail.target > 0) {
-                  final diff = quantity - detail.target;
-                  final isTargetMet = diff >= 0;
+                  final diff = baseQty - detail.target;
 
                   Navigator.pop(currentContext); // Close input dialog
 
                   // Show Summary/Confirmation Dialog
                   _showConfirmationDialog(
                     currentContext,
-                    quantity,
-                    _remarksController.text,
+                    baseQty,
+                    remarksControllers[0].text,
                     endTime,
                     detail,
                     diff,
@@ -1079,12 +1119,49 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                   // Even if no target, show confirmation
                   _showConfirmationDialog(
                     currentContext,
-                    quantity,
-                    _remarksController.text,
+                    baseQty,
+                    remarksControllers[0].text,
                     endTime,
                     null,
                     0,
                   );
+                }
+                // Save extra entries logs
+                for (int i = 0; i < _extraEntries.length; i++) {
+                  final data = _extraEntries[i];
+                  final qty = int.tryParse(qtyControllers[i + 1].text) ?? 0;
+                  final remark = remarksControllers[i + 1].text.isNotEmpty
+                      ? remarksControllers[i + 1].text
+                      : null;
+                  final machine = _machines.firstWhere(
+                    (m) => m.id == data['machineId'],
+                    orElse: () => _selectedMachine!,
+                  );
+                  final item = _items.firstWhere(
+                    (it) => it.id == data['itemId'],
+                    orElse: () => _selectedItem!,
+                  );
+                  final op = data['operation'] ?? _selectedOperation!;
+                  final log = ProductionLog(
+                    id: const Uuid().v4(),
+                    employeeId: widget.employee.id,
+                    machineId: machine.id,
+                    itemId: item.id,
+                    operation: op,
+                    quantity: qty,
+                    timestamp: DateTime.now(),
+                    startTime: _startTime,
+                    endTime: endTime,
+                    latitude: _currentPosition?.latitude ?? 0.0,
+                    longitude: _currentPosition?.longitude ?? 0.0,
+                    shiftName:
+                        _selectedShift ??
+                        _getShiftName(_startTime ?? DateTime.now()),
+                    performanceDiff: 0,
+                    organizationCode: widget.employee.organizationCode,
+                    remarks: remark,
+                  );
+                  LogService().addLog(log);
                 }
               },
               child: const Text('Submit'),
@@ -1716,6 +1793,155 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                           _persistState();
                         },
                 ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: 'Add another machine',
+                    onPressed: _isTimerRunning
+                        ? null
+                        : () {
+                            setState(() {
+                              _extraEntries.add({
+                                'machineId': null,
+                                'itemId': null,
+                                'operation': null,
+                              });
+                            });
+                          },
+                  ),
+                ),
+                if (_extraEntries.isNotEmpty)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _extraEntries.asMap().entries.map((entry) {
+                      final idx = entry.key;
+                      final data = entry.value;
+                      final selMachine = _machines
+                          .where((m) => m.id == data['machineId'])
+                          .cast<Machine?>()
+                          .firstOrNull;
+                      final selItem = _items
+                          .where((i) => i.id == data['itemId'])
+                          .cast<Item?>()
+                          .firstOrNull;
+                      final ops = () {
+                        if (selItem == null) return <String>[];
+                        List<String> o = selItem.operations;
+                        if (selItem.id == 'GR-122' && selMachine != null) {
+                          if (selMachine.type == MachineType.cnc) {
+                            o = o.where((op) => op.contains('CNC')).toList();
+                          } else if (selMachine.type == MachineType.vmc) {
+                            o = o.where((op) => op.contains('VMC')).toList();
+                          }
+                        }
+                        return o;
+                      }();
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 6),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Extra Machine Entry ${idx + 1}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              DropdownButtonFormField<Machine>(
+                                decoration: InputDecoration(
+                                  labelText: 'Machine ${idx + 2}',
+                                  prefixIcon: const Icon(Icons.settings),
+                                ),
+                                initialValue: selMachine,
+                                items: _machines.map((m) {
+                                  return DropdownMenuItem(
+                                    value: m,
+                                    child: Text('${m.name} (${m.id})'),
+                                  );
+                                }).toList(),
+                                onChanged: _isTimerRunning
+                                    ? null
+                                    : (Machine? v) {
+                                        setState(() {
+                                          data['machineId'] = v?.id;
+                                          data['itemId'] = null;
+                                          data['operation'] = null;
+                                        });
+                                      },
+                              ),
+                              const SizedBox(height: 8),
+                              DropdownButtonFormField<Item>(
+                                decoration: const InputDecoration(
+                                  labelText: 'Select Item/Component',
+                                  prefixIcon: Icon(Icons.inventory_2),
+                                ),
+                                initialValue: selItem,
+                                items: _items.map((item) {
+                                  return DropdownMenuItem(
+                                    value: item,
+                                    child: Text('${item.name} (${item.id})'),
+                                  );
+                                }).toList(),
+                                onChanged: _isTimerRunning
+                                    ? null
+                                    : (Item? v) {
+                                        setState(() {
+                                          data['itemId'] = v?.id;
+                                          data['operation'] = null;
+                                        });
+                                      },
+                              ),
+                              const SizedBox(height: 8),
+                              DropdownButtonFormField<String>(
+                                decoration: const InputDecoration(
+                                  labelText: 'Select Operation',
+                                ),
+                                initialValue: ops.contains(data['operation'])
+                                    ? data['operation']
+                                    : null,
+                                items: ops
+                                    .map(
+                                      (op) => DropdownMenuItem(
+                                        value: op,
+                                        child: Text(op),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: _isTimerRunning
+                                    ? null
+                                    : (v) {
+                                        setState(() {
+                                          data['operation'] = v;
+                                        });
+                                      },
+                              ),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: IconButton(
+                                  icon: const Icon(
+                                    Icons.delete,
+                                    color: Colors.red,
+                                  ),
+                                  tooltip: 'Remove',
+                                  onPressed: _isTimerRunning
+                                      ? null
+                                      : () {
+                                          setState(() {
+                                            _extraEntries.removeAt(idx);
+                                          });
+                                        },
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<Item>(
                   decoration: const InputDecoration(

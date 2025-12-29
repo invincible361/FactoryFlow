@@ -11,8 +11,8 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/item.dart';
 import '../utils/time_utils.dart';
-import '../services/update_service.dart';
 import 'dart:io' as io;
+import 'package:url_launcher/url_launcher.dart';
 
 // Removed local TimeUtils.formatTo12Hour as we now use TimeUtils.formatTo12Hour
 
@@ -993,6 +993,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
                         'Check Out',
                         TimeUtils.formatTo12Hour(record['check_out']),
                       ),
+                      _detailRow(
+                        'Verified',
+                        (record['is_verified'] ?? false) ? 'Yes' : 'No',
+                      ),
                     ]),
                     const Divider(),
                     const Text(
@@ -1379,6 +1383,12 @@ class _ReportsTabState extends State<ReportsTab> {
     );
   }
 
+  int _computeEfficiency(int qty, int target) {
+    if (target <= 0) return 0;
+    final pct = ((qty / target) * 100).round();
+    return pct.clamp(0, 999);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1642,10 +1652,11 @@ class _ReportsTabState extends State<ReportsTab> {
           .eq('organization_code', widget.organizationCode);
       final itemsResp = await _supabase
           .from('items')
-          .select('item_id, name')
+          .select('item_id, name, operation_details')
           .eq('organization_code', widget.organizationCode);
       final employeeMap = <String, String>{};
       final itemMap = <String, String>{};
+      final targetMap = <String, int>{}; // key: item_id|operation -> target
       for (final w in List<Map<String, dynamic>>.from(employeesResp)) {
         final id = w['worker_id']?.toString() ?? '';
         final name = w['name']?.toString() ?? '';
@@ -1655,14 +1666,25 @@ class _ReportsTabState extends State<ReportsTab> {
         final id = it['item_id']?.toString() ?? '';
         final name = it['name']?.toString() ?? '';
         if (id.isNotEmpty) itemMap[id] = name;
+        final ops = (it['operation_details'] as List? ?? []);
+        for (final op in ops) {
+          final opName = (op['name'] ?? '').toString();
+          final tgt = (op['target'] ?? 0) as int;
+          if (opName.isNotEmpty) {
+            targetMap['$id|$opName'] = tgt;
+          }
+        }
       }
       return rawLogs.map((log) {
         final wid = log['worker_id']?.toString() ?? '';
         final iid = log['item_id']?.toString() ?? '';
+        final opName = log['operation']?.toString() ?? '';
+        final target = targetMap['$iid|$opName'];
         return {
           ...log,
           'employeeName': employeeMap[wid] ?? 'Unknown',
           'itemName': itemMap[iid] ?? 'Unknown',
+          if (target != null) 'target': target,
         };
       }).toList();
     } catch (_) {
@@ -1670,142 +1692,347 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  // Aggregate logs: Employee -> Item -> Operation -> {qty, diff, employeeName}
-  Map<String, Map<String, Map<String, Map<String, dynamic>>>>
-  _getAggregatedData() {
-    final Map<String, Map<String, Map<String, Map<String, dynamic>>>> data = {};
-
-    for (var log in _logs) {
-      final employeeId = log['worker_id'] as String;
-      final employeeName = (log['employeeName'] ?? 'Unknown') as String;
-
-      final item = log['item_id'] as String;
-      final op = log['operation'] as String;
-      final qty = log['quantity'] as int;
-      final diff = (log['performance_diff'] ?? 0) as int;
-
-      data.putIfAbsent(employeeId, () => {});
-      data[employeeId]!.putIfAbsent(item, () => {});
-      data[employeeId]![item]!.putIfAbsent(
-        op,
-        () => {'qty': 0, 'diff': 0, 'employeeName': employeeName},
-      );
-
-      final current = data[employeeId]![item]![op]!;
-      data[employeeId]![item]![op] = {
-        'qty': current['qty'] + qty,
-        'diff': current['diff'] + diff,
-        'employeeName': employeeName,
-      };
+  List<Map<String, dynamic>> _computeTopItemsPerOperation(
+    List<Map<String, dynamic>> logs,
+  ) {
+    final Map<String, Map<String, int>> agg = {};
+    for (final l in logs) {
+      final op = (l['operation'] ?? '').toString();
+      final item = (l['item_id'] ?? '').toString();
+      final qty = (l['quantity'] ?? 0) as int;
+      if (op.isEmpty || item.isEmpty) continue;
+      agg.putIfAbsent(op, () => {});
+      agg[op]![item] = (agg[op]![item] ?? 0) + qty;
     }
-    return data;
+    final List<Map<String, dynamic>> result = [];
+    agg.forEach((op, items) {
+      String topItem = '';
+      int topQty = 0;
+      items.forEach((item, qty) {
+        if (qty > topQty) {
+          topQty = qty;
+          topItem = item;
+        }
+      });
+      result.add({'operation': op, 'item_id': topItem, 'total_qty': topQty});
+    });
+    return result;
   }
 
-  Future<void> _exportToExcel() async {
+  // Aggregate logs: Employee -> Item -> Operation -> {qty, diff, employeeName}
+
+  Future<void> _showExportOptions() async {
+    String groupBy = 'Worker';
+    String period = _filter;
+    DateTimeRange? customRange;
+    final Set<String> selectedWorkers = {};
+    String machinesCsv = '';
+    String itemsCsv = '';
+    String opsCsv = '';
+    await showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Export Options'),
+          content: StatefulBuilder(
+            builder: (context, setState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Group By'),
+                  const SizedBox(height: 6),
+                  DropdownButton<String>(
+                    value: groupBy,
+                    isExpanded: true,
+                    items: const [
+                      DropdownMenuItem(value: 'Worker', child: Text('Worker')),
+                      DropdownMenuItem(
+                        value: 'Machine',
+                        child: Text('Machine'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'Operation',
+                        child: Text('Operation'),
+                      ),
+                      DropdownMenuItem(value: 'Item', child: Text('Item')),
+                    ],
+                    onChanged: (v) => setState(() => groupBy = v ?? 'Worker'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text('Period'),
+                  const SizedBox(height: 6),
+                  DropdownButton<String>(
+                    value: period,
+                    isExpanded: true,
+                    items: ['All', 'Today', 'Week', 'Month', 'Custom']
+                        .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                        .toList(),
+                    onChanged: (v) async {
+                      if (v == null) return;
+                      setState(() => period = v);
+                      if (v == 'Custom') {
+                        final picked = await showDateRangePicker(
+                          context: context,
+                          firstDate: DateTime(2023),
+                          lastDate: DateTime.now(),
+                          initialDateRange:
+                              customRange ??
+                              DateTimeRange(
+                                start: DateTime.now().subtract(
+                                  const Duration(days: 7),
+                                ),
+                                end: DateTime.now(),
+                              ),
+                        );
+                        if (picked != null) {
+                          setState(() => customRange = picked);
+                        }
+                      }
+                    },
+                  ),
+                  if (period == 'Custom' && customRange != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        '${customRange!.start.toIso8601String().substring(0, 10)} — ${customRange!.end.toIso8601String().substring(0, 10)}',
+                        style: const TextStyle(fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  const SizedBox(height: 12),
+                  const Text('Filter (optional)'),
+                  const SizedBox(height: 6),
+                  ExpansionTile(
+                    title: const Text('Workers'),
+                    initiallyExpanded: false,
+                    children: [
+                      SizedBox(
+                        height: 180,
+                        child: ListView(
+                          children: _employees.map((e) {
+                            final id = (e['worker_id'] ?? '').toString();
+                            final name = (e['name'] ?? '').toString();
+                            final checked = selectedWorkers.contains(id);
+                            return CheckboxListTile(
+                              value: checked,
+                              onChanged: (v) {
+                                setState(() {
+                                  if (v == true) {
+                                    selectedWorkers.add(id);
+                                  } else {
+                                    selectedWorkers.remove(id);
+                                  }
+                                });
+                              },
+                              title: Text('$name ($id)'),
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Machine IDs (comma-separated)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => machinesCsv = v,
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Item IDs (comma-separated)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => itemsCsv = v,
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Operations (comma-separated)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => opsCsv = v,
+                  ),
+                ],
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                final workerIds = selectedWorkers.toList();
+                final machineIds = machinesCsv
+                    .split(',')
+                    .map((e) => e.trim())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+                final itemIds = itemsCsv
+                    .split(',')
+                    .map((e) => e.trim())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+                final operations = opsCsv
+                    .split(',')
+                    .map((e) => e.trim())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
+                await _exportWithOptions(
+                  groupBy: groupBy,
+                  period: period,
+                  dateRange: customRange,
+                  workerIds: workerIds.isEmpty ? null : workerIds,
+                  machineIds: machineIds.isEmpty ? null : machineIds,
+                  itemIds: itemIds.isEmpty ? null : itemIds,
+                  operations: operations.isEmpty ? null : operations,
+                );
+              },
+              child: const Text('Export'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _exportWithOptions({
+    required String groupBy,
+    String? period,
+    DateTimeRange? dateRange,
+    List<String>? workerIds,
+    List<String>? machineIds,
+    List<String>? itemIds,
+    List<String>? operations,
+  }) async {
     setState(() => _isExporting = true);
     try {
-      // 1. Fetch ALL data based on current filter
-      final response = await _buildQuery(isExport: true);
-      final allLogsRaw = List<Map<String, dynamic>>.from(response);
-      final allLogs = await _enrichLogsWithNames(allLogsRaw);
-
+      var query = _supabase
+          .from('production_logs')
+          .select('*, remarks')
+          .eq('organization_code', widget.organizationCode);
+      final now = DateTime.now();
+      final effectivePeriod = period ?? _filter;
+      if (effectivePeriod == 'Today') {
+        final start = DateTime(now.year, now.month, now.day);
+        final end = start.add(const Duration(days: 1));
+        query = query
+            .gte('created_at', start.toIso8601String())
+            .lt('created_at', end.toIso8601String());
+      } else if (effectivePeriod == 'Week') {
+        final start = now.subtract(const Duration(days: 7));
+        query = query.gte('created_at', start.toIso8601String());
+      } else if (effectivePeriod == 'Month') {
+        final start = DateTime(now.year, now.month, 1);
+        query = query.gte('created_at', start.toIso8601String());
+      } else if (effectivePeriod == 'Custom' && dateRange != null) {
+        query = query
+            .gte('created_at', dateRange.start.toIso8601String())
+            .lte('created_at', dateRange.end.toIso8601String());
+      }
+      final allLogsRaw = List<Map<String, dynamic>>.from(
+        await query.order('created_at', ascending: false),
+      );
+      final filteredRaw = allLogsRaw.where((l) {
+        final wid = (l['worker_id'] ?? '').toString();
+        final mid = (l['machine_id'] ?? '').toString();
+        final iid = (l['item_id'] ?? '').toString();
+        final op = (l['operation'] ?? '').toString();
+        final okWorker = workerIds == null || workerIds.contains(wid);
+        final okMachine = machineIds == null || machineIds.contains(mid);
+        final okItem = itemIds == null || itemIds.contains(iid);
+        final okOp = operations == null || operations.contains(op);
+        return okWorker && okMachine && okItem && okOp;
+      }).toList();
+      final allLogs = await _enrichLogsWithNames(filteredRaw);
       if (allLogs.isEmpty) {
-        throw Exception('No data to export for this period');
+        throw Exception('No data to export for these options');
       }
 
-      // 2. Create Excel
       var excel = Excel.createExcel();
-      Sheet sheetObject = excel['Production Report'];
-
-      // Headers
-      sheetObject.appendRow([
-        TextCellValue('Employee Name'),
-        TextCellValue('Employee ID'),
+      Sheet summarySheet = excel['Summary ($groupBy)'];
+      summarySheet.appendRow([
+        TextCellValue(groupBy),
         TextCellValue('Item ID'),
         TextCellValue('Operation'),
         TextCellValue('Total Quantity'),
         TextCellValue('Total Surplus/Deficit'),
-        TextCellValue('Status'),
       ]);
-
-      // 3. Process Data
-      // Reuse logic to aggregate, but we need to do it on 'allLogs'
-      // Temporarily swap _logs to use the helper (a bit hacky but efficient)
-      final tempLogs = _logs;
-      _logs = allLogs;
-      final aggregated = _getAggregatedData();
-      _logs = tempLogs; // Restore display logs
-
-      // 4. Write Rows
-      aggregated.forEach((employeeId, items) {
-        items.forEach((itemId, ops) {
-          ops.forEach((opName, data) {
-            final qty = data['qty'];
-            final diff = data['diff'];
-            final eName = data['employeeName'];
-            String status = diff >= 0 ? 'Surplus' : 'Deficit';
-
-            sheetObject.appendRow([
-              TextCellValue(eName),
-              TextCellValue(employeeId),
-              TextCellValue(itemId),
-              TextCellValue(opName),
-              IntCellValue(qty),
-              IntCellValue(diff),
-              TextCellValue(status),
-            ]);
-          });
-        });
-      });
+      final summaryRows = _aggregateByGroup(groupBy, allLogs);
+      for (final r in summaryRows) {
+        summarySheet.appendRow([
+          TextCellValue((r['group'] ?? '').toString()),
+          TextCellValue((r['item_id'] ?? '').toString()),
+          TextCellValue((r['operation'] ?? '').toString()),
+          IntCellValue((r['qty'] ?? 0) as int),
+          IntCellValue((r['diff'] ?? 0) as int),
+        ]);
+      }
 
       Sheet detailsSheet = excel['Detailed Logs'];
       detailsSheet.appendRow([
         TextCellValue('Employee Name'),
         TextCellValue('Employee ID'),
+        TextCellValue('Machine ID'),
         TextCellValue('Item ID'),
         TextCellValue('Operation'),
-        TextCellValue('Date'),
-        TextCellValue('In Time'),
-        TextCellValue('Out Time'),
+        TextCellValue('Shift'),
+        TextCellValue('Created At'),
+        TextCellValue('Start Time'),
+        TextCellValue('End Time'),
         TextCellValue('Working Hours'),
-        TextCellValue('Machine ID'),
-        TextCellValue('Quantity'),
+        TextCellValue('Worker Qty'),
+        TextCellValue('Supervisor Qty'),
+        TextCellValue('Supervisor Qty'),
         TextCellValue('Surplus/Deficit'),
         TextCellValue('Status'),
+        TextCellValue('Verified By'),
+        TextCellValue('Verified At'),
         TextCellValue('Remarks'),
       ]);
       for (final log in allLogs) {
         final eName = (log['employeeName'] ?? 'Unknown').toString();
-        final employeeId = (log['worker_id'] ?? '').toString();
+        final workerId = (log['worker_id'] ?? '').toString();
+        final machineId = (log['machine_id'] ?? '').toString();
         final itemId = (log['item_id'] ?? '').toString();
         final opName = (log['operation'] ?? '').toString();
+        final shiftName = (log['shift_name'] ?? '').toString();
         final qty = (log['quantity'] ?? 0) as int;
+        final supQty = (log['supervisor_quantity'] ?? '-') as Object;
         final diff = (log['performance_diff'] ?? 0) as int;
-        String status = diff >= 0 ? 'Surplus' : 'Deficit';
+        final status = diff >= 0 ? 'Surplus' : 'Deficit';
         final remarks = (log['remarks'] ?? '').toString();
         final createdAtStr = (log['created_at'] ?? '').toString();
-
         final startTimeStr = (log['start_time'] ?? '').toString();
         final endTimeStr = (log['end_time'] ?? '').toString();
+        final verifiedBy = (log['verified_by'] ?? '').toString();
+        final verifiedAtStr = (log['verified_at'] ?? '').toString();
 
-        DateTime dt;
+        DateTime createdAtLocal;
         try {
-          dt = TimeUtils.parseToLocal(createdAtStr);
+          createdAtLocal = TimeUtils.parseToLocal(createdAtStr);
         } catch (_) {
-          dt = DateTime.now();
+          createdAtLocal = DateTime.now();
         }
-
-        String inTime = '-';
-        String outTime = '-';
+        String startTimeLocal = '-';
+        String endTimeLocal = '-';
         String totalHours = '-';
-
         if (startTimeStr.isNotEmpty) {
           try {
             final st = TimeUtils.parseToLocal(startTimeStr);
-            inTime = DateFormat('hh:mm a').format(st);
+            startTimeLocal = DateFormat('hh:mm a').format(st);
             if (endTimeStr.isNotEmpty) {
               final et = TimeUtils.parseToLocal(endTimeStr);
-              outTime = DateFormat('hh:mm a').format(et);
+              endTimeLocal = DateFormat('hh:mm a').format(et);
               final duration = et.difference(st);
               final hours = duration.inHours;
               final minutes = duration.inMinutes.remainder(60);
@@ -1813,31 +2040,38 @@ class _ReportsTabState extends State<ReportsTab> {
             }
           } catch (_) {}
         }
+        String createdAtFormatted = DateFormat(
+          'yyyy-MM-dd hh:mm a',
+        ).format(createdAtLocal);
+        String verifiedAtFormatted = verifiedAtStr.isNotEmpty
+            ? DateFormat(
+                'yyyy-MM-dd hh:mm a',
+              ).format(TimeUtils.parseToLocal(verifiedAtStr))
+            : '-';
 
-        final dateStr = DateFormat('yyyy-MM-dd').format(dt);
-        final machineId = (log['machine_id'] ?? '').toString();
         detailsSheet.appendRow([
           TextCellValue(eName),
-          TextCellValue(employeeId),
+          TextCellValue(workerId),
+          TextCellValue(machineId),
           TextCellValue(itemId),
           TextCellValue(opName),
-          TextCellValue(dateStr),
-          TextCellValue(inTime),
-          TextCellValue(outTime),
+          TextCellValue(shiftName.isEmpty ? '-' : shiftName),
+          TextCellValue(createdAtFormatted),
+          TextCellValue(startTimeLocal),
+          TextCellValue(endTimeLocal),
           TextCellValue(totalHours),
-          TextCellValue(machineId),
           IntCellValue(qty),
+          supQty is int ? IntCellValue(supQty) : TextCellValue('$supQty'),
           IntCellValue(diff),
           TextCellValue(status),
+          TextCellValue(verifiedBy.isEmpty ? '-' : verifiedBy),
+          TextCellValue(verifiedAtFormatted),
           TextCellValue(remarks),
         ]);
       }
 
-      // 5. Save & Share
       final bytes = excel.save();
-      if (bytes == null) {
-        throw Exception('Failed to generate Excel bytes');
-      }
+      if (bytes == null) throw Exception('Failed to generate Excel bytes');
       if (kIsWeb) {
         final uint8 = Uint8List.fromList(bytes);
         final params = share_plus.ShareParams(
@@ -1849,24 +2083,23 @@ class _ReportsTabState extends State<ReportsTab> {
             ),
           ],
           fileNameOverrides: [
-            'production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx',
+            'production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx',
           ],
-          text: 'Production Report ($_filter)',
+          text: 'Production Export ($groupBy)',
         );
         await share_plus.SharePlus.instance.share(params);
       } else {
         final directory = await getTemporaryDirectory();
         final path =
-            '${directory.path}/production_report_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+            '${directory.path}/production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
         final file = io.File(path);
         await file.writeAsBytes(bytes);
         final params = share_plus.ShareParams(
           files: [share_plus.XFile(path)],
-          text: 'Production Report ($_filter)',
+          text: 'Production Export ($groupBy)',
         );
         await share_plus.SharePlus.instance.share(params);
       }
-
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -1881,6 +2114,40 @@ class _ReportsTabState extends State<ReportsTab> {
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
+  }
+
+  List<Map<String, dynamic>> _aggregateByGroup(
+    String groupBy,
+    List<Map<String, dynamic>> logs,
+  ) {
+    final Map<String, Map<String, dynamic>> acc = {};
+    for (final l in logs) {
+      final groupKey = groupBy == 'Worker'
+          ? (l['worker_id'] ?? '').toString()
+          : groupBy == 'Machine'
+          ? (l['machine_id'] ?? '').toString()
+          : groupBy == 'Item'
+          ? (l['item_id'] ?? '').toString()
+          : (l['operation'] ?? '').toString();
+      final itemId = (l['item_id'] ?? '').toString();
+      final operation = (l['operation'] ?? '').toString();
+      final qty = (l['quantity'] ?? 0) as int;
+      final diff = (l['performance_diff'] ?? 0) as int;
+      final key = '$groupKey|$itemId|$operation';
+      acc.putIfAbsent(
+        key,
+        () => {
+          'group': groupKey,
+          'item_id': itemId,
+          'operation': operation,
+          'qty': 0,
+          'diff': 0,
+        },
+      );
+      acc[key]!['qty'] = (acc[key]!['qty'] as int) + qty;
+      acc[key]!['diff'] = (acc[key]!['diff'] as int) + diff;
+    }
+    return acc.values.toList();
   }
 
   Future<void> _fetchExtraUnitsTodayOrg() async {
@@ -1991,7 +2258,7 @@ class _ReportsTabState extends State<ReportsTab> {
                 const Spacer(),
                 IconButton(
                   icon: const Icon(Icons.download, color: Colors.green),
-                  onPressed: _isExporting ? null : _exportToExcel,
+                  onPressed: _isExporting ? null : _showExportOptions,
                   tooltip: 'Export to Excel',
                 ),
                 if (_isExporting)
@@ -2031,6 +2298,26 @@ class _ReportsTabState extends State<ReportsTab> {
                   '${_employees.length}',
                   Colors.blue.shade100,
                   Icons.people,
+                ),
+                Builder(
+                  builder: (context) {
+                    final tops = _computeTopItemsPerOperation(_logs);
+                    final recent = tops.take(4).toList();
+                    final summary = recent.isEmpty
+                        ? 'No data'
+                        : recent
+                              .map(
+                                (e) =>
+                                    '${e['operation']} → ${e['item_id']} (${e['total_qty']})',
+                              )
+                              .join(' | ');
+                    return _metricTile(
+                      'Top Items per Operation',
+                      summary,
+                      Colors.orange.shade100,
+                      Icons.build_circle,
+                    );
+                  },
                 ),
               ],
             ),
@@ -2490,8 +2777,29 @@ class _ReportsTabState extends State<ReportsTab> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '${log['operation']} | Qty: ${log['quantity']} | Diff: ${log['performance_diff']}',
+                              '${log['operation']} | Worker Qty: ${log['quantity']} | Supervisor Qty: ${(log['supervisor_quantity'] ?? '-')}',
                             ),
+                            if (log['target'] != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2.0),
+                                child: Text(
+                                  'Efficiency: ${_computeEfficiency(log['quantity'] as int, log['target'] as int)}%',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.deepPurple,
+                                  ),
+                                ),
+                              ),
+                            if (log['start_time'] != null ||
+                                log['end_time'] != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2.0),
+                                child: Text(
+                                  'Start: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} | '
+                                  'End: ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
                             if (inOutTime.isNotEmpty)
                               Text(
                                 inOutTime,
@@ -2523,11 +2831,56 @@ class _ReportsTabState extends State<ReportsTab> {
                               ),
                           ],
                         ),
-                        trailing: Text(
-                          TimeUtils.formatTo12Hour(
-                            log['created_at'],
-                            format: 'MM/dd hh:mm a',
-                          ),
+                        trailing: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              TimeUtils.formatTo12Hour(
+                                log['created_at'],
+                                format: 'MM/dd hh:mm a',
+                              ),
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            const SizedBox(height: 4),
+                            if ((log['verified_at'] ?? '') != '')
+                              Text(
+                                'Verified: ${TimeUtils.formatTo12Hour(log['verified_at'], format: 'MM/dd hh:mm a')}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.green,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            if ((log['verified_by'] ?? '') != '')
+                              Text(
+                                'By: ${log['verified_by']}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.green,
+                                ),
+                              ),
+                            if ((log['is_verified'] ?? false) != true)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.amber.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: Colors.orange),
+                                ),
+                                child: const Text(
+                                  'Verification Awaited',
+                                  style: TextStyle(
+                                    color: Colors.orange,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       );
                     },
@@ -2563,6 +2916,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
   final _mobileController = TextEditingController();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  String _role = 'worker';
 
   @override
   void initState() {
@@ -2661,6 +3015,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
         'username': _usernameController.text,
         'password': _passwordController.text, // Note: Should hash in real app
         'organization_code': widget.organizationCode,
+        'role': _role,
       });
       if (mounted) {
         ScaffoldMessenger.of(
@@ -2696,6 +3051,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
     final passwordEditController = TextEditingController(
       text: employee['password'],
     );
+    String roleEdit = (employee['role'] ?? 'worker').toString();
 
     showDialog(
       context: context,
@@ -2735,6 +3091,30 @@ class _EmployeesTabState extends State<EmployeesTab> {
                 controller: passwordEditController,
                 decoration: const InputDecoration(labelText: 'Password'),
               ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const Text('Role: '),
+                  const SizedBox(width: 8),
+                  DropdownButton<String>(
+                    value: roleEdit,
+                    items: const [
+                      DropdownMenuItem(value: 'worker', child: Text('Worker')),
+                      DropdownMenuItem(
+                        value: 'supervisor',
+                        child: Text('Supervisor'),
+                      ),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          roleEdit = val;
+                        });
+                      }
+                    },
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -2760,6 +3140,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
                       'mobile_number': mobileEditController.text,
                       'username': usernameEditController.text,
                       'password': passwordEditController.text,
+                      'role': roleEdit,
                     })
                     .eq('worker_id', employee['worker_id'])
                     .eq('organization_code', widget.organizationCode);
@@ -2844,6 +3225,33 @@ class _EmployeesTabState extends State<EmployeesTab> {
                 TextField(
                   controller: _passwordController,
                   decoration: const InputDecoration(labelText: 'Password'),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Text('Role: '),
+                    const SizedBox(width: 8),
+                    DropdownButton<String>(
+                      value: _role,
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'worker',
+                          child: Text('Worker'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'supervisor',
+                          child: Text('Supervisor'),
+                        ),
+                      ],
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            _role = val;
+                          });
+                        }
+                      },
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 10),
                 ElevatedButton(
@@ -3149,7 +3557,6 @@ class _ItemsTabState extends State<ItemsTab> {
   // New Item Controllers
   final _itemIdController = TextEditingController();
   final _itemNameController = TextEditingController();
-  final _searchController = TextEditingController();
   List<OperationDetail> _operations = [];
   String _searchQuery = '';
 
@@ -3424,9 +3831,54 @@ class _ItemsTabState extends State<ItemsTab> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (op.imageUrl != null)
-                        const Icon(Icons.image, color: Colors.blue),
+                        IconButton(
+                          icon: const Icon(Icons.image, color: Colors.blue),
+                          tooltip: 'View Image',
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                content: SizedBox(
+                                  width: 500,
+                                  child: Image.network(
+                                    op.imageUrl!,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (c, e, st) =>
+                                        const Text('Image failed to load'),
+                                  ),
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx),
+                                    child: const Text('Close'),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
                       if (op.pdfUrl != null)
-                        const Icon(Icons.picture_as_pdf, color: Colors.red),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.picture_as_pdf,
+                            color: Colors.red,
+                          ),
+                          tooltip: 'Open PDF',
+                          onPressed: () async {
+                            final messenger = ScaffoldMessenger.of(context);
+                            final uri = Uri.parse(op.pdfUrl!);
+                            if (!await launchUrl(
+                              uri,
+                              mode: LaunchMode.externalApplication,
+                            )) {
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Failed to open PDF'),
+                                ),
+                              );
+                            }
+                          },
+                        ),
                     ],
                   ),
                 ),
@@ -3883,14 +4335,16 @@ class _OperationsTabState extends State<OperationsTab> {
       child: Column(
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'All Operations',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+              const Expanded(
+                child: Text(
+                  'All Operations',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                ),
               ),
-              SizedBox(
-                width: 250,
+              const SizedBox(width: 8),
+              Expanded(
                 child: TextField(
                   onChanged: (val) => setState(() => _searchQuery = val),
                   decoration: const InputDecoration(
@@ -4253,6 +4707,7 @@ class SecurityTab extends StatefulWidget {
 class _SecurityTabState extends State<SecurityTab> {
   final _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _logs = [];
+  List<Map<String, dynamic>> _employeeLogs = [];
   bool _isLoading = true;
   bool _missingTable = false;
 
@@ -4286,6 +4741,22 @@ class _SecurityTabState extends State<SecurityTab> {
           _missingTable = true;
         });
       }
+    }
+    // Employee login logs (worker/supervisor)
+    try {
+      final resp = await _supabase
+          .from('login_logs')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .order('login_time', ascending: false)
+          .limit(100);
+      if (mounted) {
+        setState(() {
+          _employeeLogs = List<Map<String, dynamic>>.from(resp);
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch employee login logs error: $e');
     }
   }
 
@@ -4343,26 +4814,69 @@ class _SecurityTabState extends State<SecurityTab> {
       );
     }
 
-    return ListView.builder(
-      itemCount: _logs.length,
-      itemBuilder: (context, index) {
-        final log = _logs[index];
-        final timeStr = log['login_time'] as String?;
-        final time =
-            DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
-        final device = log['device_name'] ?? 'Unknown';
-        final os = log['os_version'] ?? 'Unknown';
-
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: ListTile(
-            leading: const Icon(Icons.security, color: Colors.blue),
-            title: Text('Logged in at ${TimeUtils.formatTo12Hour(time)}'),
-            subtitle: Text('Device: $device\nOS: $os'),
-            isThreeLine: true,
+    return ListView(
+      children: [
+        const Padding(
+          padding: EdgeInsets.all(16.0),
+          child: Text(
+            'Owner/Admin Login History',
+            style: TextStyle(fontWeight: FontWeight.bold),
           ),
-        );
-      },
+        ),
+        if (_logs.isEmpty)
+          const Center(child: Text('No owner/admin logins found.'))
+        else
+          ..._logs.map((log) {
+            final timeStr = log['login_time'] as String?;
+            final time =
+                DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
+            final device = log['device_name'] ?? 'Unknown';
+            final os = log['os_version'] ?? 'Unknown';
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: ListTile(
+                leading: const Icon(Icons.security, color: Colors.blue),
+                title: Text('Logged in at ${TimeUtils.formatTo12Hour(time)}'),
+                subtitle: Text('Device: $device\nOS: $os'),
+                isThreeLine: true,
+              ),
+            );
+          }),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+          child: Text(
+            'Employee Login History',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+        if (_employeeLogs.isEmpty)
+          const Center(child: Text('No worker/supervisor logins found.'))
+        else
+          ..._employeeLogs.map((log) {
+            final timeStr = (log['login_time'] ?? '').toString();
+            final time =
+                DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
+            final role = (log['role'] ?? '').toString();
+            final workerId = (log['worker_id'] ?? '').toString();
+            final device = (log['device_name'] ?? 'Unknown').toString();
+            final os = (log['os_version'] ?? 'Unknown').toString();
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: ListTile(
+                leading: Icon(
+                  role == 'supervisor' ? Icons.verified_user : Icons.badge,
+                  color: role == 'supervisor' ? Colors.green : Colors.orange,
+                ),
+                title: Text(
+                  '$role logged in at ${DateFormat('yyyy-MM-dd hh:mm a').format(time)}',
+                ),
+                subtitle: Text('User: $workerId\nDevice: $device\nOS: $os'),
+                isThreeLine: true,
+              ),
+            );
+          }),
+        const SizedBox(height: 16),
+      ],
     );
   }
 }

@@ -266,10 +266,7 @@ void main() async {
           Platform.isWindows)) {
     try {
       // Initialize Workmanager
-      await Workmanager().initialize(
-        callbackDispatcher,
-        isInDebugMode: kDebugMode, // Set to false in production
-      );
+      await Workmanager().initialize(callbackDispatcher);
 
       final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
       const androidInit = AndroidInitializationSettings('launcher_icon');

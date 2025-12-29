@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:geolocator/geolocator.dart';
 import '../models/employee.dart';
 import 'production_entry_screen.dart';
+import 'supervisor_dashboard_screen.dart';
 import 'admin_dashboard_screen.dart';
 import '../services/location_service.dart';
 import '../services/update_service.dart';
@@ -204,12 +205,81 @@ class _LoginScreenState extends State<LoginScreen> {
         final employee = Employee.fromJson(response);
 
         if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ProductionEntryScreen(employee: employee),
-          ),
-        );
+        // Restrict worker to mobile only (Android/iOS). Admin and Supervisor allowed everywhere.
+        if ((employee.role ?? 'worker') == 'worker') {
+          final isMobile =
+              !kIsWeb && (io.Platform.isAndroid || io.Platform.isIOS);
+          if (!isMobile) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Workers can only log production from mobile devices.',
+                ),
+                backgroundColor: Colors.red,
+              ),
+            );
+            setState(() => _isLoading = false);
+            return;
+          }
+        }
+        // Record login event (worker/supervisor)
+        try {
+          final deviceInfo = DeviceInfoPlugin();
+          String deviceName = 'Unknown Device';
+          String osVersion = 'Unknown OS';
+          if (kIsWeb) {
+            final webInfo = await deviceInfo.webBrowserInfo;
+            deviceName = '${webInfo.browserName.name} on ${webInfo.platform}';
+            osVersion = webInfo.userAgent ?? 'Unknown Web UserAgent';
+          } else if (io.Platform.isAndroid) {
+            final androidInfo = await deviceInfo.androidInfo;
+            deviceName = '${androidInfo.manufacturer} ${androidInfo.model}';
+            osVersion = 'Android ${androidInfo.version.release}';
+          } else if (io.Platform.isIOS) {
+            final iosInfo = await deviceInfo.iosInfo;
+            deviceName = '${iosInfo.name} ${iosInfo.systemName}';
+            osVersion = iosInfo.systemVersion;
+          } else if (io.Platform.isMacOS) {
+            final macInfo = await deviceInfo.macOsInfo;
+            deviceName = macInfo.model;
+            osVersion = 'macOS ${macInfo.osRelease}';
+          } else if (io.Platform.isWindows) {
+            final winInfo = await deviceInfo.windowsInfo;
+            deviceName = winInfo.computerName;
+            osVersion = 'Windows';
+          }
+          final payload = {
+            'worker_id': employee.id,
+            'role': employee.role ?? 'worker',
+            'organization_code': orgCode,
+            'device_name': deviceName,
+            'os_version': osVersion,
+            'login_time': DateTime.now().toUtc().toIso8601String(),
+          };
+          await Supabase.instance.client.from('login_logs').insert(payload);
+        } catch (e) {
+          debugPrint('Error recording login event: $e');
+        }
+        if ((employee.role ?? 'worker') == 'supervisor') {
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => SupervisorDashboardScreen(
+                organizationCode: orgCode,
+                supervisorName: employee.name,
+              ),
+            ),
+          );
+        } else {
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => ProductionEntryScreen(employee: employee),
+            ),
+          );
+        }
       } catch (e) {
         if (!mounted) return;
 

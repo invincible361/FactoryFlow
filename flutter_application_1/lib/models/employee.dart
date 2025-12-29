@@ -8,6 +8,7 @@ class Employee {
   final String? aadharCard;
   final int? age;
   final String? mobileNumber;
+  final String? role;
 
   Employee({
     required this.id,
@@ -19,6 +20,7 @@ class Employee {
     this.aadharCard,
     this.age,
     this.mobileNumber,
+    this.role,
   });
 
   factory Employee.fromJson(Map<String, dynamic> json) {
@@ -32,6 +34,7 @@ class Employee {
       aadharCard: json['aadhar_card'],
       age: json['age'],
       mobileNumber: json['mobile_number'],
+      role: json['role'],
     );
   }
 }
