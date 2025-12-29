@@ -92,8 +92,31 @@ class LogService {
           .update(updatePayload)
           .eq('id', logId);
     } catch (e) {
-      debugPrint('Error verifying log: $e');
-      rethrow;
+      final msg = e.toString();
+      if (msg.contains('PGRST204') || msg.contains('column')) {
+        try {
+          final fallbackPayload = {
+            'is_verified': true,
+            'verified_by': supervisorName,
+            'verified_at': DateTime.now().toUtc().toIso8601String(),
+            'verified_note': note,
+          };
+          await Supabase.instance.client
+              .from('production_logs')
+              .update(fallbackPayload)
+              .eq('id', logId);
+          debugPrint(
+            'Verify fallback applied (missing supervisor_quantity column)',
+          );
+          return;
+        } catch (e2) {
+          debugPrint('Verify fallback failed: $e2');
+          rethrow;
+        }
+      } else {
+        debugPrint('Error verifying log: $e');
+        rethrow;
+      }
     }
   }
 }

@@ -1308,7 +1308,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         machineId: _selectedMachine!.id,
         itemId: _selectedItem!.id,
         operation: _selectedOperation!,
-        quantity: int.parse(_quantityController.text),
+        quantity:
+            int.tryParse(_quantityController.text) ??
+            (throw FormatException('Invalid quantity input')),
         timestamp: DateTime.now(),
         startTime: _startTime,
         endTime: endTime,

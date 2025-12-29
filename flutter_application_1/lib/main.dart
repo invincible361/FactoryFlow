@@ -296,6 +296,18 @@ void main() async {
             >()
             ?.requestPermissions(alert: true, badge: true, sound: true);
       }
+
+      if (bool.fromEnvironment('dart.vm.product')) {
+        final prefs = await SharedPreferences.getInstance();
+        final hasRunTest = prefs.getBool('notification_selftest_done') ?? false;
+        if (!hasRunTest) {
+          await _showNotification(
+            "FactoryFlow Notification Test",
+            "If you see this, notifications are working in release.",
+          );
+          await prefs.setBool('notification_selftest_done', true);
+        }
+      }
     } catch (e) {
       debugPrint('Error initializing notifications: $e');
     }
