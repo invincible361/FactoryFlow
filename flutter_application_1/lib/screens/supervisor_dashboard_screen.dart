@@ -23,11 +23,48 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   bool _loading = true;
   String? _selectedWorkerId;
   DateTimeRange? _dateRange;
+  String? _photoUrl;
 
   @override
   void initState() {
     super.initState();
+    _fetchSupervisorPhoto();
     _fetchLogs();
+  }
+
+  String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
+    for (var key in keys) {
+      final val = data[key]?.toString();
+      if (val != null && val.trim().isNotEmpty) {
+        return val;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _fetchSupervisorPhoto() async {
+    try {
+      final resp = await _supabase
+          .from('workers')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .eq('name', widget.supervisorName)
+          .maybeSingle();
+      if (resp != null) {
+        setState(() {
+          _photoUrl = _getFirstNotEmpty(resp, [
+            'photo_url',
+            'avatar_url',
+            'image_url',
+            'imageurl',
+            'photourl',
+            'picture_url',
+          ]);
+        });
+      }
+    } catch (_) {
+      // ignore, fallback to icon
+    }
   }
 
   Future<void> _fetchLogs() async {
@@ -189,6 +226,19 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
       appBar: AppBar(
         title: const Text('Supervisor Dashboard'),
         actions: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: CircleAvatar(
+              radius: 14,
+              backgroundColor: Colors.grey[300],
+              backgroundImage: (_photoUrl != null && _photoUrl!.isNotEmpty)
+                  ? NetworkImage(_photoUrl!)
+                  : null,
+              child: (_photoUrl == null || _photoUrl!.isEmpty)
+                  ? const Icon(Icons.person, size: 16, color: Colors.black54)
+                  : null,
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _fetchLogs,

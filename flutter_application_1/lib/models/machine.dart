@@ -1,11 +1,9 @@
 import 'item.dart';
 
-enum MachineType { cnc, vmc }
-
 class Machine {
   final String id;
   final String name;
-  final MachineType type;
+  final String type;
   final List<Item> items;
 
   Machine({

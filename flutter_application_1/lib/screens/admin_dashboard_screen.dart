@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:excel/excel.dart' hide Border;
+import 'package:excel/excel.dart' hide Border, TextSpan;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart' as share_plus;
 import 'package:intl/intl.dart';
@@ -13,6 +13,7 @@ import '../models/item.dart';
 import '../utils/time_utils.dart';
 import 'dart:io' as io;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:image_picker/image_picker.dart';
 
 // Removed local TimeUtils.formatTo12Hour as we now use TimeUtils.formatTo12Hour
 
@@ -34,7 +35,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 10, vsync: this);
+    _tabController = TabController(length: 11, vsync: this);
     _fetchOrganization();
   }
 
@@ -124,6 +125,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           tabs: const [
             Tab(text: 'Reports'),
             Tab(text: 'Employees'),
+            Tab(text: 'Supervisors'),
             Tab(text: 'Attendance'),
             Tab(text: 'Machines'),
             Tab(text: 'Items'),
@@ -140,6 +142,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         children: [
           ReportsTab(organizationCode: widget.organizationCode),
           EmployeesTab(organizationCode: widget.organizationCode),
+          SupervisorsTab(organizationCode: widget.organizationCode),
           AttendanceTab(organizationCode: widget.organizationCode),
           MachinesTab(organizationCode: widget.organizationCode),
           ItemsTab(organizationCode: widget.organizationCode),
@@ -155,6 +158,32 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
       ),
     );
   }
+}
+
+Widget _buildFormTextField({
+  required TextEditingController controller,
+  required String label,
+  String? hint,
+  TextInputType? keyboardType,
+  bool enabled = true,
+}) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8.0),
+    child: TextField(
+      controller: controller,
+      enabled: enabled,
+      keyboardType: keyboardType,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        border: const OutlineInputBorder(),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 16,
+        ),
+      ),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -317,8 +346,7 @@ class _ProfileTabState extends State<ProfileTab> {
             );
           } catch (ce) {
             debugPrint('Error creating bucket $bucket: $ce');
-            // Provide a clearer error message for the user
-            throw 'Bucket "$bucket" not found and could not be created automatically. Please create it in the Supabase dashboard.';
+            throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
           }
 
           // Retry the upload
@@ -340,6 +368,20 @@ class _ProfileTabState extends State<ProfileTab> {
       return _supabase.storage.from(bucket).getPublicUrl(fileName);
     } catch (e) {
       debugPrint('Upload error for bucket $bucket: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
       return null;
     }
   }
@@ -851,9 +893,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
           .select('worker_id, name')
           .eq('organization_code', widget.organizationCode)
           .order('name', ascending: true);
-      setState(() {
-        _employees = List<Map<String, dynamic>>.from(resp);
-      });
+      if (mounted) {
+        setState(() {
+          _employees = List<Map<String, dynamic>>.from(resp);
+        });
+      }
     } catch (e) {
       debugPrint('Fetch employees error: $e');
     }
@@ -914,9 +958,11 @@ class _AttendanceTabState extends State<AttendanceTab> {
       lastDate: DateTime.now(),
     );
     if (picked != null && picked != _selectedDateRange) {
-      setState(() {
-        _selectedDateRange = picked;
-      });
+      if (mounted) {
+        setState(() {
+          _selectedDateRange = picked;
+        });
+      }
       _fetchAttendance();
     }
   }
@@ -924,14 +970,93 @@ class _AttendanceTabState extends State<AttendanceTab> {
   Future<void> _exportToExcel() async {
     setState(() => _isExporting = true);
     try {
-      // TODO: Implement attendance export
-      await Future.delayed(const Duration(seconds: 1));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Attendance export not implemented yet'),
-          ),
+      final excel = Excel.createExcel();
+      // Rename default Sheet1 to avoid empty first sheet
+      excel.rename('Sheet1', 'Efficiency Report');
+      final sheet = excel['Efficiency Report'];
+
+      // Add Headers
+      sheet.appendRow([
+        TextCellValue('Date'),
+        TextCellValue('Shift'),
+        TextCellValue('Operator ID'),
+        TextCellValue('Operator Name'),
+        TextCellValue('In Time'),
+        TextCellValue('Out Time'),
+        TextCellValue('Item'),
+        TextCellValue('Operation'),
+        TextCellValue('Production Qty'),
+        TextCellValue('Performance Diff'),
+        TextCellValue('Remarks'),
+      ]);
+
+      for (var record in _attendance) {
+        final worker = record['workers'] as Map<String, dynamic>?;
+        final workerName = worker?['name'] ?? 'Unknown';
+        final workerId = record['worker_id'];
+        final dateStr = record['date'];
+        final shiftName = record['shift_name'];
+
+        final logs = await _fetchProductionForAttendance(
+          workerId,
+          dateStr,
+          shiftName,
         );
+
+        if (logs.isEmpty) {
+          // Add row even if no production logs for basic attendance info
+          sheet.appendRow([
+            TextCellValue(dateStr),
+            TextCellValue(shiftName ?? 'N/A'),
+            TextCellValue(workerId),
+            TextCellValue(workerName),
+            TextCellValue(TimeUtils.formatTo12Hour(record['check_in'])),
+            TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
+            TextCellValue('N/A'),
+            TextCellValue('N/A'),
+            IntCellValue(0),
+            IntCellValue(0),
+            TextCellValue(record['remarks'] ?? ''),
+          ]);
+        } else {
+          for (var log in logs) {
+            sheet.appendRow([
+              TextCellValue(dateStr),
+              TextCellValue(shiftName ?? 'N/A'),
+              TextCellValue(workerId),
+              TextCellValue(workerName),
+              TextCellValue(TimeUtils.formatTo12Hour(record['check_in'])),
+              TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
+              TextCellValue(log['item_name'] ?? 'N/A'),
+              TextCellValue(log['operation'] ?? 'N/A'),
+              IntCellValue(log['quantity'] ?? 0),
+              IntCellValue(log['performance_diff'] ?? 0),
+              TextCellValue(log['remarks'] ?? ''),
+            ]);
+          }
+        }
+      }
+
+      final fileBytes = excel.encode();
+      if (fileBytes != null) {
+        final directory = await getTemporaryDirectory();
+        final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+        final fileName = 'Operator_Efficiency_$timestamp.xlsx';
+        final file = io.File('${directory.path}/$fileName');
+        await file.writeAsBytes(fileBytes);
+
+        if (mounted) {
+          await share_plus.Share.shareXFiles([
+            share_plus.XFile(file.path),
+          ], text: 'Operator Efficiency Report');
+        }
+      }
+    } catch (e) {
+      debugPrint('Export error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
       }
     } finally {
       if (mounted) {
@@ -964,7 +1089,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
           ],
         ),
         content: SizedBox(
-          width: double.maxFinite,
+          width: MediaQuery.of(context).size.width * 0.9,
+          height: MediaQuery.of(context).size.height * 0.6,
           child: FutureBuilder<List<Map<String, dynamic>>>(
             future: _fetchProductionForAttendance(workerId, dateStr, shiftName),
             builder: (context, snapshot) {
@@ -1456,7 +1582,7 @@ class _ReportsTabState extends State<ReportsTab> {
           );
         }
 
-        setState(() => _isLoading = false);
+        if (mounted) setState(() => _isLoading = false);
       }
     }
   }
@@ -1468,9 +1594,11 @@ class _ReportsTabState extends State<ReportsTab> {
           .select('worker_id, name')
           .eq('organization_code', widget.organizationCode)
           .order('name', ascending: true);
-      setState(() {
-        _employees = List<Map<String, dynamic>>.from(resp);
-      });
+      if (mounted) {
+        setState(() {
+          _employees = List<Map<String, dynamic>>.from(resp);
+        });
+      }
     } catch (e) {
       debugPrint('Fetch employees for dropdown error: $e');
     }
@@ -1719,6 +1847,36 @@ class _ReportsTabState extends State<ReportsTab> {
     return result;
   }
 
+  List<Map<String, dynamic>> _computeTopByKey(
+    List<Map<String, dynamic>> logs,
+    String key,
+  ) {
+    final Map<String, Map<String, int>> agg = {};
+    for (final l in logs) {
+      final id = (l[key] ?? '').toString();
+      if (id.isEmpty) continue;
+      final qty = (l['quantity'] ?? 0) as int;
+      agg.putIfAbsent(id, () => {'count': 0, 'qty': 0});
+      agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
+      agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
+    }
+    final list = agg.entries
+        .map(
+          (e) => {
+            key: e.key,
+            'count': e.value['count'] ?? 0,
+            'qty': e.value['qty'] ?? 0,
+          },
+        )
+        .toList();
+    list.sort((a, b) {
+      final c = (b['count'] as int).compareTo(a['count'] as int);
+      if (c != 0) return c;
+      return (b['qty'] as int).compareTo(a['qty'] as int);
+    });
+    return list;
+  }
+
   // Aggregate logs: Employee -> Item -> Operation -> {qty, diff, employeeName}
 
   Future<void> _showExportOptions() async {
@@ -1737,129 +1895,151 @@ class _ReportsTabState extends State<ReportsTab> {
           title: const Text('Export Options'),
           content: StatefulBuilder(
             builder: (context, setState) {
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Group By'),
-                  const SizedBox(height: 6),
-                  DropdownButton<String>(
-                    value: groupBy,
-                    isExpanded: true,
-                    items: const [
-                      DropdownMenuItem(value: 'Worker', child: Text('Worker')),
-                      DropdownMenuItem(
-                        value: 'Machine',
-                        child: Text('Machine'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Operation',
-                        child: Text('Operation'),
-                      ),
-                      DropdownMenuItem(value: 'Item', child: Text('Item')),
-                    ],
-                    onChanged: (v) => setState(() => groupBy = v ?? 'Worker'),
+              return SizedBox(
+                width: MediaQuery.of(context).size.width * 0.9,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.8,
                   ),
-                  const SizedBox(height: 12),
-                  const Text('Period'),
-                  const SizedBox(height: 6),
-                  DropdownButton<String>(
-                    value: period,
-                    isExpanded: true,
-                    items: ['All', 'Today', 'Week', 'Month', 'Custom']
-                        .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                        .toList(),
-                    onChanged: (v) async {
-                      if (v == null) return;
-                      setState(() => period = v);
-                      if (v == 'Custom') {
-                        final picked = await showDateRangePicker(
-                          context: context,
-                          firstDate: DateTime(2023),
-                          lastDate: DateTime.now(),
-                          initialDateRange:
-                              customRange ??
-                              DateTimeRange(
-                                start: DateTime.now().subtract(
-                                  const Duration(days: 7),
-                                ),
-                                end: DateTime.now(),
-                              ),
-                        );
-                        if (picked != null) {
-                          setState(() => customRange = picked);
-                        }
-                      }
-                    },
-                  ),
-                  if (period == 'Custom' && customRange != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8.0),
-                      child: Text(
-                        '${customRange!.start.toIso8601String().substring(0, 10)} — ${customRange!.end.toIso8601String().substring(0, 10)}',
-                        style: const TextStyle(fontWeight: FontWeight.w500),
-                      ),
-                    ),
-                  const SizedBox(height: 12),
-                  const Text('Filter (optional)'),
-                  const SizedBox(height: 6),
-                  ExpansionTile(
-                    title: const Text('Workers'),
-                    initiallyExpanded: false,
-                    children: [
-                      SizedBox(
-                        height: 180,
-                        child: ListView(
-                          children: _employees.map((e) {
-                            final id = (e['worker_id'] ?? '').toString();
-                            final name = (e['name'] ?? '').toString();
-                            final checked = selectedWorkers.contains(id);
-                            return CheckboxListTile(
-                              value: checked,
-                              onChanged: (v) {
-                                setState(() {
-                                  if (v == true) {
-                                    selectedWorkers.add(id);
-                                  } else {
-                                    selectedWorkers.remove(id);
-                                  }
-                                });
-                              },
-                              title: Text('$name ($id)'),
-                            );
-                          }).toList(),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Group By'),
+                        const SizedBox(height: 6),
+                        DropdownButton<String>(
+                          value: groupBy,
+                          isExpanded: true,
+                          items: const [
+                            DropdownMenuItem(
+                              value: 'Worker',
+                              child: Text('Worker'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Machine',
+                              child: Text('Machine'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Operation',
+                              child: Text('Operation'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Item',
+                              child: Text('Item'),
+                            ),
+                          ],
+                          onChanged: (v) =>
+                              setState(() => groupBy = v ?? 'Worker'),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    decoration: const InputDecoration(
-                      labelText: 'Machine IDs (comma-separated)',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                        const SizedBox(height: 12),
+                        const Text('Period'),
+                        const SizedBox(height: 6),
+                        DropdownButton<String>(
+                          value: period,
+                          isExpanded: true,
+                          items: ['All', 'Today', 'Week', 'Month', 'Custom']
+                              .map(
+                                (e) =>
+                                    DropdownMenuItem(value: e, child: Text(e)),
+                              )
+                              .toList(),
+                          onChanged: (v) async {
+                            if (v == null) return;
+                            if (ctx.mounted) setState(() => period = v);
+                            if (v == 'Custom') {
+                              final picked = await showDateRangePicker(
+                                context: context,
+                                firstDate: DateTime(2023),
+                                lastDate: DateTime.now(),
+                                initialDateRange:
+                                    customRange ??
+                                    DateTimeRange(
+                                      start: DateTime.now().subtract(
+                                        const Duration(days: 7),
+                                      ),
+                                      end: DateTime.now(),
+                                    ),
+                              );
+                              if (picked != null && ctx.mounted) {
+                                setState(() => customRange = picked);
+                              }
+                            }
+                          },
+                        ),
+                        if (period == 'Custom' && customRange != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8.0),
+                            child: Text(
+                              '${customRange!.start.toIso8601String().substring(0, 10)} — ${customRange!.end.toIso8601String().substring(0, 10)}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                        const Text('Filter (optional)'),
+                        const SizedBox(height: 6),
+                        ExpansionTile(
+                          title: const Text('Workers'),
+                          initiallyExpanded: false,
+                          children: [
+                            SizedBox(
+                              height: 180,
+                              child: ListView(
+                                children: _employees.map((e) {
+                                  final id = (e['worker_id'] ?? '').toString();
+                                  final name = (e['name'] ?? '').toString();
+                                  final checked = selectedWorkers.contains(id);
+                                  return CheckboxListTile(
+                                    value: checked,
+                                    onChanged: (v) {
+                                      setState(() {
+                                        if (v == true) {
+                                          selectedWorkers.add(id);
+                                        } else {
+                                          selectedWorkers.remove(id);
+                                        }
+                                      });
+                                    },
+                                    title: Text('$name ($id)'),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(
+                            labelText: 'Machine IDs (comma-separated)',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (v) => machinesCsv = v,
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(
+                            labelText: 'Item IDs (comma-separated)',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (v) => itemsCsv = v,
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          decoration: const InputDecoration(
+                            labelText: 'Operations (comma-separated)',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (v) => opsCsv = v,
+                        ),
+                      ],
                     ),
-                    onChanged: (v) => machinesCsv = v,
                   ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    decoration: const InputDecoration(
-                      labelText: 'Item IDs (comma-separated)',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onChanged: (v) => itemsCsv = v,
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    decoration: const InputDecoration(
-                      labelText: 'Operations (comma-separated)',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    onChanged: (v) => opsCsv = v,
-                  ),
-                ],
+                ),
               );
             },
           ),
@@ -1959,6 +2139,8 @@ class _ReportsTabState extends State<ReportsTab> {
       }
 
       var excel = Excel.createExcel();
+      // Rename default Sheet1 to avoid empty first sheet
+      excel.rename('Sheet1', 'Summary ($groupBy)');
       Sheet summarySheet = excel['Summary ($groupBy)'];
       summarySheet.appendRow([
         TextCellValue(groupBy),
@@ -1991,7 +2173,6 @@ class _ReportsTabState extends State<ReportsTab> {
         TextCellValue('End Time'),
         TextCellValue('Working Hours'),
         TextCellValue('Worker Qty'),
-        TextCellValue('Supervisor Qty'),
         TextCellValue('Supervisor Qty'),
         TextCellValue('Surplus/Deficit'),
         TextCellValue('Status'),
@@ -2070,36 +2251,21 @@ class _ReportsTabState extends State<ReportsTab> {
         ]);
       }
 
-      final bytes = excel.save();
+      final bytes = excel.encode();
       if (bytes == null) throw Exception('Failed to generate Excel bytes');
-      if (kIsWeb) {
-        final uint8 = Uint8List.fromList(bytes);
-        final params = share_plus.ShareParams(
-          files: [
-            share_plus.XFile.fromData(
-              uint8,
-              mimeType:
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            ),
-          ],
-          fileNameOverrides: [
-            'production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx',
-          ],
-          text: 'Production Export ($groupBy)',
-        );
-        await share_plus.SharePlus.instance.share(params);
-      } else {
-        final directory = await getTemporaryDirectory();
-        final path =
-            '${directory.path}/production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
-        final file = io.File(path);
-        await file.writeAsBytes(bytes);
-        final params = share_plus.ShareParams(
-          files: [share_plus.XFile(path)],
-          text: 'Production Export ($groupBy)',
-        );
-        await share_plus.SharePlus.instance.share(params);
+
+      final directory = await getTemporaryDirectory();
+      final path =
+          '${directory.path}/production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+      final file = io.File(path);
+      await file.writeAsBytes(bytes);
+
+      if (mounted) {
+        await share_plus.Share.shareXFiles([
+          share_plus.XFile(path),
+        ], text: 'Production Export ($groupBy)');
       }
+
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -2316,6 +2482,66 @@ class _ReportsTabState extends State<ReportsTab> {
                       summary,
                       Colors.orange.shade100,
                       Icons.build_circle,
+                    );
+                  },
+                ),
+                Builder(
+                  builder: (context) {
+                    final topMachines = _computeTopByKey(_logs, 'machine_id');
+                    final summary = topMachines.isEmpty
+                        ? 'No data'
+                        : topMachines
+                              .take(4)
+                              .map(
+                                (e) =>
+                                    '${e['machine_id']} (${e['count']} logs, ${e['qty']} qty)',
+                              )
+                              .join(' | ');
+                    return _metricTile(
+                      'Most Used Machines',
+                      summary,
+                      Colors.pink.shade100,
+                      Icons.precision_manufacturing,
+                    );
+                  },
+                ),
+                Builder(
+                  builder: (context) {
+                    final topItems = _computeTopByKey(_logs, 'item_id');
+                    final summary = topItems.isEmpty
+                        ? 'No data'
+                        : topItems
+                              .take(4)
+                              .map(
+                                (e) =>
+                                    '${e['item_id']} (${e['count']} logs, ${e['qty']} qty)',
+                              )
+                              .join(' | ');
+                    return _metricTile(
+                      'Most Used Items',
+                      summary,
+                      Colors.teal.shade100,
+                      Icons.widgets,
+                    );
+                  },
+                ),
+                Builder(
+                  builder: (context) {
+                    final topOps = _computeTopByKey(_logs, 'operation');
+                    final summary = topOps.isEmpty
+                        ? 'No data'
+                        : topOps
+                              .take(4)
+                              .map(
+                                (e) =>
+                                    '${e['operation']} (${e['count']} logs, ${e['qty']} qty)',
+                              )
+                              .join(' | ');
+                    return _metricTile(
+                      'Most Performed Operations',
+                      summary,
+                      Colors.indigo.shade100,
+                      Icons.build,
                     );
                   },
                 ),
@@ -2907,6 +3133,8 @@ class _EmployeesTabState extends State<EmployeesTab> {
   final _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _employeesList = [];
   bool _isLoading = true;
+  XFile? _newEmployeePhotoFile;
+  Uint8List? _newEmployeePhotoBytes;
 
   final _employeeIdController = TextEditingController();
   final _nameController = TextEditingController();
@@ -2930,6 +3158,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
       final response = await _supabase
           .from('workers')
           .select()
+          .eq('role', 'worker')
           .eq('organization_code', widget.organizationCode)
           .order('name', ascending: true);
       if (mounted) {
@@ -2947,8 +3176,186 @@ class _EmployeesTabState extends State<EmployeesTab> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(msg)));
-        setState(() => _isLoading = false);
+        if (mounted) setState(() => _isLoading = false);
       }
+    }
+  }
+
+  String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
+    for (var key in keys) {
+      final val = data[key]?.toString();
+      if (val != null && val.trim().isNotEmpty) {
+        return val;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _setPhotoUrl(String workerId, String? url) async {
+    if (url == null || url.isEmpty) return;
+    final trimmedWorkerId = workerId.trim();
+    debugPrint('Updating photo_url for [$trimmedWorkerId] to $url');
+
+    final columnsToTry = [
+      'photo_url',
+      'avatar_url',
+      'image_url',
+      'imageurl',
+      'photourl',
+      'picture_url',
+    ];
+    bool updated = false;
+    String? lastError;
+
+    for (final col in columnsToTry) {
+      try {
+        final res = await _supabase
+            .from('workers')
+            .update({col: url})
+            .eq('worker_id', trimmedWorkerId)
+            .eq('organization_code', widget.organizationCode.trim())
+            .select();
+
+        if (res != null && (res as List).isNotEmpty) {
+          debugPrint('Successfully updated $col for $trimmedWorkerId');
+          updated = true;
+          break;
+        } else {
+          debugPrint(
+            'No rows matched for $col update (worker_id: $trimmedWorkerId)',
+          );
+        }
+      } catch (e) {
+        lastError = e.toString();
+        debugPrint('Failed to update $col: $lastError');
+      }
+    }
+
+    if (!updated && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Photo upload succeeded but database update failed. '
+            'Tried columns: ${columnsToTry.join(", ")}. '
+            'Last error: ${lastError ?? "No matching row found"}',
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _pickNewEmployeePhoto() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choose from Gallery'),
+              onTap: () async {
+                Navigator.pop(sheetCtx);
+                final picker = ImagePicker();
+                final picked = await picker.pickImage(
+                  source: ImageSource.gallery,
+                );
+                if (picked != null) {
+                  final bytes = await picked.readAsBytes();
+                  if (mounted) {
+                    setState(() {
+                      _newEmployeePhotoFile = picked;
+                      _newEmployeePhotoBytes = bytes;
+                    });
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera),
+              title: const Text('Take a Photo'),
+              onTap: () async {
+                Navigator.pop(sheetCtx);
+                final picker = ImagePicker();
+                final picked = await picker.pickImage(
+                  source: ImageSource.camera,
+                );
+                if (picked != null) {
+                  final bytes = await picked.readAsBytes();
+                  if (mounted) {
+                    setState(() {
+                      _newEmployeePhotoFile = picked;
+                      _newEmployeePhotoBytes = bytes;
+                    });
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<String?> _uploadToBucketWithAutoCreate(
+    String bucket,
+    String fileName,
+    Uint8List bytes,
+    String contentType,
+  ) async {
+    try {
+      try {
+        await _supabase.storage
+            .from(bucket)
+            .uploadBinary(
+              fileName,
+              bytes,
+              fileOptions: FileOptions(contentType: contentType, upsert: true),
+            );
+      } on StorageException catch (se) {
+        if (se.message.contains('Bucket not found') || se.statusCode == '404') {
+          try {
+            await _supabase.storage.createBucket(
+              bucket,
+              const BucketOptions(public: true),
+            );
+          } catch (ce) {
+            debugPrint('Error creating bucket $bucket: $ce');
+            throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
+          }
+          await _supabase.storage
+              .from(bucket)
+              .uploadBinary(
+                fileName,
+                bytes,
+                fileOptions: FileOptions(
+                  contentType: contentType,
+                  upsert: true,
+                ),
+              );
+        } else {
+          rethrow;
+        }
+      }
+      return _supabase.storage.from(bucket).getPublicUrl(fileName);
+    } catch (e) {
+      debugPrint('Upload error for bucket $bucket: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+      return null;
     }
   }
 
@@ -3005,23 +3412,56 @@ class _EmployeesTabState extends State<EmployeesTab> {
     }
 
     try {
+      final trimmedId = _employeeIdController.text.trim();
+      final trimmedName = _nameController.text.trim();
+      final trimmedUsername = _usernameController.text.trim();
+      final trimmedOrgCode = widget.organizationCode.trim();
+
+      if (trimmedId.isEmpty || trimmedName.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ID and Name are required')),
+          );
+        }
+        return;
+      }
+
+      String? photoUrl;
+      if (_newEmployeePhotoBytes != null) {
+        final fileName =
+            'emp_${trimmedId}_${DateTime.now().millisecondsSinceEpoch}.png';
+        photoUrl = await _uploadToBucketWithAutoCreate(
+          'profile_photos',
+          fileName,
+          _newEmployeePhotoBytes!,
+          'image/png',
+        );
+      }
       await _supabase.from('workers').insert({
-        'worker_id': _employeeIdController.text,
-        'name': _nameController.text,
+        'worker_id': trimmedId,
+        'name': trimmedName,
         'pan_card': panValue.isEmpty ? null : panValue,
-        'aadhar_card': _aadharController.text,
+        'aadhar_card': _aadharController.text.trim(),
         'age': int.tryParse(_ageController.text),
-        'mobile_number': _mobileController.text,
-        'username': _usernameController.text,
+        'mobile_number': _mobileController.text.trim(),
+        'username': trimmedUsername,
         'password': _passwordController.text, // Note: Should hash in real app
-        'organization_code': widget.organizationCode,
-        'role': _role,
+        'organization_code': trimmedOrgCode,
+        'role': 'worker',
       });
+
+      if (photoUrl != null && photoUrl.isNotEmpty) {
+        await _setPhotoUrl(trimmedId, photoUrl);
+      }
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('Employee added!')));
         _clearControllers();
+        setState(() {
+          _newEmployeePhotoFile = null;
+          _newEmployeePhotoBytes = null;
+        });
         _fetchEmployees();
       }
     } catch (e) {
@@ -3051,118 +3491,211 @@ class _EmployeesTabState extends State<EmployeesTab> {
     final passwordEditController = TextEditingController(
       text: employee['password'],
     );
-    String roleEdit = (employee['role'] ?? 'worker').toString();
+    String roleEdit = 'worker';
+    String? photoUrlEdit =
+        (employee['photo_url'] ??
+                employee['avatar_url'] ??
+                employee['image_url'] ??
+                employee['imageurl'] ??
+                employee['photourl'] ??
+                employee['picture_url'])
+            ?.toString();
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Edit Employee: ${employee['worker_id']}'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameEditController,
-                decoration: const InputDecoration(labelText: 'Name'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocalState) => AlertDialog(
+          title: Text('Edit Employee: ${employee['worker_id']}'),
+          content: SizedBox(
+            width: MediaQuery.of(context).size.width * 0.9,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.8,
               ),
-              TextField(
-                controller: panEditController,
-                decoration: const InputDecoration(labelText: 'PAN Card'),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildFormTextField(
+                      controller: nameEditController,
+                      label: 'Name',
+                    ),
+                    _buildFormTextField(
+                      controller: panEditController,
+                      label: 'PAN Card',
+                    ),
+                    _buildFormTextField(
+                      controller: aadharEditController,
+                      label: 'Aadhar Card',
+                    ),
+                    _buildFormTextField(
+                      controller: ageEditController,
+                      label: 'Age',
+                      keyboardType: TextInputType.number,
+                    ),
+                    _buildFormTextField(
+                      controller: mobileEditController,
+                      label: 'Mobile Number',
+                      keyboardType: TextInputType.phone,
+                    ),
+                    _buildFormTextField(
+                      controller: usernameEditController,
+                      label: 'Username',
+                    ),
+                    _buildFormTextField(
+                      controller: passwordEditController,
+                      label: 'Password',
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 20,
+                          backgroundColor: Colors.grey[300],
+                          backgroundImage:
+                              (photoUrlEdit != null &&
+                                  (photoUrlEdit?.isNotEmpty ?? false))
+                              ? NetworkImage(photoUrlEdit!)
+                              : null,
+                          child: ((photoUrlEdit ?? '').isEmpty)
+                              ? const Icon(Icons.person, size: 20)
+                              : null,
+                        ),
+                        const SizedBox(width: 12),
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            await showModalBottomSheet<void>(
+                              context: ctx,
+                              builder: (sheetCtx) => SafeArea(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    ListTile(
+                                      leading: const Icon(Icons.photo_library),
+                                      title: const Text('Choose from Gallery'),
+                                      onTap: () async {
+                                        Navigator.pop(sheetCtx);
+                                        final picker = ImagePicker();
+                                        final picked = await picker.pickImage(
+                                          source: ImageSource.gallery,
+                                        );
+                                        if (picked != null) {
+                                          final bytes = await picked
+                                              .readAsBytes();
+                                          final fileName =
+                                              'emp_${employee['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
+                                          final url =
+                                              await _uploadToBucketWithAutoCreate(
+                                                'profile_photos',
+                                                fileName,
+                                                bytes,
+                                                'image/png',
+                                              );
+                                          if (url != null && ctx.mounted) {
+                                            setLocalState(() {
+                                              photoUrlEdit = url;
+                                            });
+                                          }
+                                        }
+                                      },
+                                    ),
+                                    ListTile(
+                                      leading: const Icon(Icons.photo_camera),
+                                      title: const Text('Take a Photo'),
+                                      onTap: () async {
+                                        Navigator.pop(sheetCtx);
+                                        final picker = ImagePicker();
+                                        final picked = await picker.pickImage(
+                                          source: ImageSource.camera,
+                                        );
+                                        if (picked != null) {
+                                          final bytes = await picked
+                                              .readAsBytes();
+                                          final fileName =
+                                              'emp_${employee['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
+                                          final url =
+                                              await _uploadToBucketWithAutoCreate(
+                                                'profile_photos',
+                                                fileName,
+                                                bytes,
+                                                'image/png',
+                                              );
+                                          if (url != null && ctx.mounted) {
+                                            setLocalState(() {
+                                              photoUrlEdit = url;
+                                            });
+                                          }
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.image),
+                          label: const Text('Pick Photo'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(children: const [Text('Role: Worker')]),
+                  ],
+                ),
               ),
-              TextField(
-                controller: aadharEditController,
-                decoration: const InputDecoration(labelText: 'Aadhar Card'),
-              ),
-              TextField(
-                controller: ageEditController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Age'),
-              ),
-              TextField(
-                controller: mobileEditController,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: 'Mobile Number'),
-              ),
-              TextField(
-                controller: usernameEditController,
-                decoration: const InputDecoration(labelText: 'Username'),
-              ),
-              TextField(
-                controller: passwordEditController,
-                decoration: const InputDecoration(labelText: 'Password'),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  const Text('Role: '),
-                  const SizedBox(width: 8),
-                  DropdownButton<String>(
-                    value: roleEdit,
-                    items: const [
-                      DropdownMenuItem(value: 'worker', child: Text('Worker')),
-                      DropdownMenuItem(
-                        value: 'supervisor',
-                        child: Text('Supervisor'),
-                      ),
-                    ],
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() {
-                          roleEdit = val;
-                        });
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
+            ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final messenger = ScaffoldMessenger.of(context);
-              final nav = Navigator.of(ctx);
-              try {
-                await _supabase
-                    .from('workers')
-                    .update({
-                      'name': nameEditController.text,
-                      'pan_card': panEditController.text.isEmpty
-                          ? null
-                          : panEditController.text,
-                      'aadhar_card': aadharEditController.text,
-                      'age': int.tryParse(ageEditController.text),
-                      'mobile_number': mobileEditController.text,
-                      'username': usernameEditController.text,
-                      'password': passwordEditController.text,
-                      'role': roleEdit,
-                    })
-                    .eq('worker_id', employee['worker_id'])
-                    .eq('organization_code', widget.organizationCode);
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final nav = Navigator.of(ctx);
+                try {
+                  final updateData = {
+                    'name': nameEditController.text,
+                    'pan_card': panEditController.text.isEmpty
+                        ? null
+                        : panEditController.text,
+                    'aadhar_card': aadharEditController.text,
+                    'age': int.tryParse(ageEditController.text),
+                    'mobile_number': mobileEditController.text,
+                    'username': usernameEditController.text,
+                    'password': passwordEditController.text,
+                    'role': roleEdit,
+                  };
+                  await _supabase
+                      .from('workers')
+                      .update(updateData)
+                      .eq('worker_id', employee['worker_id'])
+                      .eq('organization_code', widget.organizationCode);
 
-                if (mounted) {
-                  nav.pop();
-                  messenger.showSnackBar(
-                    const SnackBar(content: Text('Employee updated!')),
-                  );
-                  _fetchEmployees();
+                  if ((photoUrlEdit ?? '').isNotEmpty) {
+                    await _setPhotoUrl(employee['worker_id'], photoUrlEdit);
+                  }
+
+                  if (mounted) {
+                    nav.pop();
+                    messenger.showSnackBar(
+                      const SnackBar(content: Text('Employee updated!')),
+                    );
+                    _fetchEmployees();
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(
+                      context,
+                    ).showSnackBar(SnackBar(content: Text('Error: $e')));
+                  }
                 }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text('Error: $e')));
-                }
-              }
-            },
-            child: const Text('Save'),
-          ),
-        ],
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3189,42 +3722,58 @@ class _EmployeesTabState extends State<EmployeesTab> {
             ExpansionTile(
               title: const Text('Add New Employee'),
               children: [
-                TextField(
+                _buildFormTextField(
                   controller: _employeeIdController,
-                  decoration: const InputDecoration(labelText: 'Employee ID'),
+                  label: 'Employee ID',
                 ),
-                TextField(
-                  controller: _nameController,
-                  decoration: const InputDecoration(labelText: 'Name'),
-                ),
-                TextField(
+                _buildFormTextField(controller: _nameController, label: 'Name'),
+                _buildFormTextField(
                   controller: _panController,
-                  decoration: const InputDecoration(
-                    labelText: 'PAN Card (Optional)',
-                    hintText: 'ABCDE1234F',
-                  ),
+                  label: 'PAN Card (Optional)',
+                  hint: 'ABCDE1234F',
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _aadharController,
-                  decoration: const InputDecoration(labelText: 'Aadhar Card'),
+                  label: 'Aadhar Card',
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _ageController,
+                  label: 'Age',
                   keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: 'Age'),
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _mobileController,
+                  label: 'Mobile Number',
                   keyboardType: TextInputType.phone,
-                  decoration: const InputDecoration(labelText: 'Mobile Number'),
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _usernameController,
-                  decoration: const InputDecoration(labelText: 'Username'),
+                  label: 'Username',
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _passwordController,
-                  decoration: const InputDecoration(labelText: 'Password'),
+                  label: 'Password',
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 20,
+                      backgroundColor: Colors.grey[300],
+                      backgroundImage: _newEmployeePhotoBytes != null
+                          ? MemoryImage(_newEmployeePhotoBytes!)
+                          : null,
+                      child: _newEmployeePhotoBytes == null
+                          ? const Icon(Icons.person, size: 20)
+                          : null,
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: _pickNewEmployeePhoto,
+                      icon: const Icon(Icons.image),
+                      label: const Text('Pick Photo'),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -3270,8 +3819,27 @@ class _EmployeesTabState extends State<EmployeesTab> {
                 itemCount: _employeesList.length,
                 itemBuilder: (context, index) {
                   final employee = _employeesList[index];
+                  final photoUrl = _getFirstNotEmpty(employee, [
+                    'photo_url',
+                    'avatar_url',
+                    'image_url',
+                    'imageurl',
+                    'photourl',
+                    'picture_url',
+                  ]);
                   return Card(
                     child: ListTile(
+                      leading: CircleAvatar(
+                        radius: 20,
+                        backgroundColor: Colors.grey[200],
+                        backgroundImage:
+                            (photoUrl != null && photoUrl.isNotEmpty)
+                            ? NetworkImage(photoUrl)
+                            : null,
+                        child: (photoUrl == null || photoUrl.isEmpty)
+                            ? const Icon(Icons.person, color: Colors.grey)
+                            : null,
+                      ),
                       title: Text(
                         '${employee['name']} (${employee['worker_id']})',
                       ),
@@ -3302,6 +3870,756 @@ class _EmployeesTabState extends State<EmployeesTab> {
 }
 
 // ---------------------------------------------------------------------------
+// 2a. SUPERVISORS TAB
+// ---------------------------------------------------------------------------
+class SupervisorsTab extends StatefulWidget {
+  final String organizationCode;
+  const SupervisorsTab({super.key, required this.organizationCode});
+
+  @override
+  State<SupervisorsTab> createState() => _SupervisorsTabState();
+}
+
+class _SupervisorsTabState extends State<SupervisorsTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _list = [];
+  bool _isLoading = true;
+  Map<String, dynamic>? _editingSupervisor;
+  XFile? _newSupervisorPhotoFile;
+  Uint8List? _newSupervisorPhotoBytes;
+
+  final _employeeIdController = TextEditingController();
+  final _nameController = TextEditingController();
+  final _panController = TextEditingController();
+  final _aadharController = TextEditingController();
+  final _ageController = TextEditingController();
+  final _mobileController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchSupervisors();
+  }
+
+  Future<void> _fetchSupervisors() async {
+    setState(() => _isLoading = true);
+    try {
+      final response = await _supabase
+          .from('workers')
+          .select()
+          .eq('role', 'supervisor')
+          .eq('organization_code', widget.organizationCode)
+          .order('name', ascending: true);
+      if (mounted) {
+        setState(() {
+          _list = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+        if (mounted) setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _pickNewSupervisorPhoto() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choose from Gallery'),
+              onTap: () async {
+                Navigator.pop(sheetCtx);
+                final picker = ImagePicker();
+                final picked = await picker.pickImage(
+                  source: ImageSource.gallery,
+                );
+                if (picked != null) {
+                  final bytes = await picked.readAsBytes();
+                  if (mounted) {
+                    setState(() {
+                      _newSupervisorPhotoFile = picked;
+                      _newSupervisorPhotoBytes = bytes;
+                    });
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera),
+              title: const Text('Take a Photo'),
+              onTap: () async {
+                Navigator.pop(sheetCtx);
+                final picker = ImagePicker();
+                final picked = await picker.pickImage(
+                  source: ImageSource.camera,
+                );
+                if (picked != null) {
+                  final bytes = await picked.readAsBytes();
+                  if (mounted) {
+                    setState(() {
+                      _newSupervisorPhotoFile = picked;
+                      _newSupervisorPhotoBytes = bytes;
+                    });
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<String?> _uploadToBucketWithAutoCreate(
+    String bucket,
+    String fileName,
+    Uint8List bytes,
+    String contentType,
+  ) async {
+    try {
+      try {
+        await _supabase.storage
+            .from(bucket)
+            .uploadBinary(
+              fileName,
+              bytes,
+              fileOptions: FileOptions(contentType: contentType, upsert: true),
+            );
+      } on StorageException catch (se) {
+        if (se.message.contains('Bucket not found') || se.statusCode == '404') {
+          try {
+            await _supabase.storage.createBucket(
+              bucket,
+              const BucketOptions(public: true),
+            );
+          } catch (ce) {
+            debugPrint('Error creating bucket $bucket: $ce');
+            throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
+          }
+          await _supabase.storage
+              .from(bucket)
+              .uploadBinary(
+                fileName,
+                bytes,
+                fileOptions: FileOptions(
+                  contentType: contentType,
+                  upsert: true,
+                ),
+              );
+        } else {
+          rethrow;
+        }
+      }
+      return _supabase.storage.from(bucket).getPublicUrl(fileName);
+    } catch (e) {
+      debugPrint('Upload error for bucket $bucket: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+      return null;
+    }
+  }
+
+  String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
+    for (var key in keys) {
+      final val = data[key]?.toString();
+      if (val != null && val.trim().isNotEmpty) {
+        return val;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _setPhotoUrl(String workerId, String? url) async {
+    if (url == null || url.isEmpty) return;
+    final trimmedWorkerId = workerId.trim();
+    debugPrint('Updating supervisor photo_url for [$trimmedWorkerId] to $url');
+
+    final columnsToTry = [
+      'photo_url',
+      'avatar_url',
+      'image_url',
+      'imageurl',
+      'photourl',
+      'picture_url',
+    ];
+    bool updated = false;
+    String? lastError;
+
+    for (final col in columnsToTry) {
+      try {
+        final res = await _supabase
+            .from('workers')
+            .update({col: url})
+            .eq('worker_id', trimmedWorkerId)
+            .eq('organization_code', widget.organizationCode.trim())
+            .select();
+
+        if (res != null && (res as List).isNotEmpty) {
+          debugPrint(
+            'Successfully updated supervisor $col for $trimmedWorkerId',
+          );
+          updated = true;
+          break;
+        } else {
+          debugPrint(
+            'No rows matched for supervisor $col update (worker_id: $trimmedWorkerId)',
+          );
+        }
+      } catch (e) {
+        lastError = e.toString();
+        debugPrint('Failed to update supervisor $col: $lastError');
+      }
+    }
+
+    if (!updated && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Supervisor photo upload succeeded but database update failed. '
+            'Tried columns: ${columnsToTry.join(", ")}. '
+            'Last error: ${lastError ?? "No matching row found"}',
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _deleteSupervisor(String id) async {
+    try {
+      await _supabase.from('workers').delete().eq('worker_id', id);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Supervisor deleted')));
+        _fetchSupervisors();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  Future<void> _addSupervisor() async {
+    final panRegex = RegExp(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$');
+    final aadharRegex = RegExp(r'^[0-9]{12}$');
+    final panValue = _panController.text.trim();
+    if (panValue.isNotEmpty && !panRegex.hasMatch(panValue)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid PAN Card Format')),
+        );
+      }
+      return;
+    }
+    if (!_aadharController.text.contains(aadharRegex)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid Aadhar Card Format (must be 12 digits)'),
+          ),
+        );
+      }
+      return;
+    }
+    try {
+      final trimmedId = _employeeIdController.text.trim();
+      final trimmedName = _nameController.text.trim();
+      final trimmedUsername = _usernameController.text.trim();
+      final trimmedOrgCode = widget.organizationCode.trim();
+
+      if (trimmedId.isEmpty || trimmedName.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ID and Name are required')),
+          );
+        }
+        return;
+      }
+
+      String? photoUrl;
+      if (_newSupervisorPhotoBytes != null) {
+        final fileName =
+            'sup_${trimmedId}_${DateTime.now().millisecondsSinceEpoch}.png';
+        photoUrl = await _uploadToBucketWithAutoCreate(
+          'profile_photos',
+          fileName,
+          _newSupervisorPhotoBytes!,
+          'image/png',
+        );
+      }
+      await _supabase.from('workers').insert({
+        'worker_id': trimmedId,
+        'name': trimmedName,
+        'pan_card': panValue.isEmpty ? null : panValue,
+        'aadhar_card': _aadharController.text.trim(),
+        'age': int.tryParse(_ageController.text),
+        'mobile_number': _mobileController.text.trim(),
+        'username': trimmedUsername,
+        'password': _passwordController.text,
+        'organization_code': trimmedOrgCode,
+        'role': 'supervisor',
+      });
+
+      if (photoUrl != null && photoUrl.isNotEmpty) {
+        await _setPhotoUrl(trimmedId, photoUrl);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Supervisor added!')));
+        _clearControllers();
+        setState(() {
+          _newSupervisorPhotoFile = null;
+          _newSupervisorPhotoBytes = null;
+        });
+        _fetchSupervisors();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    }
+  }
+
+  Future<void> _editSupervisor(Map<String, dynamic> sup) async {
+    setState(() {
+      _editingSupervisor = sup;
+      _employeeIdController.text = sup['worker_id']?.toString() ?? '';
+      _nameController.text = sup['name']?.toString() ?? '';
+      _panController.text = sup['pan_card']?.toString() ?? '';
+      _aadharController.text = sup['aadhar_card']?.toString() ?? '';
+      _ageController.text = (sup['age']?.toString() ?? '');
+      _mobileController.text = sup['mobile_number']?.toString() ?? '';
+      _usernameController.text = sup['username']?.toString() ?? '';
+      _passwordController.text = sup['password']?.toString() ?? '';
+    });
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        String? photoUrlEdit =
+            (sup['photo_url'] ??
+                    sup['avatar_url'] ??
+                    sup['image_url'] ??
+                    sup['imageurl'] ??
+                    sup['photourl'] ??
+                    sup['picture_url'])
+                ?.toString();
+        return StatefulBuilder(
+          builder: (ctx, setLocalState) => AlertDialog(
+            title: const Text('Edit Supervisor'),
+            content: SizedBox(
+              width: MediaQuery.of(context).size.width * 0.9,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.8,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 20,
+                            backgroundColor: Colors.grey[300],
+                            backgroundImage:
+                                (photoUrlEdit != null &&
+                                    (photoUrlEdit?.isNotEmpty ?? false))
+                                ? NetworkImage(photoUrlEdit!)
+                                : null,
+                            child: ((photoUrlEdit ?? '').isEmpty)
+                                ? const Icon(Icons.person, size: 20)
+                                : null,
+                          ),
+                          const SizedBox(width: 12),
+                          ElevatedButton.icon(
+                            onPressed: () async {
+                              await showModalBottomSheet<void>(
+                                context: ctx,
+                                builder: (sheetCtx) => SafeArea(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.photo_library,
+                                        ),
+                                        title: const Text(
+                                          'Choose from Gallery',
+                                        ),
+                                        onTap: () async {
+                                          Navigator.pop(sheetCtx);
+                                          final picker = ImagePicker();
+                                          final picked = await picker.pickImage(
+                                            source: ImageSource.gallery,
+                                          );
+                                          if (picked != null) {
+                                            final bytes = await picked
+                                                .readAsBytes();
+                                            final fileName =
+                                                'sup_${sup['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
+                                            final url =
+                                                await _uploadToBucketWithAutoCreate(
+                                                  'profile_photos',
+                                                  fileName,
+                                                  bytes,
+                                                  'image/png',
+                                                );
+                                            if (url != null && ctx.mounted) {
+                                              setLocalState(() {
+                                                photoUrlEdit = url;
+                                              });
+                                            }
+                                          }
+                                        },
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(Icons.photo_camera),
+                                        title: const Text('Take a Photo'),
+                                        onTap: () async {
+                                          Navigator.pop(sheetCtx);
+                                          final picker = ImagePicker();
+                                          final picked = await picker.pickImage(
+                                            source: ImageSource.camera,
+                                          );
+                                          if (picked != null) {
+                                            final bytes = await picked
+                                                .readAsBytes();
+                                            final fileName =
+                                                'sup_${sup['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
+                                            final url =
+                                                await _uploadToBucketWithAutoCreate(
+                                                  'profile_photos',
+                                                  fileName,
+                                                  bytes,
+                                                  'image/png',
+                                                );
+                                            if (url != null && ctx.mounted) {
+                                              setLocalState(() {
+                                                photoUrlEdit = url;
+                                              });
+                                            }
+                                          }
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.image),
+                            label: const Text('Pick Photo'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      _buildFormTextField(
+                        controller: _employeeIdController,
+                        label: 'Supervisor ID',
+                        enabled: false,
+                      ),
+                      _buildFormTextField(
+                        controller: _nameController,
+                        label: 'Name',
+                      ),
+                      _buildFormTextField(
+                        controller: _panController,
+                        label: 'PAN Card (Optional)',
+                      ),
+                      _buildFormTextField(
+                        controller: _aadharController,
+                        label: 'Aadhar Card',
+                      ),
+                      _buildFormTextField(
+                        controller: _ageController,
+                        label: 'Age',
+                        keyboardType: TextInputType.number,
+                      ),
+                      _buildFormTextField(
+                        controller: _mobileController,
+                        label: 'Mobile Number',
+                        keyboardType: TextInputType.phone,
+                      ),
+                      _buildFormTextField(
+                        controller: _usernameController,
+                        label: 'Username',
+                      ),
+                      _buildFormTextField(
+                        controller: _passwordController,
+                        label: 'Password',
+                      ),
+                      const SizedBox(height: 10),
+                      Row(children: const [Text('Role: Supervisor')]),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  // Basic validations (reuse from add)
+                  final panRegex = RegExp(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$');
+                  final aadharRegex = RegExp(r'^[0-9]{12}$');
+                  final panValue = _panController.text.trim();
+                  final messenger = ScaffoldMessenger.of(context);
+                  if (panValue.isNotEmpty && !panRegex.hasMatch(panValue)) {
+                    messenger.showSnackBar(
+                      const SnackBar(content: Text('Invalid PAN Card Format')),
+                    );
+                    return;
+                  }
+                  if (!_aadharController.text.contains(aadharRegex)) {
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Invalid Aadhar Card Format (must be 12 digits)',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+                  try {
+                    final nav = Navigator.of(ctx);
+                    final updateData = {
+                      'name': _nameController.text,
+                      'pan_card': panValue.isEmpty ? null : panValue,
+                      'aadhar_card': _aadharController.text,
+                      'age': int.tryParse(_ageController.text),
+                      'mobile_number': _mobileController.text,
+                      'username': _usernameController.text,
+                      'password': _passwordController.text,
+                    };
+                    await _supabase
+                        .from('workers')
+                        .update(updateData)
+                        .eq('worker_id', _editingSupervisor?['worker_id'])
+                        .eq('organization_code', widget.organizationCode);
+
+                    if ((photoUrlEdit ?? '').isNotEmpty) {
+                      await _setPhotoUrl(
+                        _editingSupervisor?['worker_id'] ?? '',
+                        photoUrlEdit,
+                      );
+                    }
+
+                    if (mounted) {
+                      nav.pop();
+                      messenger.showSnackBar(
+                        const SnackBar(content: Text('Supervisor updated')),
+                      );
+                      _editingSupervisor = null;
+                      _clearControllers();
+                      await _fetchSupervisors();
+                    }
+                  } catch (e) {
+                    messenger.showSnackBar(
+                      SnackBar(content: Text('Error: $e')),
+                    );
+                  }
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _clearControllers() {
+    _employeeIdController.clear();
+    _nameController.clear();
+    _panController.clear();
+    _aadharController.clear();
+    _ageController.clear();
+    _mobileController.clear();
+    _usernameController.clear();
+    _passwordController.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: _fetchSupervisors,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ListView(
+          children: [
+            ExpansionTile(
+              title: const Text('Add New Supervisor'),
+              children: [
+                _buildFormTextField(
+                  controller: _employeeIdController,
+                  label: 'Supervisor ID',
+                ),
+                _buildFormTextField(controller: _nameController, label: 'Name'),
+                _buildFormTextField(
+                  controller: _panController,
+                  label: 'PAN Card (Optional)',
+                  hint: 'ABCDE1234F',
+                ),
+                _buildFormTextField(
+                  controller: _aadharController,
+                  label: 'Aadhar Card',
+                ),
+                _buildFormTextField(
+                  controller: _ageController,
+                  label: 'Age',
+                  keyboardType: TextInputType.number,
+                ),
+                _buildFormTextField(
+                  controller: _mobileController,
+                  label: 'Mobile Number',
+                  keyboardType: TextInputType.phone,
+                ),
+                _buildFormTextField(
+                  controller: _usernameController,
+                  label: 'Username',
+                ),
+                _buildFormTextField(
+                  controller: _passwordController,
+                  label: 'Password',
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 20,
+                      backgroundColor: Colors.grey[300],
+                      backgroundImage: _newSupervisorPhotoBytes != null
+                          ? MemoryImage(_newSupervisorPhotoBytes!)
+                          : null,
+                      child: _newSupervisorPhotoBytes == null
+                          ? const Icon(Icons.person, size: 20)
+                          : null,
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton.icon(
+                      onPressed: _pickNewSupervisorPhoto,
+                      icon: const Icon(Icons.image),
+                      label: const Text('Pick Photo'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _addSupervisor,
+                      child: const Text('Add Supervisor'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _list.length,
+                    itemBuilder: (context, index) {
+                      final supervisor = _list[index];
+                      final photoUrl = _getFirstNotEmpty(supervisor, [
+                        'photo_url',
+                        'avatar_url',
+                        'image_url',
+                        'imageurl',
+                        'photourl',
+                        'picture_url',
+                      ]);
+                      return Card(
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            radius: 20,
+                            backgroundColor: Colors.grey[200],
+                            backgroundImage:
+                                (photoUrl != null && photoUrl.isNotEmpty)
+                                ? NetworkImage(photoUrl)
+                                : null,
+                            child: (photoUrl == null || photoUrl.isEmpty)
+                                ? const Icon(Icons.person, color: Colors.grey)
+                                : null,
+                          ),
+                          title: Text(
+                            '${supervisor['name']} (${supervisor['worker_id']})',
+                          ),
+                          subtitle: Text(
+                            'Mobile: ${supervisor['mobile_number']}',
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Edit',
+                                icon: const Icon(
+                                  Icons.edit,
+                                  color: Colors.blue,
+                                ),
+                                onPressed: () => _editSupervisor(supervisor),
+                              ),
+                              IconButton(
+                                tooltip: 'Delete',
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.red,
+                                ),
+                                onPressed: () =>
+                                    _deleteSupervisor(supervisor['worker_id']),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. MACHINES TAB
 // ---------------------------------------------------------------------------
 class MachinesTab extends StatefulWidget {
@@ -3319,14 +4637,17 @@ class _MachinesTabState extends State<MachinesTab> {
 
   final _idController = TextEditingController();
   final _nameController = TextEditingController();
-  String _type = 'CNC';
+  final _typeController = TextEditingController(text: 'CNC');
 
   Map<String, dynamic>? _editingMachine;
+  List<Map<String, dynamic>> _topUsage = [];
+  String _sortOption = 'default'; // 'default', 'most_used', 'least_used'
 
   @override
   void initState() {
     super.initState();
     _fetchMachines();
+    _fetchTopUsage();
   }
 
   void _editMachine(Map<String, dynamic> machine) {
@@ -3334,8 +4655,45 @@ class _MachinesTabState extends State<MachinesTab> {
       _editingMachine = machine;
       _idController.text = machine['machine_id'];
       _nameController.text = machine['name'];
-      _type = machine['type'];
+      _typeController.text = (machine['type'] ?? '').toString();
     });
+  }
+
+  Future<void> _fetchTopUsage() async {
+    try {
+      final resp = await _supabase
+          .from('production_logs')
+          .select('machine_id, quantity')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(500);
+      final logs = List<Map<String, dynamic>>.from(resp);
+      final Map<String, Map<String, int>> agg = {};
+      for (final l in logs) {
+        final id = (l['machine_id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        final qty = (l['quantity'] ?? 0) as int;
+        agg.putIfAbsent(id, () => {'count': 0, 'qty': 0});
+        agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
+        agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
+      }
+      final list =
+          agg.entries
+              .map(
+                (e) => <String, dynamic>{
+                  'machine_id': e.key,
+                  'count': e.value['count'] ?? 0,
+                  'qty': e.value['qty'] ?? 0,
+                },
+              )
+              .toList()
+            ..sort((a, b) {
+              final c = (b['count'] as int).compareTo(a['count'] as int);
+              if (c != 0) return c;
+              return (b['qty'] as int).compareTo(a['qty'] as int);
+            });
+      if (mounted) setState(() => _topUsage = list);
+    } catch (_) {}
   }
 
   Future<void> _updateMachine() async {
@@ -3343,7 +4701,7 @@ class _MachinesTabState extends State<MachinesTab> {
     try {
       await _supabase
           .from('machines')
-          .update({'name': _nameController.text, 'type': _type})
+          .update({'name': _nameController.text, 'type': _typeController.text})
           .eq('machine_id', _editingMachine!['machine_id'])
           .eq('organization_code', widget.organizationCode);
 
@@ -3368,7 +4726,7 @@ class _MachinesTabState extends State<MachinesTab> {
       _editingMachine = null;
       _idController.clear();
       _nameController.clear();
-      _type = 'CNC';
+      _typeController.text = 'CNC';
     });
   }
 
@@ -3423,7 +4781,7 @@ class _MachinesTabState extends State<MachinesTab> {
       await _supabase.from('machines').insert({
         'machine_id': _idController.text,
         'name': _nameController.text,
-        'type': _type,
+        'type': _typeController.text,
         'organization_code': widget.organizationCode,
       });
       if (mounted) {
@@ -3443,36 +4801,79 @@ class _MachinesTabState extends State<MachinesTab> {
     }
   }
 
+  List<Map<String, dynamic>> get _sortedMachines {
+    List<Map<String, dynamic>> list = List.from(_machines);
+    if (_sortOption == 'most_used') {
+      list.sort((a, b) {
+        final usageA = _topUsage.firstWhere(
+          (u) => u['machine_id'] == a['machine_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _topUsage.firstWhere(
+          (u) => u['machine_id'] == b['machine_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageB['count'] as int).compareTo(usageA['count'] as int);
+        if (c != 0) return c;
+        return (usageB['qty'] as int).compareTo(usageA['qty'] as int);
+      });
+    } else if (_sortOption == 'least_used') {
+      list.sort((a, b) {
+        final usageA = _topUsage.firstWhere(
+          (u) => u['machine_id'] == a['machine_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _topUsage.firstWhere(
+          (u) => u['machine_id'] == b['machine_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageA['count'] as int).compareTo(usageB['count'] as int);
+        if (c != 0) return c;
+        return (usageA['qty'] as int).compareTo(usageB['qty'] as int);
+      });
+    } else {
+      list.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
+    }
+    return list;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: ListView(
         children: [
+          if (_topUsage.isNotEmpty)
+            Card(
+              color: Colors.pink.shade50,
+              child: ListTile(
+                leading: const Icon(Icons.trending_up, color: Colors.pink),
+                title: const Text('Most Used Machine'),
+                subtitle: Text(
+                  '${_topUsage.first['machine_id']} (${_topUsage.first['count']} logs, ${_topUsage.first['qty']} qty)',
+                ),
+              ),
+            ),
           ExpansionTile(
             title: Text(
               _editingMachine == null ? 'Add New Machine' : 'Edit Machine',
             ),
             initiallyExpanded: _editingMachine != null,
             children: [
-              TextField(
+              _buildFormTextField(
                 controller: _idController,
+                label: 'Machine ID',
                 enabled: _editingMachine == null,
-                decoration: const InputDecoration(labelText: 'Machine ID'),
               ),
-              TextField(
+              _buildFormTextField(
                 controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Machine Name'),
+                label: 'Machine Name',
               ),
-              DropdownButtonFormField<String>(
-                initialValue: _type,
-                items: ['CNC', 'VMC']
-                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
-                    .toList(),
-                onChanged: (val) => setState(() => _type = val!),
-                decoration: const InputDecoration(labelText: 'Type'),
+              _buildFormTextField(
+                controller: _typeController,
+                label: 'Machine Type ',
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -3499,21 +4900,54 @@ class _MachinesTabState extends State<MachinesTab> {
             ],
           ),
           const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Existing Machines',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+              DropdownButton<String>(
+                value: _sortOption,
+                onChanged: (val) {
+                  if (val != null) setState(() => _sortOption = val);
+                },
+                items: const [
+                  DropdownMenuItem(value: 'default', child: Text('Default')),
+                  DropdownMenuItem(
+                    value: 'most_used',
+                    child: Text('Most Used'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'least_used',
+                    child: Text('Least Used'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
           _isLoading
               ? const Center(child: CircularProgressIndicator())
               : ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _machines.length,
+                  itemCount: _sortedMachines.length,
                   itemBuilder: (context, index) {
-                    final machine = _machines[index];
+                    final machine = _sortedMachines[index];
+                    final usage = _topUsage.firstWhere(
+                      (u) => u['machine_id'] == machine['machine_id'],
+                      orElse: () => {'count': 0, 'qty': 0},
+                    );
                     return Card(
                       child: ListTile(
                         leading: const Icon(Icons.precision_manufacturing),
                         title: Text(
                           '${machine['name']} (${machine['machine_id']})',
                         ),
-                        subtitle: Text('Type: ${machine['type']}'),
+                        subtitle: Text(
+                          'Type: ${machine['type']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
+                        ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -3559,6 +4993,8 @@ class _ItemsTabState extends State<ItemsTab> {
   final _itemNameController = TextEditingController();
   List<OperationDetail> _operations = [];
   String _searchQuery = '';
+  List<Map<String, dynamic>> _topItemUsage = [];
+  String _sortOption = 'default'; // 'default', 'most_used', 'least_used'
 
   // Operation Controllers
   final _opNameController = TextEditingController();
@@ -3592,8 +5028,7 @@ class _ItemsTabState extends State<ItemsTab> {
             );
           } catch (ce) {
             debugPrint('Error creating bucket $bucket: $ce');
-            // Provide a clearer error message for the user
-            throw 'Bucket "$bucket" not found and could not be created automatically. Please create it in the Supabase dashboard.';
+            throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
           }
 
           // Retry the upload
@@ -3614,6 +5049,20 @@ class _ItemsTabState extends State<ItemsTab> {
       return _supabase.storage.from(bucket).getPublicUrl(fileName);
     } catch (e) {
       debugPrint('Upload error for bucket $bucket: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
       rethrow;
     }
   }
@@ -3622,6 +5071,7 @@ class _ItemsTabState extends State<ItemsTab> {
   void initState() {
     super.initState();
     _fetchItems();
+    _fetchTopItemUsage();
   }
 
   Future<void> _fetchItems() async {
@@ -3646,6 +5096,43 @@ class _ItemsTabState extends State<ItemsTab> {
         setState(() => _isLoadingItems = false);
       }
     }
+  }
+
+  Future<void> _fetchTopItemUsage() async {
+    try {
+      final resp = await _supabase
+          .from('production_logs')
+          .select('item_id, quantity')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(500);
+      final logs = List<Map<String, dynamic>>.from(resp);
+      final Map<String, Map<String, int>> agg = {};
+      for (final l in logs) {
+        final id = (l['item_id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        final qty = (l['quantity'] ?? 0) as int;
+        agg.putIfAbsent(id, () => {'count': 0, 'qty': 0});
+        agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
+        agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
+      }
+      final list =
+          agg.entries
+              .map(
+                (e) => <String, dynamic>{
+                  'item_id': e.key,
+                  'count': e.value['count'] ?? 0,
+                  'qty': e.value['qty'] ?? 0,
+                },
+              )
+              .toList()
+            ..sort((a, b) {
+              final c = (b['count'] as int).compareTo(a['count'] as int);
+              if (c != 0) return c;
+              return (b['qty'] as int).compareTo(a['qty'] as int);
+            });
+      if (mounted) setState(() => _topItemUsage = list);
+    } catch (_) {}
   }
 
   void _editItem(Map<String, dynamic> item) {
@@ -3759,9 +5246,11 @@ class _ItemsTabState extends State<ItemsTab> {
       allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
     );
     if (result != null) {
-      setState(() {
-        _opFile = result.files.first;
-      });
+      if (mounted) {
+        setState(() {
+          _opFile = result.files.first;
+        });
+      }
     }
   }
 
@@ -3779,6 +5268,9 @@ class _ItemsTabState extends State<ItemsTab> {
         existingPdfUrl: _editingOperationIndex != null
             ? _operations[_editingOperationIndex!].existingPdfUrl
             : null,
+        createdAt: _editingOperationIndex != null
+            ? _operations[_editingOperationIndex!].createdAt
+            : DateTime.now().toIso8601String(),
       );
 
       if (_editingOperationIndex != null) {
@@ -3814,76 +5306,92 @@ class _ItemsTabState extends State<ItemsTab> {
       builder: (context) => AlertDialog(
         title: Text('${item['name']} (${item['item_id']})'),
         content: SizedBox(
-          width: double.maxFinite,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              const Text(
-                'Operations:',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 10),
-              ...ops.map(
-                (op) => ListTile(
-                  title: Text(op.name),
-                  subtitle: Text('Target: ${op.target}'),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (op.imageUrl != null)
-                        IconButton(
-                          icon: const Icon(Icons.image, color: Colors.blue),
-                          tooltip: 'View Image',
-                          onPressed: () {
-                            showDialog(
-                              context: context,
-                              builder: (ctx) => AlertDialog(
-                                content: SizedBox(
-                                  width: 500,
-                                  child: Image.network(
-                                    op.imageUrl!,
-                                    fit: BoxFit.contain,
-                                    errorBuilder: (c, e, st) =>
-                                        const Text('Image failed to load'),
+          width: MediaQuery.of(context).size.width * 0.9,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.8,
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text(
+                  'Operations:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                ...ops.map(
+                  (op) => ListTile(
+                    title: Text(op.name),
+                    subtitle: Text('Target: ${op.target}'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (op.imageUrl != null)
+                          IconButton(
+                            icon: const Icon(Icons.image, color: Colors.blue),
+                            tooltip: 'View Image',
+                            onPressed: () {
+                              showDialog(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  content: SizedBox(
+                                    width:
+                                        MediaQuery.of(context).size.width * 0.9,
+                                    child: ConstrainedBox(
+                                      constraints: BoxConstraints(
+                                        maxHeight:
+                                            MediaQuery.of(context).size.height *
+                                            0.8,
+                                      ),
+                                      child: Image.network(
+                                        op.imageUrl!,
+                                        width: MediaQuery.of(
+                                          context,
+                                        ).size.width,
+                                        fit: BoxFit.contain,
+                                        errorBuilder: (c, e, st) =>
+                                            const Text('Image failed to load'),
+                                      ),
+                                    ),
                                   ),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx),
-                                    child: const Text('Close'),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      if (op.pdfUrl != null)
-                        IconButton(
-                          icon: const Icon(
-                            Icons.picture_as_pdf,
-                            color: Colors.red,
-                          ),
-                          tooltip: 'Open PDF',
-                          onPressed: () async {
-                            final messenger = ScaffoldMessenger.of(context);
-                            final uri = Uri.parse(op.pdfUrl!);
-                            if (!await launchUrl(
-                              uri,
-                              mode: LaunchMode.externalApplication,
-                            )) {
-                              messenger.showSnackBar(
-                                const SnackBar(
-                                  content: Text('Failed to open PDF'),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.pop(ctx),
+                                      child: const Text('Close'),
+                                    ),
+                                  ],
                                 ),
                               );
-                            }
-                          },
-                        ),
-                    ],
+                            },
+                          ),
+                        if (op.pdfUrl != null)
+                          IconButton(
+                            icon: const Icon(
+                              Icons.picture_as_pdf,
+                              color: Colors.red,
+                            ),
+                            tooltip: 'Open PDF',
+                            onPressed: () async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              final uri = Uri.parse(op.pdfUrl!);
+                              if (!await launchUrl(
+                                uri,
+                                mode: LaunchMode.externalApplication,
+                              )) {
+                                messenger.showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Failed to open PDF'),
+                                  ),
+                                );
+                              }
+                            },
+                          ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
         actions: [
@@ -4008,6 +5516,48 @@ class _ItemsTabState extends State<ItemsTab> {
     }
   }
 
+  List<Map<String, dynamic>> get _sortedItems {
+    List<Map<String, dynamic>> list = _items.where((it) {
+      final name = (it['name'] ?? '').toString().toLowerCase();
+      final id = (it['item_id'] ?? '').toString().toLowerCase();
+      final q = _searchQuery.toLowerCase();
+      return name.contains(q) || id.contains(q);
+    }).toList();
+
+    if (_sortOption == 'most_used') {
+      list.sort((a, b) {
+        final usageA = _topItemUsage.firstWhere(
+          (u) => u['item_id'] == a['item_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _topItemUsage.firstWhere(
+          (u) => u['item_id'] == b['item_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageB['count'] as int).compareTo(usageA['count'] as int);
+        if (c != 0) return c;
+        return (usageB['qty'] as int).compareTo(usageA['qty'] as int);
+      });
+    } else if (_sortOption == 'least_used') {
+      list.sort((a, b) {
+        final usageA = _topItemUsage.firstWhere(
+          (u) => u['item_id'] == a['item_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _topItemUsage.firstWhere(
+          (u) => u['item_id'] == b['item_id'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageA['count'] as int).compareTo(usageB['count'] as int);
+        if (c != 0) return c;
+        return (usageA['qty'] as int).compareTo(usageB['qty'] as int);
+      });
+    } else {
+      list.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
+    }
+    return list;
+  }
+
   @override
   Widget build(BuildContext context) {
     final filteredItems = _items.where((item) {
@@ -4021,24 +5571,33 @@ class _ItemsTabState extends State<ItemsTab> {
       padding: const EdgeInsets.all(16.0),
       child: ListView(
         children: [
+          if (_topItemUsage.isNotEmpty)
+            Card(
+              color: Colors.teal.shade50,
+              child: ListTile(
+                leading: const Icon(Icons.trending_up, color: Colors.teal),
+                title: const Text('Most Used Item'),
+                subtitle: Text(
+                  '${_topItemUsage.first['item_id']} (${_topItemUsage.first['count']} logs, ${_topItemUsage.first['qty']} qty)',
+                ),
+              ),
+            ),
           Text(
             _editingItem == null ? 'Add New Item' : 'Edit Item',
             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
           ),
           const SizedBox(height: 10),
-          TextField(
+          _buildFormTextField(
             controller: _itemIdController,
+            label: 'Item ID (e.g. 5001)',
             enabled: _editingItem == null,
-            decoration: const InputDecoration(labelText: 'Item ID (e.g. 5001)'),
           ),
-          TextField(
+          _buildFormTextField(
             controller: _itemNameController,
-            decoration: const InputDecoration(
-              labelText: 'Item Name (e.g. Shirt)',
-            ),
+            label: 'Item Name (e.g. Shirt)',
           ),
 
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           Text(
             _editingOperationIndex == null ? 'Operations' : 'Edit Operation',
             style: const TextStyle(fontWeight: FontWeight.bold),
@@ -4051,21 +5610,16 @@ class _ItemsTabState extends State<ItemsTab> {
             ),
             child: Column(
               children: [
-                TextField(
+                _buildFormTextField(
                   controller: _opNameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Operation Name (e.g. Collar)',
-                  ),
+                  label: 'Operation Name (e.g. Collar)',
                 ),
-                TextField(
+                _buildFormTextField(
                   controller: _opTargetController,
+                  label: 'Target Quantity',
                   keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: const InputDecoration(
-                    labelText: 'Target Quantity',
-                  ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 16),
                 Row(
                   children: [
                     ElevatedButton.icon(
@@ -4185,24 +5739,47 @@ class _ItemsTabState extends State<ItemsTab> {
           const Divider(thickness: 2),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: Column(
               children: [
-                const Text(
-                  'Existing Items',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-                ),
-                SizedBox(
-                  width: 200,
-                  height: 40,
-                  child: TextField(
-                    onChanged: (val) => setState(() => _searchQuery = val),
-                    decoration: const InputDecoration(
-                      hintText: 'Search items...',
-                      prefixIcon: Icon(Icons.search),
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.zero,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Existing Items',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                      ),
                     ),
+                    DropdownButton<String>(
+                      value: _sortOption,
+                      onChanged: (val) {
+                        if (val != null) setState(() => _sortOption = val);
+                      },
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'default',
+                          child: Text('Default'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'most_used',
+                          child: Text('Most Used'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'least_used',
+                          child: Text('Least Used'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  onChanged: (val) => setState(() => _searchQuery = val),
+                  decoration: const InputDecoration(
+                    hintText: 'Search items...',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
                   ),
                 ),
               ],
@@ -4210,20 +5787,25 @@ class _ItemsTabState extends State<ItemsTab> {
           ),
           _isLoadingItems
               ? const Center(child: CircularProgressIndicator())
-              : filteredItems.isEmpty
+              : _sortedItems.isEmpty
               ? const Center(child: Text('No items found.'))
               : ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemCount: filteredItems.length,
+                  itemCount: _sortedItems.length,
                   itemBuilder: (context, index) {
-                    final item = filteredItems[index];
-                    // Count operations if possible
+                    final item = _sortedItems[index];
+                    final usage = _topItemUsage.firstWhere(
+                      (u) => u['item_id'] == item['item_id'],
+                      orElse: () => {'count': 0, 'qty': 0},
+                    );
                     final ops = item['operation_details'] as List? ?? [];
                     return Card(
                       child: ListTile(
                         title: Text('${item['name']} (${item['item_id']})'),
-                        subtitle: Text('${ops.length} Operations'),
+                        subtitle: Text(
+                          '${ops.length} Operations • Usage: ${usage['count']} logs, ${usage['qty']} qty',
+                        ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -4273,11 +5855,16 @@ class _OperationsTabState extends State<OperationsTab> {
   List<Map<String, dynamic>> _items = [];
   bool _isLoading = true;
   String _searchQuery = '';
+  Map<String, int> _topOperation = {};
+  String _topOperationName = '';
+  List<Map<String, dynamic>> _allOperationUsage = [];
+  String _sortOption = 'default'; // 'default', 'most_used', 'least_used'
 
   @override
   void initState() {
     super.initState();
     _fetchOperations();
+    _fetchTopOperationUsage();
   }
 
   Future<void> _fetchOperations() async {
@@ -4285,7 +5872,7 @@ class _OperationsTabState extends State<OperationsTab> {
     try {
       final response = await _supabase
           .from('items')
-          .select('item_id, name, operation_details')
+          .select('item_id, name, operation_details, created_at')
           .eq('organization_code', widget.organizationCode)
           .order('name', ascending: true);
       if (mounted) {
@@ -4302,25 +5889,84 @@ class _OperationsTabState extends State<OperationsTab> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    // Flatten operations from all items
+  Future<void> _fetchTopOperationUsage() async {
+    try {
+      final resp = await _supabase
+          .from('production_logs')
+          .select('operation, quantity, created_at')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(1000);
+      final logs = List<Map<String, dynamic>>.from(resp);
+      final Map<String, Map<String, dynamic>> agg = {};
+      for (final l in logs) {
+        final name = (l['operation'] ?? '').toString();
+        if (name.isEmpty) continue;
+        final qty = (l['quantity'] ?? 0) as int;
+        final createdAt = l['created_at'];
+
+        agg.putIfAbsent(
+          name,
+          () => {'count': 0, 'qty': 0, 'last_produced': createdAt},
+        );
+        agg[name]!['count'] = (agg[name]!['count'] as int) + 1;
+        agg[name]!['qty'] = (agg[name]!['qty'] as int) + qty;
+      }
+      final list =
+          agg.entries
+              .map(
+                (e) => <String, dynamic>{
+                  'operation': e.key,
+                  'count': e.value['count'] ?? 0,
+                  'qty': e.value['qty'] ?? 0,
+                  'last_produced': e.value['last_produced'],
+                },
+              )
+              .toList()
+            ..sort((a, b) {
+              final c = (b['count'] as int).compareTo(a['count'] as int);
+              if (c != 0) return c;
+              return (b['qty'] as int).compareTo(a['qty'] as int);
+            });
+      if (mounted && list.isNotEmpty) {
+        setState(() {
+          _allOperationUsage = list;
+          _topOperationName = (list.first['operation'] ?? '').toString();
+          _topOperation = {
+            'count': list.first['count'] as int,
+            'qty': list.first['qty'] as int,
+          };
+        });
+      }
+    } catch (_) {}
+  }
+
+  List<Map<String, dynamic>> get _sortedOperations {
     List<Map<String, dynamic>> allOperations = [];
     for (var item in _items) {
       final ops = item['operation_details'] as List? ?? [];
+      final itemCreatedAt = item['created_at'];
       for (var op in ops) {
+        final opName = (op['name'] ?? '').toString();
+        final usage = _allOperationUsage.firstWhere(
+          (u) => u['operation'] == opName,
+          orElse: () => {'count': 0, 'qty': 0, 'last_produced': null},
+        );
+
         allOperations.add({
           'item_id': item['item_id'],
           'item_name': item['name'],
-          'op_name': op['name'],
+          'op_name': opName,
           'target': op['target'],
           'imageUrl': op['imageUrl'],
           'pdfUrl': op['pdfUrl'],
+          'created_at': op['createdAt'] ?? itemCreatedAt,
+          'last_produced': usage['last_produced'],
         });
       }
     }
 
-    final filteredOps = allOperations.where((op) {
+    List<Map<String, dynamic>> filtered = allOperations.where((op) {
       final opName = op['op_name'].toString().toLowerCase();
       final itemName = op['item_name'].toString().toLowerCase();
       final itemId = op['item_id'].toString().toLowerCase();
@@ -4330,10 +5976,63 @@ class _OperationsTabState extends State<OperationsTab> {
           itemId.contains(query);
     }).toList();
 
+    if (_sortOption == 'most_used') {
+      filtered.sort((a, b) {
+        final usageA = _allOperationUsage.firstWhere(
+          (u) => u['operation'] == a['op_name'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _allOperationUsage.firstWhere(
+          (u) => u['operation'] == b['op_name'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageB['count'] as int).compareTo(usageA['count'] as int);
+        if (c != 0) return c;
+        return (usageB['qty'] as int).compareTo(usageA['qty'] as int);
+      });
+    } else if (_sortOption == 'least_used') {
+      filtered.sort((a, b) {
+        final usageA = _allOperationUsage.firstWhere(
+          (u) => u['operation'] == a['op_name'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final usageB = _allOperationUsage.firstWhere(
+          (u) => u['operation'] == b['op_name'],
+          orElse: () => {'count': 0, 'qty': 0},
+        );
+        final c = (usageA['count'] as int).compareTo(usageB['count'] as int);
+        if (c != 0) return c;
+        return (usageA['qty'] as int).compareTo(usageB['qty'] as int);
+      });
+    } else {
+      filtered.sort((a, b) {
+        int c = (a['op_name'] ?? '').compareTo(b['op_name'] ?? '');
+        if (c != 0) return c;
+        return (a['item_name'] ?? '').compareTo(b['item_name'] ?? '');
+      });
+    }
+    return filtered;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filteredOps = _sortedOperations;
+
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
+          if (_topOperation.isNotEmpty)
+            Card(
+              color: Colors.indigo.shade50,
+              child: ListTile(
+                leading: const Icon(Icons.trending_up, color: Colors.indigo),
+                title: const Text('Most Performed Operation'),
+                subtitle: Text(
+                  '$_topOperationName (${_topOperation['count']} logs, ${_topOperation['qty']} qty)',
+                ),
+              ),
+            ),
           Row(
             children: [
               const Expanded(
@@ -4344,11 +6043,29 @@ class _OperationsTabState extends State<OperationsTab> {
                 ),
               ),
               const SizedBox(width: 8),
+              DropdownButton<String>(
+                value: _sortOption,
+                onChanged: (val) {
+                  if (val != null) setState(() => _sortOption = val);
+                },
+                items: const [
+                  DropdownMenuItem(value: 'default', child: Text('Default')),
+                  DropdownMenuItem(
+                    value: 'most_used',
+                    child: Text('Most Used'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'least_used',
+                    child: Text('Least Used'),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   onChanged: (val) => setState(() => _searchQuery = val),
                   decoration: const InputDecoration(
-                    hintText: 'Search by operation or item...',
+                    hintText: 'Search...',
                     prefixIcon: Icon(Icons.search),
                     border: OutlineInputBorder(),
                     contentPadding: EdgeInsets.symmetric(horizontal: 10),
@@ -4367,12 +6084,39 @@ class _OperationsTabState extends State<OperationsTab> {
                     itemCount: filteredOps.length,
                     itemBuilder: (context, index) {
                       final op = filteredOps[index];
+                      final usage = _allOperationUsage.firstWhere(
+                        (u) => u['operation'] == op['op_name'],
+                        orElse: () => {'count': 0, 'qty': 0},
+                      );
                       return Card(
                         margin: const EdgeInsets.symmetric(vertical: 4),
                         child: ListTile(
+                          onTap: () => _showOperationDetail(op, usage),
                           title: Text(op['op_name']),
-                          subtitle: Text(
-                            'Item: ${op['item_name']} (${op['item_id']})\nTarget: ${op['target']}',
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Item: ${op['item_name']} (${op['item_id']})',
+                              ),
+                              Text(
+                                'Target: ${op['target']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
+                              ),
+                              if (op['created_at'] != null ||
+                                  op['last_produced'] != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4.0),
+                                  child: Text(
+                                    '${op['created_at'] != null ? 'Created: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['created_at'].toString()))}' : ''}'
+                                    '${op['created_at'] != null && op['last_produced'] != null ? ' • ' : ''}'
+                                    '${op['last_produced'] != null ? 'Last Produced: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['last_produced'].toString()))}' : ''}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                           isThreeLine: true,
                           trailing: Row(
@@ -4385,6 +6129,10 @@ class _OperationsTabState extends State<OperationsTab> {
                                   Icons.picture_as_pdf,
                                   color: Colors.red,
                                 ),
+                              const Icon(
+                                Icons.chevron_right,
+                                color: Colors.grey,
+                              ),
                             ],
                           ),
                         ),
@@ -4395,6 +6143,135 @@ class _OperationsTabState extends State<OperationsTab> {
         ],
       ),
     );
+  }
+
+  void _showOperationDetail(
+    Map<String, dynamic> op,
+    Map<String, dynamic> usage,
+  ) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(op['op_name']),
+          content: SizedBox(
+            width: MediaQuery.of(context).size.width * 0.9,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.8,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (op['imageUrl'] != null &&
+                        op['imageUrl'].toString().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16.0),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.network(
+                            op['imageUrl'],
+                            width: MediaQuery.of(context).size.width,
+                            height: 200,
+                            fit: BoxFit.cover,
+                            errorBuilder: (ctx, err, stack) => Container(
+                              height: 200,
+                              color: Colors.grey[200],
+                              child: const Center(
+                                child: Icon(Icons.broken_image, size: 50),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    _detailItem('Item Name', op['item_name']),
+                    _detailItem('Item ID', op['item_id']),
+                    _detailItem('Target Quantity', op['target'].toString()),
+                    if (op['created_at'] != null)
+                      _detailItem(
+                        'Created At',
+                        DateFormat(
+                          'yyyy-MM-dd hh:mm a',
+                        ).format(DateTime.parse(op['created_at'].toString())),
+                      ),
+                    const Divider(),
+                    const Text(
+                      'Usage Statistics',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _detailItem('Total Logs', usage['count'].toString()),
+                    _detailItem('Total Quantity', usage['qty'].toString()),
+                    if (op['last_produced'] != null)
+                      _detailItem(
+                        'Last Produced',
+                        DateFormat('yyyy-MM-dd hh:mm a').format(
+                          DateTime.parse(op['last_produced'].toString()),
+                        ),
+                      ),
+                    if (op['pdfUrl'] != null &&
+                        op['pdfUrl'].toString().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 16.0),
+                        child: ElevatedButton.icon(
+                          onPressed: () => _launchURL(op['pdfUrl']),
+                          icon: const Icon(Icons.picture_as_pdf),
+                          label: const Text('View PDF Guide'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red.shade50,
+                            foregroundColor: Colors.red,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _detailItem(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: '$label: ',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            TextSpan(text: value),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _launchURL(String url) async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Could not launch PDF')));
+      }
+    }
   }
 }
 
@@ -4432,13 +6309,15 @@ class _ShiftsTabState extends State<ShiftsTab> {
           .select()
           .eq('organization_code', widget.organizationCode)
           .order('name', ascending: true);
-      setState(() {
-        _shifts = List<Map<String, dynamic>>.from(resp);
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _shifts = List<Map<String, dynamic>>.from(resp);
+          _isLoading = false;
+        });
+      }
     } catch (e) {
       debugPrint('Fetch shifts error: $e');
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -4756,7 +6635,19 @@ class _SecurityTabState extends State<SecurityTab> {
         });
       }
     } catch (e) {
-      debugPrint('Fetch employee login logs error: $e');
+      // Gracefully handle missing table or schema mismatch without noisy logs
+      final msg = e.toString();
+      if (msg.contains('PGRST205') ||
+          msg.contains('Not Found') ||
+          msg.contains('Could not find the table')) {
+        if (mounted) {
+          setState(() {
+            _employeeLogs = [];
+          });
+        }
+      } else {
+        debugPrint('Employee login logs fetch error: $e');
+      }
     }
   }
 

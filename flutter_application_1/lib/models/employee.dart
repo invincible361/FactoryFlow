@@ -9,6 +9,7 @@ class Employee {
   final int? age;
   final String? mobileNumber;
   final String? role;
+  final String? photoUrl;
 
   Employee({
     required this.id,
@@ -21,6 +22,7 @@ class Employee {
     this.age,
     this.mobileNumber,
     this.role,
+    this.photoUrl,
   });
 
   factory Employee.fromJson(Map<String, dynamic> json) {
@@ -35,6 +37,12 @@ class Employee {
       age: json['age'],
       mobileNumber: json['mobile_number'],
       role: json['role'],
+      photoUrl:
+          json['photo_url'] ??
+          json['image_url'] ??
+          json['imageurl'] ??
+          json['avatar_url'] ??
+          json['photourl'],
     );
   }
 }

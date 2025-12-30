@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/time_utils.dart';
 import 'package:workmanager/workmanager.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 import '../main.dart';
 import '../models/machine.dart';
 import '../models/production_log.dart';
@@ -63,6 +64,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   String? _factoryName;
   String? _logoUrl;
   String? _currentLogId;
+  String? _workerPhotoUrl;
 
   // Notifiers for lag optimization
   final ValueNotifier<DateTime> _currentTimeNotifier = ValueNotifier<DateTime>(
@@ -156,6 +158,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _checkLocation();
     _fetchOrganizationName();
     _fetchTodayExtraUnits();
+    _fetchWorkerPhoto();
     // Check for updates
     WidgetsBinding.instance.addPostFrameCallback((_) {
       UpdateService.checkForUpdates(context);
@@ -182,6 +185,41 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         }
       }
     });
+  }
+
+  String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
+    for (var key in keys) {
+      final val = data[key]?.toString();
+      if (val != null && val.trim().isNotEmpty) {
+        return val;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _fetchWorkerPhoto() async {
+    try {
+      final resp = await Supabase.instance.client
+          .from('workers')
+          .select()
+          .eq('worker_id', widget.employee.id)
+          .eq('organization_code', widget.employee.organizationCode ?? '')
+          .maybeSingle();
+      if (resp != null && mounted) {
+        setState(() {
+          _workerPhotoUrl = _getFirstNotEmpty(resp, [
+            'photo_url',
+            'avatar_url',
+            'image_url',
+            'imageurl',
+            'photourl',
+            'picture_url',
+          ]);
+        });
+      }
+    } catch (_) {
+      // ignore
+    }
   }
 
   Future<void> _requestNotificationPermissions() async {
@@ -405,9 +443,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         return Machine(
           id: data['machine_id'],
           name: data['name'],
-          type: data['type'] == 'CNC' ? MachineType.cnc : MachineType.vmc,
-          items:
-              [], // Will link items later if needed, or keep empty for now as selection is separate
+          type: (data['type'] ?? '').toString().toUpperCase(),
+          items: [],
         );
       }).toList();
 
@@ -996,81 +1033,97 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _timer?.cancel();
     final endTime = DateTime.now();
 
+    final qtyControllers = <TextEditingController>[];
+    final remarksControllers = <TextEditingController>[];
+    qtyControllers.add(TextEditingController());
+    remarksControllers.add(TextEditingController());
+    for (int i = 0; i < _extraEntries.length; i++) {
+      qtyControllers.add(TextEditingController());
+      remarksControllers.add(TextEditingController());
+    }
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) {
         final currentContext = context;
-        final qtyControllers = <TextEditingController>[];
-        final remarksControllers = <TextEditingController>[];
-        qtyControllers.add(TextEditingController());
-        remarksControllers.add(TextEditingController());
-        for (int i = 0; i < _extraEntries.length; i++) {
-          qtyControllers.add(TextEditingController());
-          remarksControllers.add(TextEditingController());
-        }
+        final screenContext = this.context;
         return AlertDialog(
           title: const Text('Production Finished'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Duration: ${_formatDuration(_elapsed)}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+          content: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.6,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_selectedItem != null && _selectedOperation != null)
+                    _buildOperationInfo(_selectedItem!, _selectedOperation!),
+                  Text(
+                    'Duration: ${_formatDuration(_elapsed)}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: qtyControllers[0],
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'Base Machine Quantity',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: remarksControllers[0],
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      labelText: 'Remarks (Optional)',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.comment),
+                    ),
+                  ),
+                  if (_extraEntries.isNotEmpty)
+                    ..._extraEntries.asMap().entries.map((e) {
+                      final i = e.key;
+                      final data = e.value;
+                      final item = _items.firstWhere(
+                        (it) => it.id == data['itemId'],
+                        orElse: () => _selectedItem!,
+                      );
+                      final opName = data['operation'] ?? _selectedOperation!;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 12),
+                          _buildOperationInfo(item, opName),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: qtyControllers[i + 1],
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                            ],
+                            decoration: const InputDecoration(
+                              labelText: 'Quantity',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: remarksControllers[i + 1],
+                            maxLines: 2,
+                            decoration: const InputDecoration(
+                              labelText: 'Remarks (Optional)',
+                              border: OutlineInputBorder(),
+                              prefixIcon: Icon(Icons.comment),
+                            ),
+                          ),
+                        ],
+                      );
+                    }),
+                ],
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: qtyControllers[0],
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Base Machine Quantity',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: remarksControllers[0],
-                maxLines: 2,
-                decoration: const InputDecoration(
-                  labelText: 'Base Remarks (Optional)',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.comment),
-                ),
-              ),
-              if (_extraEntries.isNotEmpty)
-                ..._extraEntries.asMap().entries.map((e) {
-                  final i = e.key;
-                  final data = e.value;
-                  return Column(
-                    children: [
-                      const SizedBox(height: 12),
-                      Text(
-                        'Extra ${i + 1}: ${data['machineId'] ?? ''} / ${data['itemId'] ?? ''} / ${data['operation'] ?? ''}',
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: qtyControllers[i + 1],
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Quantity',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: remarksControllers[i + 1],
-                        maxLines: 2,
-                        decoration: const InputDecoration(
-                          labelText: 'Remarks (Optional)',
-                          border: OutlineInputBorder(),
-                          prefixIcon: Icon(Icons.comment),
-                        ),
-                      ),
-                    ],
-                  );
-                }),
-            ],
+            ),
           ),
           actions: [
             TextButton(
@@ -1082,15 +1135,47 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             ),
             ElevatedButton(
               onPressed: () {
-                if (qtyControllers.any((c) => c.text.isEmpty)) {
+                FocusScope.of(currentContext).unfocus();
+                // Validate base quantity
+                if (qtyControllers[0].text.trim().isEmpty) {
                   ScaffoldMessenger.of(currentContext).showSnackBar(
                     const SnackBar(
-                      content: Text('Please enter quantity for all entries'),
+                      content: Text('Please enter base machine quantity'),
                     ),
                   );
                   return;
                 }
-                final baseQty = int.tryParse(qtyControllers[0].text);
+                // Validate extra entries (handle partial and complete states)
+                for (int i = 0; i < _extraEntries.length; i++) {
+                  final data = _extraEntries[i];
+                  final hasMachine = data['machineId'] != null;
+                  final hasItem = data['itemId'] != null;
+                  final hasOp = data['operation'] != null;
+                  final isComplete = hasMachine && hasItem && hasOp;
+                  final isPartial =
+                      (hasMachine || hasItem || hasOp) && !isComplete;
+                  if (isPartial) {
+                    ScaffoldMessenger.of(currentContext).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Please complete Extra Machine Entry ${i + 1} (select machine, item, and operation)',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+                  if (isComplete && qtyControllers[i + 1].text.trim().isEmpty) {
+                    ScaffoldMessenger.of(currentContext).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Please enter quantity for Extra Machine Entry ${i + 1}',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+                }
+                final baseQty = int.tryParse(qtyControllers[0].text.trim());
                 if (baseQty == null) {
                   ScaffoldMessenger.of(currentContext).showSnackBar(
                     const SnackBar(content: Text('Invalid quantity')),
@@ -1107,7 +1192,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
                   // Show Summary/Confirmation Dialog
                   _showConfirmationDialog(
-                    currentContext,
+                    screenContext,
                     baseQty,
                     remarksControllers[0].text,
                     endTime,
@@ -1118,7 +1203,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                   Navigator.pop(currentContext);
                   // Even if no target, show confirmation
                   _showConfirmationDialog(
-                    currentContext,
+                    screenContext,
                     baseQty,
                     remarksControllers[0].text,
                     endTime,
@@ -1129,7 +1214,13 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                 // Save extra entries logs
                 for (int i = 0; i < _extraEntries.length; i++) {
                   final data = _extraEntries[i];
-                  final qty = int.tryParse(qtyControllers[i + 1].text) ?? 0;
+                  final isComplete =
+                      (data['machineId'] != null &&
+                      data['itemId'] != null &&
+                      data['operation'] != null);
+                  if (!isComplete) continue;
+                  final qty =
+                      int.tryParse(qtyControllers[i + 1].text.trim()) ?? 0;
                   final remark = remarksControllers[i + 1].text.isNotEmpty
                       ? remarksControllers[i + 1].text
                       : null;
@@ -1243,7 +1334,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                _saveLog(endTime, diff);
+                _saveLog(quantity, remarks, endTime, diff);
               },
               child: const Text('Confirm & Save'),
             ),
@@ -1280,7 +1371,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     return "${twoDigits(d.inHours)}:$twoDigitMinutes:$twoDigitSeconds";
   }
 
-  Future<void> _saveLog(DateTime endTime, int performanceDiff) async {
+  Future<void> _saveLog(
+    int quantity,
+    String remarks,
+    DateTime endTime,
+    int performanceDiff,
+  ) async {
     if (_isSaving) return;
     setState(() {
       _isSaving = true;
@@ -1308,9 +1404,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         machineId: _selectedMachine!.id,
         itemId: _selectedItem!.id,
         operation: _selectedOperation!,
-        quantity:
-            int.tryParse(_quantityController.text) ??
-            (throw FormatException('Invalid quantity input')),
+        quantity: quantity,
         timestamp: DateTime.now(),
         startTime: _startTime,
         endTime: endTime,
@@ -1320,9 +1414,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
         performanceDiff: performanceDiff,
         organizationCode: widget.employee.organizationCode,
-        remarks: _remarksController.text.isNotEmpty
-            ? _remarksController.text
-            : null,
+        remarks: remarks.isNotEmpty ? remarks : null,
       );
 
       await LogService().addLog(log);
@@ -1379,13 +1471,72 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     // Logic for Gear 122 based on machine type
     if (_selectedItem!.id == 'GR-122' && _selectedMachine != null) {
-      if (_selectedMachine!.type == MachineType.cnc) {
+      if (_selectedMachine!.type == 'CNC') {
         ops = ops.where((op) => op.contains('CNC')).toList();
-      } else if (_selectedMachine!.type == MachineType.vmc) {
+      } else if (_selectedMachine!.type == 'VMC') {
         ops = ops.where((op) => op.contains('VMC')).toList();
       }
     }
     return ops;
+  }
+
+  Widget _buildOperationInfo(Item item, String opName) {
+    final detail = item.operationDetails.firstWhere(
+      (od) => od.name == opName,
+      orElse: () => OperationDetail(name: opName, target: 0),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Text(
+              'Item: ${item.name} (${item.id}) • Operation: $opName • Target: ${detail.target}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+            ),
+          ),
+          if ((detail.imageUrl ?? '').isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.image, color: Colors.blue),
+              tooltip: 'View Operation Image',
+              onPressed: () {
+                showDialog(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    content: SizedBox(
+                      width: 500,
+                      child: Image.network(
+                        detail.imageUrl!,
+                        fit: BoxFit.contain,
+                        errorBuilder: (c, e, st) =>
+                            const Text('Image failed to load'),
+                      ),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('Close'),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          if ((detail.pdfUrl ?? '').isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.picture_as_pdf, color: Colors.red),
+              tooltip: 'Open Operation PDF',
+              onPressed: () async {
+                final uri = Uri.parse(detail.pdfUrl!);
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              },
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildErrorWidget() {
@@ -1516,9 +1667,41 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             const SizedBox(height: 6),
             Padding(
               padding: const EdgeInsets.only(top: 2.0),
-              child: Text(
-                'Welcome, ${widget.employee.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
-                style: const TextStyle(fontSize: 12),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 12,
+                    backgroundColor: Colors.grey[300],
+                    backgroundImage:
+                        ((_workerPhotoUrl ?? widget.employee.photoUrl) !=
+                                null &&
+                            ((_workerPhotoUrl ?? widget.employee.photoUrl)!)
+                                .isNotEmpty)
+                        ? NetworkImage(
+                            (_workerPhotoUrl ?? widget.employee.photoUrl)!,
+                          )
+                        : null,
+                    child:
+                        (((_workerPhotoUrl ?? widget.employee.photoUrl) ==
+                                null) ||
+                            ((_workerPhotoUrl ?? widget.employee.photoUrl)!)
+                                .isEmpty)
+                        ? const Icon(
+                            Icons.person,
+                            size: 14,
+                            color: Colors.black54,
+                          )
+                        : null,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Welcome, ${widget.employee.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
+                      style: const TextStyle(fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1530,6 +1713,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             onPressed: () {
               _fetchData();
               _fetchTodayExtraUnits();
+              _fetchWorkerPhoto();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Refreshing data...')),
               );
@@ -1831,9 +2015,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                         if (selItem == null) return <String>[];
                         List<String> o = selItem.operations;
                         if (selItem.id == 'GR-122' && selMachine != null) {
-                          if (selMachine.type == MachineType.cnc) {
+                          if (selMachine.type == 'CNC') {
                             o = o.where((op) => op.contains('CNC')).toList();
-                          } else if (selMachine.type == MachineType.vmc) {
+                          } else if (selMachine.type == 'VMC') {
                             o = o.where((op) => op.contains('VMC')).toList();
                           }
                         }
@@ -1921,6 +2105,14 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                                         });
                                       },
                               ),
+                              if (selItem != null && data['operation'] != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6.0),
+                                  child: _buildOperationInfo(
+                                    selItem,
+                                    data['operation'] as String,
+                                  ),
+                                ),
                               Align(
                                 alignment: Alignment.centerRight,
                                 child: IconButton(
@@ -2453,7 +2645,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                           ),
                         ],
                         onChanged: (v) {
-                          if (v != null) setModalState(() => period = v);
+                          if (v != null && context.mounted) {
+                            setModalState(() => period = v);
+                          }
                         },
                       ),
                     ],

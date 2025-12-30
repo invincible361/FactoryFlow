@@ -30,6 +30,7 @@ class OperationDetail {
   final PlatformFile? newFile; // For local upload handling
   final String? existingUrl; // To keep track of existing image URL during edit
   final String? existingPdfUrl; // To keep track of existing PDF URL during edit
+  final String? createdAt;
 
   OperationDetail({
     required this.name,
@@ -39,6 +40,7 @@ class OperationDetail {
     this.newFile,
     this.existingUrl,
     this.existingPdfUrl,
+    this.createdAt,
   });
 
   factory OperationDetail.fromJson(Map<String, dynamic> json) {
@@ -47,6 +49,7 @@ class OperationDetail {
       target: json['target'] ?? 0,
       imageUrl: json['imageUrl'] ?? json['image_url'],
       pdfUrl: json['pdfUrl'] ?? json['pdf_url'],
+      createdAt: json['createdAt'] ?? json['created_at'],
     );
   }
 
@@ -56,6 +59,7 @@ class OperationDetail {
       'target': target,
       'imageUrl': imageUrl,
       'pdfUrl': pdfUrl,
+      'createdAt': createdAt,
     };
   }
 }

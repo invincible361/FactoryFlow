@@ -54,7 +54,7 @@ class MockData {
       list.add(Machine(
         id: 'CNC-$i',
         name: 'CNC Machine $i',
-        type: MachineType.cnc,
+        type: 'CNC',
         items: items, // All items available for now
       ));
     }
@@ -63,7 +63,7 @@ class MockData {
       list.add(Machine(
         id: 'VMC-$i',
         name: 'VMC Machine $i',
-        type: MachineType.vmc,
+        type: 'VMC',
         items: items, // All items available for now
       ));
     }

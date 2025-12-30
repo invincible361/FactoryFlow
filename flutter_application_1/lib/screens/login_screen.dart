@@ -222,7 +222,7 @@ class _LoginScreenState extends State<LoginScreen> {
             return;
           }
         }
-        // Record login event (worker/supervisor)
+        // Record login event (worker/supervisor), with graceful fallback
         try {
           final deviceInfo = DeviceInfoPlugin();
           String deviceName = 'Unknown Device';
@@ -248,17 +248,74 @@ class _LoginScreenState extends State<LoginScreen> {
             deviceName = winInfo.computerName;
             osVersion = 'Windows';
           }
+          final nowIso = DateTime.now().toUtc().toIso8601String();
           final payload = {
             'worker_id': employee.id,
             'role': employee.role ?? 'worker',
             'organization_code': orgCode,
             'device_name': deviceName,
             'os_version': osVersion,
-            'login_time': DateTime.now().toUtc().toIso8601String(),
+            'login_time': nowIso,
           };
           await Supabase.instance.client.from('login_logs').insert(payload);
         } catch (e) {
-          debugPrint('Error recording login event: $e');
+          final msg = e.toString();
+          if (msg.contains('PGRST205') ||
+              msg.contains('Not Found') ||
+              msg.contains('Could not find the table')) {
+            try {
+              final deviceInfo = DeviceInfoPlugin();
+              String deviceName = 'Unknown Device';
+              String osVersion = 'Unknown OS';
+              if (kIsWeb) {
+                final webInfo = await deviceInfo.webBrowserInfo;
+                deviceName = '${webInfo.browserName.name} on ${webInfo.platform}';
+                osVersion = webInfo.userAgent ?? 'Unknown Web UserAgent';
+              } else if (io.Platform.isAndroid) {
+                final androidInfo = await deviceInfo.androidInfo;
+                deviceName = '${androidInfo.manufacturer} ${androidInfo.model}';
+                osVersion = 'Android ${androidInfo.version.release}';
+              } else if (io.Platform.isIOS) {
+                final iosInfo = await deviceInfo.iosInfo;
+                deviceName = '${iosInfo.name} ${iosInfo.systemName}';
+                osVersion = iosInfo.systemVersion;
+              } else if (io.Platform.isMacOS) {
+                final macInfo = await deviceInfo.macOsInfo;
+                deviceName = macInfo.model;
+                osVersion = 'macOS ${macInfo.osRelease}';
+              } else if (io.Platform.isWindows) {
+                final winInfo = await deviceInfo.windowsInfo;
+                deviceName = winInfo.computerName;
+                osVersion = 'Windows';
+              }
+              final fallback = {
+                'login_time': DateTime.now().toUtc().toIso8601String(),
+                'device_name': deviceName,
+                'os_version': osVersion,
+                'organization_code': orgCode,
+              };
+              try {
+                await Supabase.instance.client
+                    .from('owner_logs')
+                    .insert(fallback);
+              } catch (e2) {
+                // If owner_logs mismatches columns, try without organization_code
+                if (e2.toString().contains('PGRST204') ||
+                    e2.toString().contains('column')) {
+                  fallback.remove('organization_code');
+                  await Supabase.instance.client
+                      .from('owner_logs')
+                      .insert(fallback);
+                } else {
+                  debugPrint('Error recording login fallback: $e2');
+                }
+              }
+            } catch (inner) {
+              debugPrint('Login event fallback failed: $inner');
+            }
+          } else {
+            debugPrint('Error recording login event: $e');
+          }
         }
         if ((employee.role ?? 'worker') == 'supervisor') {
           if (!mounted) return;
