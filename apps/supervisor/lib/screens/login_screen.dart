@@ -230,7 +230,13 @@ class _LoginScreenState extends State<LoginScreen> {
           };
           await Supabase.instance.client.from('login_logs').insert(payload);
         } catch (e) {
-          debugPrint('Error recording login event: $e');
+          // Silently fail if table doesn't exist to avoid confusing the user
+          if (e.toString().contains('PGRST205') ||
+              e.toString().contains('login_logs')) {
+            debugPrint('Login logging skipped: table login_logs not found');
+          } else {
+            debugPrint('Error recording login event: $e');
+          }
         }
 
         if (!mounted) return;
