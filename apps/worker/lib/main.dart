@@ -223,10 +223,12 @@ void main() async {
     await NotificationService.initialize();
 
     // Initialize Workmanager
-    Workmanager().initialize(
-      callbackDispatcher,
-      isInDebugMode: kDebugMode,
-    );
+    if (!kIsWeb) {
+      Workmanager().initialize(
+        callbackDispatcher,
+        isInDebugMode: kDebugMode,
+      );
+    }
 
     runApp(const WorkerApp());
   } catch (e) {

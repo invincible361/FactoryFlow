@@ -8,59 +8,70 @@ class NotificationService {
 
   static Future<void> initialize() async {
     if (kIsWeb) return;
-    if (!(Platform.isAndroid ||
-        Platform.isIOS ||
-        Platform.isMacOS ||
-        Platform.isWindows)) {
-      return;
-    }
 
-    const androidInit = AndroidInitializationSettings('ic_notification');
-    const iosInit = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
-    const initSettings = InitializationSettings(
-      android: androidInit,
-      iOS: iosInit,
-      macOS: iosInit,
-    );
+    // Use a try-catch and check kIsWeb again just to be safe,
+    // although kIsWeb should be enough to skip Platform calls.
+    try {
+      if (!(Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isMacOS ||
+          Platform.isWindows)) {
+        return;
+      }
 
-    await _notificationsPlugin.initialize(initSettings);
-
-    if (Platform.isAndroid) {
-      // Create notification channel
-      const channel = AndroidNotificationChannel(
-        'factory_flow_channel',
-        'FactoryFlow Notifications',
-        description: 'Notifications for FactoryFlow tasks and alerts',
-        importance: Importance.max,
+      const androidInit = AndroidInitializationSettings('ic_notification');
+      const iosInit = DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
+      const initSettings = InitializationSettings(
+        android: androidInit,
+        iOS: iosInit,
+        macOS: iosInit,
       );
 
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.createNotificationChannel(channel);
+      await _notificationsPlugin.initialize(initSettings);
+
+      if (Platform.isAndroid) {
+        // Create notification channel
+        const channel = AndroidNotificationChannel(
+          'factory_flow_channel',
+          'FactoryFlow Notifications',
+          description: 'Notifications for FactoryFlow tasks and alerts',
+          importance: Importance.max,
+        );
+
+        await _notificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.createNotificationChannel(channel);
+      }
+    } catch (e) {
+      debugPrint('NotificationService initialization error: $e');
     }
   }
 
   static Future<void> requestPermissions() async {
     if (kIsWeb) return;
 
-    if (Platform.isAndroid) {
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.requestNotificationsPermission();
-    } else if (Platform.isIOS) {
-      await _notificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin
-          >()
-          ?.requestPermissions(alert: true, badge: true, sound: true);
+    try {
+      if (Platform.isAndroid) {
+        await _notificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.requestNotificationsPermission();
+      } else if (Platform.isIOS) {
+        await _notificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin
+            >()
+            ?.requestPermissions(alert: true, badge: true, sound: true);
+      }
+    } catch (e) {
+      debugPrint('NotificationService requestPermissions error: $e');
     }
   }
 
@@ -71,14 +82,15 @@ class NotificationService {
     String? payload,
   }) async {
     if (kIsWeb) return;
-    if (!(Platform.isAndroid ||
-        Platform.isIOS ||
-        Platform.isMacOS ||
-        Platform.isWindows)) {
-      return;
-    }
 
     try {
+      if (!(Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isMacOS ||
+          Platform.isWindows)) {
+        return;
+      }
+
       final androidDetails = AndroidNotificationDetails(
         'factory_flow_channel',
         'FactoryFlow Notifications',
@@ -101,7 +113,7 @@ class NotificationService {
         payload: payload,
       );
     } catch (e) {
-      debugPrint('NotificationService: Error showing notification: $e');
+      debugPrint('NotificationService showNotification error: $e');
     }
   }
 }

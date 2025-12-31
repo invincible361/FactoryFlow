@@ -12,8 +12,9 @@ class UpdateService {
   static Future<Map<String, dynamic>?> fetchVersionData(String appType) async {
     try {
       // Try app-specific version first
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
       String versionUrl =
-          'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/apps/$appType/version.json';
+          'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/apps/$appType/version.json?t=$timestamp';
       debugPrint('UpdateService: Fetching version data from: $versionUrl');
       var response = await http.get(Uri.parse(versionUrl));
       debugPrint('UpdateService: Response status code: ${response.statusCode}');
@@ -29,7 +30,7 @@ class UpdateService {
           'UpdateService: App-specific version not found, trying root version.json',
         );
         versionUrl =
-            'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/version.json';
+            'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/version.json?t=$timestamp';
         debugPrint('UpdateService: Fetching version data from: $versionUrl');
         response = await http.get(Uri.parse(versionUrl));
         debugPrint(
