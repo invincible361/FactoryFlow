@@ -12,3 +12,5 @@ build/
 # APK files
 *.apk
 FactoryFlow.apk
+apps/
+packages/
