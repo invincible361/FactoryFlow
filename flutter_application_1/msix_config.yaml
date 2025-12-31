@@ -1,7 +1,0 @@
-display_name: FactoryFlow 
-publisher_display_name: FactoryFlow 
-identity_name: com.factoryflow.app 
-msix_version: 1.0.0.0 
-logo_path: assets/images/logo.png 
-capabilities: internetClient 
-install_certificate: false
