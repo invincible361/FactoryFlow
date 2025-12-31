@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:factoryflow_core/factoryflow_core.dart';
@@ -224,22 +223,19 @@ void main() async {
 
     // Initialize Workmanager
     if (!kIsWeb) {
-      Workmanager().initialize(
-        callbackDispatcher,
-        isInDebugMode: kDebugMode,
-      );
+      Workmanager().initialize(callbackDispatcher);
     }
 
     runApp(const WorkerApp());
   } catch (e) {
     debugPrint('Initialization error: $e');
-    runApp(MaterialApp(
-      home: Scaffold(
-        body: Center(
-          child: Text('Failed to initialize app: $e'),
+    runApp(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(child: Text('Failed to initialize app: $e')),
         ),
       ),
-    ));
+    );
   }
 }
 

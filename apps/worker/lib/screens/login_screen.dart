@@ -42,57 +42,6 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _recordOwnerLogin(String organizationCode) async {
-    final deviceInfo = DeviceInfoPlugin();
-    String deviceName = 'Unknown Device';
-    String osVersion = 'Unknown OS';
-
-    try {
-      if (kIsWeb) {
-        final webInfo = await deviceInfo.webBrowserInfo;
-        deviceName = '${webInfo.browserName.name} on ${webInfo.platform}';
-        osVersion = webInfo.userAgent ?? 'Unknown Web UserAgent';
-      } else if (io.Platform.isAndroid) {
-        final androidInfo = await deviceInfo.androidInfo;
-        deviceName = '${androidInfo.manufacturer} ${androidInfo.model}';
-        osVersion = 'Android ${androidInfo.version.release}';
-      } else if (io.Platform.isIOS) {
-        final iosInfo = await deviceInfo.iosInfo;
-        deviceName = '${iosInfo.name} ${iosInfo.systemName}';
-        osVersion = iosInfo.systemVersion;
-      } else if (io.Platform.isMacOS) {
-        final macInfo = await deviceInfo.macOsInfo;
-        deviceName = macInfo.model;
-        osVersion = 'macOS ${macInfo.osRelease}';
-      } else if (io.Platform.isWindows) {
-        final winInfo = await deviceInfo.windowsInfo;
-        deviceName = winInfo.computerName;
-        osVersion = 'Windows';
-      }
-
-      final payload = {
-        'login_time': DateTime.now().toIso8601String(),
-        'device_name': deviceName,
-        'os_version': osVersion,
-        'organization_code': organizationCode,
-      };
-      try {
-        await Supabase.instance.client.from('owner_logs').insert(payload);
-      } catch (e) {
-        if (e.toString().contains('PGRST204') ||
-            e.toString().contains('column') ||
-            e.toString().contains('missing')) {
-          payload.remove('organization_code');
-          await Supabase.instance.client.from('owner_logs').insert(payload);
-        } else {
-          rethrow;
-        }
-      }
-    } catch (e) {
-      debugPrint('Error logging owner login: $e');
-    }
-  }
-
   void _login() async {
     if (_formKey.currentState!.validate()) {
       setState(() {

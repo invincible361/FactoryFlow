@@ -19,7 +19,6 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   final _orgCodeController = TextEditingController();
-  final LocationService _locationService = LocationService();
   bool _isLoading = false;
   String _appVersion = '';
   bool _obscurePassword = true;
@@ -120,9 +119,6 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         final ownerUser = orgResp['owner_username']?.toString() ?? '';
         final ownerPass = orgResp['owner_password']?.toString() ?? '';
-        final orgLat = (orgResp['latitude'] ?? 0.0) * 1.0;
-        final orgLng = (orgResp['longitude'] ?? 0.0) * 1.0;
-        final orgRadius = (orgResp['radius_meters'] ?? 500.0) * 1.0;
 
         if (username == ownerUser && password == ownerPass) {
           await _recordOwnerLogin(orgCode);
@@ -217,16 +213,14 @@ class _LoginScreenState extends State<LoginScreen> {
                       children: [
                         Image.asset(
                           'assets/images/logo.png',
-                          height:
-                              MediaQuery.of(context).orientation ==
+                          height: MediaQuery.of(context).orientation ==
                                   Orientation.landscape
                               ? 80
                               : 120,
                           errorBuilder: (context, error, stackTrace) {
                             return Icon(
                               Icons.factory,
-                              size:
-                                  MediaQuery.of(context).orientation ==
+                              size: MediaQuery.of(context).orientation ==
                                       Orientation.landscape
                                   ? 60
                                   : 80,

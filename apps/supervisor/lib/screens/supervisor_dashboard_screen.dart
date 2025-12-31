@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:factoryflow_core/factoryflow_core.dart';
 
@@ -22,12 +23,191 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   String? _selectedWorkerId;
   DateTimeRange? _dateRange;
   String? _photoUrl;
+  String _currentShift = 'Detecting...';
+  String _currentShiftTime = '';
+  bool? _isInside;
+  Timer? _statusTimer;
+  double? _orgLat;
+  double? _orgLng;
+  double? _orgRadius;
 
   @override
   void initState() {
     super.initState();
     _fetchSupervisorPhoto();
+    _fetchOrgConfig().then((_) => _updateStatus());
     _fetchLogs();
+    _statusTimer = Timer.periodic(
+      const Duration(minutes: 2),
+      (t) => _updateStatus(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _statusTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _fetchOrgConfig() async {
+    try {
+      final org = await _supabase
+          .from('organizations')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .maybeSingle();
+      if (org != null && mounted) {
+        setState(() {
+          _orgLat = (org['latitude'] ?? 0.0) * 1.0;
+          _orgLng = (org['longitude'] ?? 0.0) * 1.0;
+          _orgRadius = (org['radius_meters'] ?? 500.0) * 1.0;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching org config: $e');
+    }
+  }
+
+  Future<void> _updateStatus() async {
+    if (!mounted) return;
+
+    // 1. Update Shift
+    try {
+      final now = DateTime.now();
+      final shiftsResp = await _supabase
+          .from('shifts')
+          .select()
+          .eq('organization_code', widget.organizationCode);
+
+      debugPrint(
+        'DEBUG: Found ${shiftsResp.length} shifts for org ${widget.organizationCode}',
+      );
+
+      String foundShift = 'No Active Shift';
+      String foundShiftTime = '';
+
+      for (var s in (shiftsResp as List)) {
+        try {
+          final startStr = (s['start_time'] as String).trim();
+          final endStr = (s['end_time'] as String).trim();
+          debugPrint(
+            'DEBUG: Checking shift "${s['name']}" : $startStr to $endStr',
+          );
+
+          // Try multiple formats
+          DateTime? startTime;
+          DateTime? endTime;
+          DateTime? nowTimeParsed;
+
+          // Re-ordered formats to prioritize AM/PM if present
+          final formats = [
+            DateFormat("hh:mm a"),
+            DateFormat("h:mm a"),
+            DateFormat("HH:mm"),
+            DateFormat("H:mm"),
+            DateFormat("HH:mm:ss"),
+          ];
+
+          for (var fmt in formats) {
+            try {
+              final sParsed = fmt.parse(startStr);
+              final eParsed = fmt.parse(endStr);
+              // If both parse successfully with the same format, we use it
+              startTime = sParsed;
+              endTime = eParsed;
+              nowTimeParsed = fmt.parse(fmt.format(now));
+              break;
+            } catch (_) {
+              continue;
+            }
+          }
+
+          if (startTime != null && endTime != null && nowTimeParsed != null) {
+            bool isActive = false;
+            // Normalize all to the same date for comparison
+            final baseDate = DateTime(2000, 1, 1);
+            final start = DateTime(
+              baseDate.year,
+              baseDate.month,
+              baseDate.day,
+              startTime.hour,
+              startTime.minute,
+            );
+            var end = DateTime(
+              baseDate.year,
+              baseDate.month,
+              baseDate.day,
+              endTime.hour,
+              endTime.minute,
+            );
+            final current = DateTime(
+              baseDate.year,
+              baseDate.month,
+              baseDate.day,
+              nowTimeParsed.hour,
+              nowTimeParsed.minute,
+            );
+
+            if (end.isBefore(start)) {
+              // Overnight shift
+              isActive =
+                  current.isAfter(start) ||
+                  current.isBefore(end) ||
+                  current.isAtSameMomentAs(start) ||
+                  current.isAtSameMomentAs(end);
+              debugPrint(
+                'DEBUG: Overnight shift check: $current vs $start-$end -> $isActive',
+              );
+            } else {
+              isActive =
+                  (current.isAfter(start) || current.isAtSameMomentAs(start)) &&
+                  (current.isBefore(end) || current.isAtSameMomentAs(end));
+              debugPrint(
+                'DEBUG: Normal shift check: $current vs $start-$end -> $isActive',
+              );
+            }
+
+            if (isActive) {
+              foundShift = s['name'] ?? 'Unnamed Shift';
+              foundShiftTime = '$startStr - $endStr';
+              debugPrint('DEBUG: Found active shift: $foundShift');
+              break;
+            }
+          } else {
+            debugPrint(
+              'DEBUG: Failed to parse times for shift ${s['name']}. Start: $startStr, End: $endStr',
+            );
+          }
+        } catch (e) {
+          debugPrint('Error parsing shift $s: $e');
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _currentShift = foundShift;
+          _currentShiftTime = foundShiftTime;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error updating shift: $e');
+    }
+
+    // 2. Update Location
+    try {
+      final pos = await LocationService().getCurrentLocation();
+      if (_orgLat != null && _orgLng != null && _orgRadius != null) {
+        final inside = LocationService().isInside(
+          pos,
+          _orgLat!,
+          _orgLng!,
+          _orgRadius!,
+        );
+        if (mounted) setState(() => _isInside = inside);
+      }
+    } catch (e) {
+      debugPrint('Error updating location: $e');
+    }
   }
 
   String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
@@ -218,6 +398,80 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     }
   }
 
+  Widget _metricTile(String label, String value, Color color, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.black12),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 24, color: Colors.black87),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusHeader() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16.0),
+      child: GridView.count(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 2.0,
+        children: [
+          _metricTile(
+            'Current Shift',
+            _currentShift,
+            Colors.blue.shade50,
+            Icons.schedule,
+          ),
+          _metricTile(
+            'Shift Timings',
+            _currentShiftTime.isEmpty ? 'N/A' : _currentShiftTime,
+            Colors.orange.shade50,
+            Icons.timer,
+          ),
+          _metricTile(
+            'Location Status',
+            _isInside == null
+                ? 'Determining...'
+                : (_isInside! ? 'Inside Factory' : 'Outside Factory'),
+            _isInside == true ? Colors.green.shade50 : Colors.red.shade50,
+            _isInside == true ? Icons.location_on : Icons.location_off,
+          ),
+          _metricTile(
+            'Current Time',
+            DateFormat('hh:mm a').format(DateTime.now()),
+            Colors.teal.shade50,
+            Icons.access_time,
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -253,47 +507,54 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _logs.isEmpty
-          ? const Center(child: Text('No pending logs to verify'))
-          : ListView.builder(
-              itemCount: _logs.length,
-              itemBuilder: (context, index) {
-                final log = _logs[index];
-                final worker = log['workers'] as Map<String, dynamic>?;
-                final workerName =
-                    worker?['name'] ??
-                    (log['worker_id']?.toString() ?? 'Unknown');
-                return Card(
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  child: ListTile(
-                    title: Text('$workerName — ${log['operation']}'),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Machine: ${log['machine_id']} | Item: ${log['item_id']}',
+      body: Column(
+        children: [
+          _buildStatusHeader(),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _logs.isEmpty
+                ? const Center(child: Text('No pending logs to verify'))
+                : ListView.builder(
+                    itemCount: _logs.length,
+                    itemBuilder: (context, index) {
+                      final log = _logs[index];
+                      final worker = log['workers'] as Map<String, dynamic>?;
+                      final workerName =
+                          worker?['name'] ??
+                          (log['worker_id']?.toString() ?? 'Unknown');
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
                         ),
-                        Text('Quantity: ${log['quantity']}'),
-                        Text(
-                          'Time: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} - ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                        child: ListTile(
+                          title: Text('$workerName — ${log['operation']}'),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Machine: ${log['machine_id']} | Item: ${log['item_id']}',
+                              ),
+                              Text('Quantity: ${log['quantity']}'),
+                              Text(
+                                'Time: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} - ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                              ),
+                              if ((log['remarks'] ?? '').toString().isNotEmpty)
+                                Text('Remarks: ${log['remarks']}'),
+                            ],
+                          ),
+                          trailing: ElevatedButton(
+                            onPressed: () => _verifyLog(log),
+                            child: const Text('Verify'),
+                          ),
                         ),
-                        if ((log['remarks'] ?? '').toString().isNotEmpty)
-                          Text('Remarks: ${log['remarks']}'),
-                      ],
-                    ),
-                    trailing: ElevatedButton(
-                      onPressed: () => _verifyLog(log),
-                      child: const Text('Verify'),
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
+          ),
+        ],
+      ),
     );
   }
 }

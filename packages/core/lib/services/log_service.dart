@@ -106,7 +106,7 @@ class LogService {
               .update(fallbackPayload)
               .eq('id', logId);
           debugPrint(
-            'Verify fallback applied (missing supervisor_quantity column)',
+            'Supervisor verification completed (using fallback for missing quantity column)',
           );
           return;
         } catch (e2) {

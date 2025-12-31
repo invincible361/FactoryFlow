@@ -268,8 +268,8 @@ class _ProfileTabState extends State<ProfileTab> {
 
           // Reverse calculate acres for display
           double radius = double.tryParse(_radiusController.text) ?? 500;
-          _acreController.text = ((radius * radius * pi) / 4046.8564)
-              .toStringAsFixed(4);
+          _acreController.text =
+              ((radius * radius * pi) / 4046.8564).toStringAsFixed(4);
 
           _isLoading = false;
         });
@@ -326,9 +326,7 @@ class _ProfileTabState extends State<ProfileTab> {
   ) async {
     try {
       try {
-        await _supabase.storage
-            .from(bucket)
-            .uploadBinary(
+        await _supabase.storage.from(bucket).uploadBinary(
               fileName,
               bytes,
               fileOptions: FileOptions(contentType: contentType, upsert: true),
@@ -347,9 +345,7 @@ class _ProfileTabState extends State<ProfileTab> {
           }
 
           // Retry the upload
-          await _supabase.storage
-              .from(bucket)
-              .uploadBinary(
+          await _supabase.storage.from(bucket).uploadBinary(
                 fileName,
                 bytes,
                 fileOptions: FileOptions(
@@ -390,19 +386,16 @@ class _ProfileTabState extends State<ProfileTab> {
     try {
       final logoUrl = await _uploadLogo();
 
-      await _supabase
-          .from('organizations')
-          .update({
-            'organization_name': _orgNameController.text,
-            'factory_name': _facNameController.text,
-            'address': _addressController.text,
-            'latitude': double.tryParse(_latController.text) ?? 0,
-            'longitude': double.tryParse(_lngController.text) ?? 0,
-            'radius_meters': double.tryParse(_radiusController.text) ?? 500,
-            'owner_password': _passwordController.text,
-            'logo_url': logoUrl,
-          })
-          .eq('organization_code', widget.organizationCode);
+      await _supabase.from('organizations').update({
+        'organization_name': _orgNameController.text,
+        'factory_name': _facNameController.text,
+        'address': _addressController.text,
+        'latitude': double.tryParse(_latController.text) ?? 0,
+        'longitude': double.tryParse(_lngController.text) ?? 0,
+        'radius_meters': double.tryParse(_radiusController.text) ?? 500,
+        'owner_password': _passwordController.text,
+        'logo_url': logoUrl,
+      }).eq('organization_code', widget.organizationCode);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -469,18 +462,18 @@ class _ProfileTabState extends State<ProfileTab> {
                       borderRadius: BorderRadius.circular(8),
                       child: _logoFile != null
                           ? (kIsWeb
-                                ? Image.memory(
-                                    _logoFile!.bytes!,
-                                    height: 60,
-                                    width: 60,
-                                    fit: BoxFit.cover,
-                                  )
-                                : Image.file(
-                                    io.File(_logoFile!.path!),
-                                    height: 60,
-                                    width: 60,
-                                    fit: BoxFit.cover,
-                                  ))
+                              ? Image.memory(
+                                  _logoFile!.bytes!,
+                                  height: 60,
+                                  width: 60,
+                                  fit: BoxFit.cover,
+                                )
+                              : Image.file(
+                                  io.File(_logoFile!.path!),
+                                  height: 60,
+                                  width: 60,
+                                  fit: BoxFit.cover,
+                                ))
                           : Image.network(
                               _logoUrlController.text,
                               height: 60,
@@ -715,8 +708,7 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
         itemCount: _events.length,
         itemBuilder: (context, index) {
           final event = _events[index];
-          final workerName =
-              event['worker_name'] ??
+          final workerName = event['worker_name'] ??
               (event['workers'] is Map
                   ? (event['workers'] as Map)['name']
                   : 'Unknown Worker');
@@ -945,8 +937,7 @@ class _AttendanceTabState extends State<AttendanceTab> {
   Future<void> _selectDateRange() async {
     final DateTimeRange? picked = await showDateRangePicker(
       context: context,
-      initialDateRange:
-          _selectedDateRange ??
+      initialDateRange: _selectedDateRange ??
           DateTimeRange(
             start: DateTime.now().subtract(const Duration(days: 7)),
             end: DateTime.now(),
@@ -1011,8 +1002,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
             TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
             TextCellValue('N/A'),
             TextCellValue('N/A'),
-            IntCellValue(0),
-            IntCellValue(0),
+            const IntCellValue(0),
+            const IntCellValue(0),
             TextCellValue(record['remarks'] ?? ''),
           ]);
         } else {
@@ -1256,8 +1247,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
                     child: Text(
                       'Daily Attendance History',
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                            fontWeight: FontWeight.bold,
+                          ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -1359,74 +1350,78 @@ class _AttendanceTabState extends State<AttendanceTab> {
         _isLoading
             ? const Center(child: CircularProgressIndicator())
             : _attendance.isEmpty
-            ? const Center(child: Text('No attendance records found.'))
-            : ListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: _attendance.length,
-                itemBuilder: (context, index) {
-                  final record = _attendance[index];
-                  final worker = record['workers'] as Map<String, dynamic>?;
-                  final workerName = worker?['name'] ?? 'Unknown Worker';
-                  final status = record['status'] ?? 'On Time';
+                ? const Center(child: Text('No attendance records found.'))
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _attendance.length,
+                    itemBuilder: (context, index) {
+                      final record = _attendance[index];
+                      final worker = record['workers'] as Map<String, dynamic>?;
+                      final workerName = worker?['name'] ?? 'Unknown Worker';
+                      final status = record['status'] ?? 'On Time';
 
-                  Color statusColor = Colors.green;
-                  if (status.contains('Early Leave')) {
-                    statusColor = Colors.orange;
-                  }
-                  if (status.contains('Overtime')) statusColor = Colors.blue;
-                  if (status == 'Both') statusColor = Colors.purple;
+                      Color statusColor = Colors.green;
+                      if (status.contains('Early Leave')) {
+                        statusColor = Colors.orange;
+                      }
+                      if (status.contains('Overtime')) {
+                        statusColor = Colors.blue;
+                      }
+                      if (status == 'Both') {
+                        statusColor = Colors.purple;
+                      }
 
-                  return Card(
-                    margin: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
-                    ),
-                    child: ListTile(
-                      onTap: () => _showAttendanceDetails(record),
-                      leading: CircleAvatar(
-                        backgroundColor: statusColor.withValues(alpha: 0.1),
-                        child: Icon(Icons.person, color: statusColor),
-                      ),
-                      title: Text(
-                        workerName,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Date: ${record['date']} | Shift: ${record['shift_name'] ?? 'N/A'}',
-                          ),
-                          Text(
-                            'In: ${TimeUtils.formatTo12Hour(record['check_in'], format: 'hh:mm a')} | '
-                            'Out: ${TimeUtils.formatTo12Hour(record['check_out'], format: 'hh:mm a')}',
-                          ),
-                        ],
-                      ),
-                      trailing: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
                         ),
-                        decoration: BoxDecoration(
-                          color: statusColor.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: statusColor),
-                        ),
-                        child: Text(
-                          status,
-                          style: TextStyle(
-                            color: statusColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
+                        child: ListTile(
+                          onTap: () => _showAttendanceDetails(record),
+                          leading: CircleAvatar(
+                            backgroundColor: statusColor.withValues(alpha: 0.1),
+                            child: Icon(Icons.person, color: statusColor),
+                          ),
+                          title: Text(
+                            workerName,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Date: ${record['date']} | Shift: ${record['shift_name'] ?? 'N/A'}',
+                              ),
+                              Text(
+                                'In: ${TimeUtils.formatTo12Hour(record['check_in'], format: 'hh:mm a')} | '
+                                'Out: ${TimeUtils.formatTo12Hour(record['check_out'], format: 'hh:mm a')}',
+                              ),
+                            ],
+                          ),
+                          trailing: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: statusColor.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: statusColor),
+                            ),
+                            child: Text(
+                              status,
+                              style: TextStyle(
+                                color: statusColor,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
-                  );
-                },
-              ),
+                      );
+                    },
+                  ),
       ],
     );
   }
@@ -1718,7 +1713,7 @@ class _ReportsTabState extends State<ReportsTab> {
         ).subtract(Duration(days: t.weekday - 1));
         final weeksAgo =
             DateTime(now.year, now.month, now.day).difference(wStart).inDays ~/
-            7;
+                7;
         final pos = 7 - weeksAgo;
         final diff = (l['performance_diff'] ?? 0) as int;
         if (diff > 0 && pos >= 0 && pos < 8) {
@@ -1949,8 +1944,7 @@ class _ReportsTabState extends State<ReportsTab> {
                                 context: context,
                                 firstDate: DateTime(2023),
                                 lastDate: DateTime.now(),
-                                initialDateRange:
-                                    customRange ??
+                                initialDateRange: customRange ??
                                     DateTimeRange(
                                       start: DateTime.now().subtract(
                                         const Duration(days: 7),
@@ -2288,10 +2282,10 @@ class _ReportsTabState extends State<ReportsTab> {
       final groupKey = groupBy == 'Worker'
           ? (l['worker_id'] ?? '').toString()
           : groupBy == 'Machine'
-          ? (l['machine_id'] ?? '').toString()
-          : groupBy == 'Item'
-          ? (l['item_id'] ?? '').toString()
-          : (l['operation'] ?? '').toString();
+              ? (l['machine_id'] ?? '').toString()
+              : groupBy == 'Item'
+                  ? (l['item_id'] ?? '').toString()
+                  : (l['operation'] ?? '').toString();
       final itemId = (l['item_id'] ?? '').toString();
       final operation = (l['operation'] ?? '').toString();
       final qty = (l['quantity'] ?? 0) as int;
@@ -2441,14 +2435,14 @@ class _ReportsTabState extends State<ReportsTab> {
               physics: const NeverScrollableScrollPhysics(),
               crossAxisCount:
                   MediaQuery.of(context).orientation == Orientation.landscape
-                  ? 4
-                  : 2,
+                      ? 4
+                      : 2,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
               childAspectRatio:
                   MediaQuery.of(context).orientation == Orientation.landscape
-                  ? 2.8
-                  : 2.2,
+                      ? 2.8
+                      : 2.2,
               children: [
                 _metricTile(
                   'Extra Units (24h)',
@@ -2469,11 +2463,11 @@ class _ReportsTabState extends State<ReportsTab> {
                     final summary = recent.isEmpty
                         ? 'No data'
                         : recent
-                              .map(
-                                (e) =>
-                                    '${e['operation']} → ${e['item_id']} (${e['total_qty']})',
-                              )
-                              .join(' | ');
+                            .map(
+                              (e) =>
+                                  '${e['operation']} → ${e['item_id']} (${e['total_qty']})',
+                            )
+                            .join(' | ');
                     return _metricTile(
                       'Top Items per Operation',
                       summary,
@@ -2488,12 +2482,12 @@ class _ReportsTabState extends State<ReportsTab> {
                     final summary = topMachines.isEmpty
                         ? 'No data'
                         : topMachines
-                              .take(4)
-                              .map(
-                                (e) =>
-                                    '${e['machine_id']} (${e['count']} logs, ${e['qty']} qty)',
-                              )
-                              .join(' | ');
+                            .take(4)
+                            .map(
+                              (e) =>
+                                  '${e['machine_id']} (${e['count']} logs, ${e['qty']} qty)',
+                            )
+                            .join(' | ');
                     return _metricTile(
                       'Most Used Machines',
                       summary,
@@ -2508,12 +2502,12 @@ class _ReportsTabState extends State<ReportsTab> {
                     final summary = topItems.isEmpty
                         ? 'No data'
                         : topItems
-                              .take(4)
-                              .map(
-                                (e) =>
-                                    '${e['item_id']} (${e['count']} logs, ${e['qty']} qty)',
-                              )
-                              .join(' | ');
+                            .take(4)
+                            .map(
+                              (e) =>
+                                  '${e['item_id']} (${e['count']} logs, ${e['qty']} qty)',
+                            )
+                            .join(' | ');
                     return _metricTile(
                       'Most Used Items',
                       summary,
@@ -2528,12 +2522,12 @@ class _ReportsTabState extends State<ReportsTab> {
                     final summary = topOps.isEmpty
                         ? 'No data'
                         : topOps
-                              .take(4)
-                              .map(
-                                (e) =>
-                                    '${e['operation']} (${e['count']} logs, ${e['qty']} qty)',
-                              )
-                              .join(' | ');
+                            .take(4)
+                            .map(
+                              (e) =>
+                                  '${e['operation']} (${e['count']} logs, ${e['qty']} qty)',
+                            )
+                            .join(' | ');
                     return _metricTile(
                       'Most Performed Operations',
                       summary,
@@ -2656,8 +2650,7 @@ class _ReportsTabState extends State<ReportsTab> {
                 ),
                 const SizedBox(height: 8),
                 SizedBox(
-                  height:
-                      MediaQuery.of(context).orientation ==
+                  height: MediaQuery.of(context).orientation ==
                           Orientation.landscape
                       ? 180
                       : 240,
@@ -2678,7 +2671,8 @@ class _ReportsTabState extends State<ReportsTab> {
                           },
                         ),
                       ),
-                      gridData: FlGridData(show: true, drawVerticalLine: false),
+                      gridData:
+                          const FlGridData(show: true, drawVerticalLine: false),
                       titlesData: FlTitlesData(
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
@@ -2716,16 +2710,16 @@ class _ReportsTabState extends State<ReportsTab> {
                             },
                           ),
                         ),
-                        leftTitles: AxisTitles(
+                        leftTitles: const AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
                             reservedSize: 40,
                           ),
                         ),
-                        topTitles: AxisTitles(
+                        topTitles: const AxisTitles(
                           sideTitles: SideTitles(showTitles: false),
                         ),
-                        rightTitles: AxisTitles(
+                        rightTitles: const AxisTitles(
                           sideTitles: SideTitles(showTitles: false),
                         ),
                       ),
@@ -2736,7 +2730,7 @@ class _ReportsTabState extends State<ReportsTab> {
                           isCurved: true,
                           color: Colors.blueAccent,
                           barWidth: 3,
-                          dotData: FlDotData(show: true),
+                          dotData: const FlDotData(show: true),
                         ),
                       ],
                     ),
@@ -2792,15 +2786,14 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height:
-                        MediaQuery.of(context).orientation ==
+                    height: MediaQuery.of(context).orientation ==
                             Orientation.landscape
                         ? 180
                         : 240,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
-                        gridData: FlGridData(
+                        gridData: const FlGridData(
                           show: true,
                           drawVerticalLine: false,
                         ),
@@ -2821,16 +2814,16 @@ class _ReportsTabState extends State<ReportsTab> {
                               },
                             ),
                           ),
-                          leftTitles: AxisTitles(
+                          leftTitles: const AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
                               reservedSize: 40,
                             ),
                           ),
-                          topTitles: AxisTitles(
+                          topTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
-                          rightTitles: AxisTitles(
+                          rightTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
                         ),
@@ -2843,15 +2836,14 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height:
-                        MediaQuery.of(context).orientation ==
+                    height: MediaQuery.of(context).orientation ==
                             Orientation.landscape
                         ? 180
                         : 240,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
-                        gridData: FlGridData(
+                        gridData: const FlGridData(
                           show: true,
                           drawVerticalLine: false,
                         ),
@@ -2872,16 +2864,16 @@ class _ReportsTabState extends State<ReportsTab> {
                               },
                             ),
                           ),
-                          leftTitles: AxisTitles(
+                          leftTitles: const AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
                               reservedSize: 40,
                             ),
                           ),
-                          topTitles: AxisTitles(
+                          topTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
-                          rightTitles: AxisTitles(
+                          rightTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
                         ),
@@ -2894,15 +2886,14 @@ class _ReportsTabState extends State<ReportsTab> {
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
                   SizedBox(
-                    height:
-                        MediaQuery.of(context).orientation ==
+                    height: MediaQuery.of(context).orientation ==
                             Orientation.landscape
                         ? 150
                         : 200,
                     child: BarChart(
                       BarChartData(
                         barGroups: _buildExtraWeekGroups(_extraWeekLogs),
-                        gridData: FlGridData(
+                        gridData: const FlGridData(
                           show: true,
                           drawVerticalLine: false,
                         ),
@@ -2923,16 +2914,16 @@ class _ReportsTabState extends State<ReportsTab> {
                               },
                             ),
                           ),
-                          leftTitles: AxisTitles(
+                          leftTitles: const AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
                               reservedSize: 40,
                             ),
                           ),
-                          topTitles: AxisTitles(
+                          topTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
-                          rightTitles: AxisTitles(
+                          rightTitles: const AxisTitles(
                             sideTitles: SideTitles(showTitles: false),
                           ),
                         ),
@@ -2950,164 +2941,167 @@ class _ReportsTabState extends State<ReportsTab> {
                     child: Center(child: CircularProgressIndicator()),
                   )
                 : _logs.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(24.0),
-                    child: Center(child: Text('No work done.')),
-                  )
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: _logs.length,
-                    itemBuilder: (context, index) {
-                      final log = _logs[index];
-                      final employeeName = log['employeeName'] ?? 'Unknown';
-                      final itemName = log['itemName'] ?? 'Unknown';
-                      final remarks = log['remarks'] as String?;
+                    ? const Padding(
+                        padding: EdgeInsets.all(24.0),
+                        child: Center(child: Text('No work done.')),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: _logs.length,
+                        itemBuilder: (context, index) {
+                          final log = _logs[index];
+                          final employeeName = log['employeeName'] ?? 'Unknown';
+                          final itemName = log['itemName'] ?? 'Unknown';
+                          final remarks = log['remarks'] as String?;
 
-                      String workingHours = '';
-                      String inOutTime = '';
+                          String workingHours = '';
+                          String inOutTime = '';
 
-                      if (log['start_time'] != null) {
-                        final inT = TimeUtils.formatTo12Hour(
-                          log['start_time'],
-                          format: 'hh:mm a',
-                        );
-                        if (log['end_time'] != null) {
-                          final outT = TimeUtils.formatTo12Hour(
-                            log['end_time'],
-                            format: 'hh:mm a',
-                          );
-                          inOutTime = 'In: $inT | Out: $outT';
-
-                          try {
-                            final st = TimeUtils.parseToLocal(
+                          if (log['start_time'] != null) {
+                            final inT = TimeUtils.formatTo12Hour(
                               log['start_time'],
+                              format: 'hh:mm a',
                             );
-                            final et = TimeUtils.parseToLocal(log['end_time']);
-                            final duration = et.difference(st);
-                            final hours = duration.inHours;
-                            final minutes = duration.inMinutes.remainder(60);
-                            workingHours = 'Total: ${hours}h ${minutes}m';
-                          } catch (_) {}
-                        } else {
-                          inOutTime = 'In: $inT | Out: -';
-                        }
-                      }
+                            if (log['end_time'] != null) {
+                              final outT = TimeUtils.formatTo12Hour(
+                                log['end_time'],
+                                format: 'hh:mm a',
+                              );
+                              inOutTime = 'In: $inT | Out: $outT';
 
-                      return ListTile(
-                        title: Text('$employeeName - $itemName'),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${log['operation']} | Worker Qty: ${log['quantity']} | Supervisor Qty: ${(log['supervisor_quantity'] ?? '-')}',
-                            ),
-                            if (log['target'] != null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2.0),
-                                child: Text(
-                                  'Efficiency: ${_computeEfficiency(log['quantity'] as int, log['target'] as int)}%',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.deepPurple,
-                                  ),
+                              try {
+                                final st = TimeUtils.parseToLocal(
+                                  log['start_time'],
+                                );
+                                final et =
+                                    TimeUtils.parseToLocal(log['end_time']);
+                                final duration = et.difference(st);
+                                final hours = duration.inHours;
+                                final minutes =
+                                    duration.inMinutes.remainder(60);
+                                workingHours = 'Total: ${hours}h ${minutes}m';
+                              } catch (_) {}
+                            } else {
+                              inOutTime = 'In: $inT | Out: -';
+                            }
+                          }
+
+                          return ListTile(
+                            title: Text('$employeeName - $itemName'),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${log['operation']} | Worker Qty: ${log['quantity']} | Supervisor Qty: ${(log['supervisor_quantity'] ?? '-')}',
                                 ),
-                              ),
-                            if (log['start_time'] != null ||
-                                log['end_time'] != null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2.0),
-                                child: Text(
-                                  'Start: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} | '
-                                  'End: ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                                if (log['target'] != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2.0),
+                                    child: Text(
+                                      'Efficiency: ${_computeEfficiency(log['quantity'] as int, log['target'] as int)}%',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.deepPurple,
+                                      ),
+                                    ),
+                                  ),
+                                if (log['start_time'] != null ||
+                                    log['end_time'] != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2.0),
+                                    child: Text(
+                                      'Start: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} | '
+                                      'End: ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
+                                if (inOutTime.isNotEmpty)
+                                  Text(
+                                    inOutTime,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                if (workingHours.isNotEmpty)
+                                  Text(
+                                    workingHours,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.blue,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                if (remarks != null && remarks.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 4.0),
+                                    child: Text(
+                                      'Remark: $remarks',
+                                      style: const TextStyle(
+                                        fontStyle: FontStyle.italic,
+                                        color: Colors.orange,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            trailing: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  TimeUtils.formatTo12Hour(
+                                    log['created_at'],
+                                    format: 'MM/dd hh:mm a',
+                                  ),
                                   style: const TextStyle(fontSize: 12),
                                 ),
-                              ),
-                            if (inOutTime.isNotEmpty)
-                              Text(
-                                inOutTime,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w500,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            if (workingHours.isNotEmpty)
-                              Text(
-                                workingHours,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            if (remarks != null && remarks.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4.0),
-                                child: Text(
-                                  'Remark: $remarks',
-                                  style: const TextStyle(
-                                    fontStyle: FontStyle.italic,
-                                    color: Colors.orange,
-                                    fontSize: 12,
+                                const SizedBox(height: 4),
+                                if ((log['verified_at'] ?? '') != '')
+                                  Text(
+                                    'Verified: ${TimeUtils.formatTo12Hour(log['verified_at'], format: 'MM/dd hh:mm a')}',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.green,
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        trailing: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(
-                              TimeUtils.formatTo12Hour(
-                                log['created_at'],
-                                format: 'MM/dd hh:mm a',
-                              ),
-                              style: const TextStyle(fontSize: 12),
+                                if ((log['verified_by'] ?? '') != '')
+                                  Text(
+                                    'By: ${log['verified_by']}',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.green,
+                                    ),
+                                  ),
+                                if ((log['is_verified'] ?? false) != true)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.amber.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: Colors.orange),
+                                    ),
+                                    child: const Text(
+                                      'Verification Awaited',
+                                      style: TextStyle(
+                                        color: Colors.orange,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
-                            const SizedBox(height: 4),
-                            if ((log['verified_at'] ?? '') != '')
-                              Text(
-                                'Verified: ${TimeUtils.formatTo12Hour(log['verified_at'], format: 'MM/dd hh:mm a')}',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.green,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            if ((log['verified_by'] ?? '') != '')
-                              Text(
-                                'By: ${log['verified_by']}',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.green,
-                                ),
-                              ),
-                            if ((log['is_verified'] ?? false) != true)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 4,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.amber.withValues(alpha: 0.2),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: Colors.orange),
-                                ),
-                                child: const Text(
-                                  'Verification Awaited',
-                                  style: TextStyle(
-                                    color: Colors.orange,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -3130,7 +3124,6 @@ class _EmployeesTabState extends State<EmployeesTab> {
   final _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _employeesList = [];
   bool _isLoading = true;
-  XFile? _newEmployeePhotoFile;
   Uint8List? _newEmployeePhotoBytes;
 
   final _employeeIdController = TextEditingController();
@@ -3213,7 +3206,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
             .eq('organization_code', widget.organizationCode.trim())
             .select();
 
-        if (res != null && (res as List).isNotEmpty) {
+        if ((res as List).isNotEmpty) {
           debugPrint('Successfully updated $col for $trimmedWorkerId');
           updated = true;
           break;
@@ -3262,7 +3255,6 @@ class _EmployeesTabState extends State<EmployeesTab> {
                   final bytes = await picked.readAsBytes();
                   if (mounted) {
                     setState(() {
-                      _newEmployeePhotoFile = picked;
                       _newEmployeePhotoBytes = bytes;
                     });
                   }
@@ -3282,7 +3274,6 @@ class _EmployeesTabState extends State<EmployeesTab> {
                   final bytes = await picked.readAsBytes();
                   if (mounted) {
                     setState(() {
-                      _newEmployeePhotoFile = picked;
                       _newEmployeePhotoBytes = bytes;
                     });
                   }
@@ -3303,9 +3294,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
   ) async {
     try {
       try {
-        await _supabase.storage
-            .from(bucket)
-            .uploadBinary(
+        await _supabase.storage.from(bucket).uploadBinary(
               fileName,
               bytes,
               fileOptions: FileOptions(contentType: contentType, upsert: true),
@@ -3321,9 +3310,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
             debugPrint('Error creating bucket $bucket: $ce');
             throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
           }
-          await _supabase.storage
-              .from(bucket)
-              .uploadBinary(
+          await _supabase.storage.from(bucket).uploadBinary(
                 fileName,
                 bytes,
                 fileOptions: FileOptions(
@@ -3456,7 +3443,6 @@ class _EmployeesTabState extends State<EmployeesTab> {
         ).showSnackBar(const SnackBar(content: Text('Employee added!')));
         _clearControllers();
         setState(() {
-          _newEmployeePhotoFile = null;
           _newEmployeePhotoBytes = null;
         });
         _fetchEmployees();
@@ -3489,14 +3475,13 @@ class _EmployeesTabState extends State<EmployeesTab> {
       text: employee['password'],
     );
     String roleEdit = 'worker';
-    String? photoUrlEdit =
-        (employee['photo_url'] ??
-                employee['avatar_url'] ??
-                employee['image_url'] ??
-                employee['imageurl'] ??
-                employee['photourl'] ??
-                employee['picture_url'])
-            ?.toString();
+    String? photoUrlEdit = (employee['photo_url'] ??
+            employee['avatar_url'] ??
+            employee['image_url'] ??
+            employee['imageurl'] ??
+            employee['photourl'] ??
+            employee['picture_url'])
+        ?.toString();
 
     showDialog(
       context: context,
@@ -3549,8 +3534,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
                         CircleAvatar(
                           radius: 20,
                           backgroundColor: Colors.grey[300],
-                          backgroundImage:
-                              (photoUrlEdit != null &&
+                          backgroundImage: (photoUrlEdit != null &&
                                   (photoUrlEdit?.isNotEmpty ?? false))
                               ? NetworkImage(photoUrlEdit!)
                               : null,
@@ -3577,17 +3561,17 @@ class _EmployeesTabState extends State<EmployeesTab> {
                                           source: ImageSource.gallery,
                                         );
                                         if (picked != null) {
-                                          final bytes = await picked
-                                              .readAsBytes();
+                                          final bytes =
+                                              await picked.readAsBytes();
                                           final fileName =
                                               'emp_${employee['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
                                           final url =
                                               await _uploadToBucketWithAutoCreate(
-                                                'profile_photos',
-                                                fileName,
-                                                bytes,
-                                                'image/png',
-                                              );
+                                            'profile_photos',
+                                            fileName,
+                                            bytes,
+                                            'image/png',
+                                          );
                                           if (url != null && ctx.mounted) {
                                             setLocalState(() {
                                               photoUrlEdit = url;
@@ -3606,17 +3590,17 @@ class _EmployeesTabState extends State<EmployeesTab> {
                                           source: ImageSource.camera,
                                         );
                                         if (picked != null) {
-                                          final bytes = await picked
-                                              .readAsBytes();
+                                          final bytes =
+                                              await picked.readAsBytes();
                                           final fileName =
                                               'emp_${employee['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
                                           final url =
                                               await _uploadToBucketWithAutoCreate(
-                                                'profile_photos',
-                                                fileName,
-                                                bytes,
-                                                'image/png',
-                                              );
+                                            'profile_photos',
+                                            fileName,
+                                            bytes,
+                                            'image/png',
+                                          );
                                           if (url != null && ctx.mounted) {
                                             setLocalState(() {
                                               photoUrlEdit = url;
@@ -3636,7 +3620,7 @@ class _EmployeesTabState extends State<EmployeesTab> {
                       ],
                     ),
                     const SizedBox(height: 10),
-                    Row(children: const [Text('Role: Worker')]),
+                    const Row(children: [Text('Role: Worker')]),
                   ],
                 ),
               ),
@@ -3831,8 +3815,8 @@ class _EmployeesTabState extends State<EmployeesTab> {
                         backgroundColor: Colors.grey[200],
                         backgroundImage:
                             (photoUrl != null && photoUrl.isNotEmpty)
-                            ? NetworkImage(photoUrl)
-                            : null,
+                                ? NetworkImage(photoUrl)
+                                : null,
                         child: (photoUrl == null || photoUrl.isEmpty)
                             ? const Icon(Icons.person, color: Colors.grey)
                             : null,
@@ -3882,7 +3866,6 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
   List<Map<String, dynamic>> _list = [];
   bool _isLoading = true;
   Map<String, dynamic>? _editingSupervisor;
-  XFile? _newSupervisorPhotoFile;
   Uint8List? _newSupervisorPhotoBytes;
 
   final _employeeIdController = TextEditingController();
@@ -3945,7 +3928,6 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                   final bytes = await picked.readAsBytes();
                   if (mounted) {
                     setState(() {
-                      _newSupervisorPhotoFile = picked;
                       _newSupervisorPhotoBytes = bytes;
                     });
                   }
@@ -3965,7 +3947,6 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                   final bytes = await picked.readAsBytes();
                   if (mounted) {
                     setState(() {
-                      _newSupervisorPhotoFile = picked;
                       _newSupervisorPhotoBytes = bytes;
                     });
                   }
@@ -3986,9 +3967,7 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
   ) async {
     try {
       try {
-        await _supabase.storage
-            .from(bucket)
-            .uploadBinary(
+        await _supabase.storage.from(bucket).uploadBinary(
               fileName,
               bytes,
               fileOptions: FileOptions(contentType: contentType, upsert: true),
@@ -4004,9 +3983,7 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
             debugPrint('Error creating bucket $bucket: $ce');
             throw 'Storage Error: Bucket "$bucket" is missing.\n\nPlease create a PUBLIC bucket named "$bucket" in your Supabase Storage dashboard to enable uploads.';
           }
-          await _supabase.storage
-              .from(bucket)
-              .uploadBinary(
+          await _supabase.storage.from(bucket).uploadBinary(
                 fileName,
                 bytes,
                 fileOptions: FileOptions(
@@ -4074,7 +4051,7 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
             .eq('organization_code', widget.organizationCode.trim())
             .select();
 
-        if (res != null && (res as List).isNotEmpty) {
+        if ((res as List).isNotEmpty) {
           debugPrint(
             'Successfully updated supervisor $col for $trimmedWorkerId',
           );
@@ -4193,7 +4170,6 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
         ).showSnackBar(const SnackBar(content: Text('Supervisor added!')));
         _clearControllers();
         setState(() {
-          _newSupervisorPhotoFile = null;
           _newSupervisorPhotoBytes = null;
         });
         _fetchSupervisors();
@@ -4223,14 +4199,13 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        String? photoUrlEdit =
-            (sup['photo_url'] ??
-                    sup['avatar_url'] ??
-                    sup['image_url'] ??
-                    sup['imageurl'] ??
-                    sup['photourl'] ??
-                    sup['picture_url'])
-                ?.toString();
+        String? photoUrlEdit = (sup['photo_url'] ??
+                sup['avatar_url'] ??
+                sup['image_url'] ??
+                sup['imageurl'] ??
+                sup['photourl'] ??
+                sup['picture_url'])
+            ?.toString();
         return StatefulBuilder(
           builder: (ctx, setLocalState) => AlertDialog(
             title: const Text('Edit Supervisor'),
@@ -4249,8 +4224,7 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                           CircleAvatar(
                             radius: 20,
                             backgroundColor: Colors.grey[300],
-                            backgroundImage:
-                                (photoUrlEdit != null &&
+                            backgroundImage: (photoUrlEdit != null &&
                                     (photoUrlEdit?.isNotEmpty ?? false))
                                 ? NetworkImage(photoUrlEdit!)
                                 : null,
@@ -4281,17 +4255,17 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                                             source: ImageSource.gallery,
                                           );
                                           if (picked != null) {
-                                            final bytes = await picked
-                                                .readAsBytes();
+                                            final bytes =
+                                                await picked.readAsBytes();
                                             final fileName =
                                                 'sup_${sup['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
                                             final url =
                                                 await _uploadToBucketWithAutoCreate(
-                                                  'profile_photos',
-                                                  fileName,
-                                                  bytes,
-                                                  'image/png',
-                                                );
+                                              'profile_photos',
+                                              fileName,
+                                              bytes,
+                                              'image/png',
+                                            );
                                             if (url != null && ctx.mounted) {
                                               setLocalState(() {
                                                 photoUrlEdit = url;
@@ -4310,17 +4284,17 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                                             source: ImageSource.camera,
                                           );
                                           if (picked != null) {
-                                            final bytes = await picked
-                                                .readAsBytes();
+                                            final bytes =
+                                                await picked.readAsBytes();
                                             final fileName =
                                                 'sup_${sup['worker_id']}_${DateTime.now().millisecondsSinceEpoch}.png';
                                             final url =
                                                 await _uploadToBucketWithAutoCreate(
-                                                  'profile_photos',
-                                                  fileName,
-                                                  bytes,
-                                                  'image/png',
-                                                );
+                                              'profile_photos',
+                                              fileName,
+                                              bytes,
+                                              'image/png',
+                                            );
                                             if (url != null && ctx.mounted) {
                                               setLocalState(() {
                                                 photoUrlEdit = url;
@@ -4376,7 +4350,7 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                         label: 'Password',
                       ),
                       const SizedBox(height: 10),
-                      Row(children: const [Text('Role: Supervisor')]),
+                      const Row(children: [Text('Role: Supervisor')]),
                     ],
                   ),
                 ),
@@ -4571,8 +4545,8 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                             backgroundColor: Colors.grey[200],
                             backgroundImage:
                                 (photoUrl != null && photoUrl.isNotEmpty)
-                                ? NetworkImage(photoUrl)
-                                : null,
+                                    ? NetworkImage(photoUrl)
+                                    : null,
                             child: (photoUrl == null || photoUrl.isEmpty)
                                 ? const Icon(Icons.person, color: Colors.grey)
                                 : null,
@@ -4674,21 +4648,20 @@ class _MachinesTabState extends State<MachinesTab> {
         agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
         agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
       }
-      final list =
-          agg.entries
-              .map(
-                (e) => <String, dynamic>{
-                  'machine_id': e.key,
-                  'count': e.value['count'] ?? 0,
-                  'qty': e.value['qty'] ?? 0,
-                },
-              )
-              .toList()
-            ..sort((a, b) {
-              final c = (b['count'] as int).compareTo(a['count'] as int);
-              if (c != 0) return c;
-              return (b['qty'] as int).compareTo(a['qty'] as int);
-            });
+      final list = agg.entries
+          .map(
+            (e) => <String, dynamic>{
+              'machine_id': e.key,
+              'count': e.value['count'] ?? 0,
+              'qty': e.value['qty'] ?? 0,
+            },
+          )
+          .toList()
+        ..sort((a, b) {
+          final c = (b['count'] as int).compareTo(a['count'] as int);
+          if (c != 0) return c;
+          return (b['qty'] as int).compareTo(a['qty'] as int);
+        });
       if (mounted) setState(() => _topUsage = list);
     } catch (_) {}
   }
@@ -4875,9 +4848,8 @@ class _MachinesTabState extends State<MachinesTab> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   ElevatedButton(
-                    onPressed: _editingMachine == null
-                        ? _addMachine
-                        : _updateMachine,
+                    onPressed:
+                        _editingMachine == null ? _addMachine : _updateMachine,
                     child: Text(
                       _editingMachine == null
                           ? 'Add Machine'
@@ -5008,9 +4980,7 @@ class _ItemsTabState extends State<ItemsTab> {
   ) async {
     try {
       try {
-        await _supabase.storage
-            .from(bucket)
-            .uploadBinary(
+        await _supabase.storage.from(bucket).uploadBinary(
               fileName,
               bytes,
               fileOptions: FileOptions(contentType: contentType, upsert: true),
@@ -5029,9 +4999,7 @@ class _ItemsTabState extends State<ItemsTab> {
           }
 
           // Retry the upload
-          await _supabase.storage
-              .from(bucket)
-              .uploadBinary(
+          await _supabase.storage.from(bucket).uploadBinary(
                 fileName,
                 bytes,
                 fileOptions: FileOptions(
@@ -5113,21 +5081,20 @@ class _ItemsTabState extends State<ItemsTab> {
         agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
         agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
       }
-      final list =
-          agg.entries
-              .map(
-                (e) => <String, dynamic>{
-                  'item_id': e.key,
-                  'count': e.value['count'] ?? 0,
-                  'qty': e.value['qty'] ?? 0,
-                },
-              )
-              .toList()
-            ..sort((a, b) {
-              final c = (b['count'] as int).compareTo(a['count'] as int);
-              if (c != 0) return c;
-              return (b['qty'] as int).compareTo(a['qty'] as int);
-            });
+      final list = agg.entries
+          .map(
+            (e) => <String, dynamic>{
+              'item_id': e.key,
+              'count': e.value['count'] ?? 0,
+              'qty': e.value['qty'] ?? 0,
+            },
+          )
+          .toList()
+        ..sort((a, b) {
+          final c = (b['count'] as int).compareTo(a['count'] as int);
+          if (c != 0) return c;
+          return (b['qty'] as int).compareTo(a['qty'] as int);
+        });
       if (mounted) setState(() => _topItemUsage = list);
     } catch (_) {}
   }
@@ -5166,8 +5133,7 @@ class _ItemsTabState extends State<ItemsTab> {
         if (op.newFile != null) {
           final fileName =
               '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}_${op.newFile!.name}';
-          final bytes =
-              op.newFile!.bytes ??
+          final bytes = op.newFile!.bytes ??
               await io.File(op.newFile!.path!).readAsBytes();
 
           final isPdf = op.newFile!.name.toLowerCase().endsWith('.pdf');
@@ -5338,7 +5304,7 @@ class _ItemsTabState extends State<ItemsTab> {
                                       constraints: BoxConstraints(
                                         maxHeight:
                                             MediaQuery.of(context).size.height *
-                                            0.8,
+                                                0.8,
                                       ),
                                       child: Image.network(
                                         op.imageUrl!,
@@ -5440,8 +5406,7 @@ class _ItemsTabState extends State<ItemsTab> {
             final fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${op.name.replaceAll(' ', '_')}_${op.newFile!.name}';
 
-            final bytes =
-                op.newFile!.bytes ??
+            final bytes = op.newFile!.bytes ??
                 await io.File(op.newFile!.path!).readAsBytes();
 
             final publicUrl = await _uploadToBucketWithAutoCreate(
@@ -5557,13 +5522,6 @@ class _ItemsTabState extends State<ItemsTab> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredItems = _items.where((item) {
-      final name = (item['name'] ?? '').toString().toLowerCase();
-      final id = (item['item_id'] ?? '').toString().toLowerCase();
-      return name.contains(_searchQuery.toLowerCase()) ||
-          id.contains(_searchQuery.toLowerCase());
-    }).toList();
-
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: ListView(
@@ -5785,51 +5743,53 @@ class _ItemsTabState extends State<ItemsTab> {
           _isLoadingItems
               ? const Center(child: CircularProgressIndicator())
               : _sortedItems.isEmpty
-              ? const Center(child: Text('No items found.'))
-              : ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _sortedItems.length,
-                  itemBuilder: (context, index) {
-                    final item = _sortedItems[index];
-                    final usage = _topItemUsage.firstWhere(
-                      (u) => u['item_id'] == item['item_id'],
-                      orElse: () => {'count': 0, 'qty': 0},
-                    );
-                    final ops = item['operation_details'] as List? ?? [];
-                    return Card(
-                      child: ListTile(
-                        title: Text('${item['name']} (${item['item_id']})'),
-                        subtitle: Text(
-                          '${ops.length} Operations • Usage: ${usage['count']} logs, ${usage['qty']} qty',
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(
-                                Icons.visibility,
-                                color: Colors.green,
-                              ),
-                              onPressed: () => _viewItemDetails(item),
-                              tooltip: 'View Operations',
+                  ? const Center(child: Text('No items found.'))
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _sortedItems.length,
+                      itemBuilder: (context, index) {
+                        final item = _sortedItems[index];
+                        final usage = _topItemUsage.firstWhere(
+                          (u) => u['item_id'] == item['item_id'],
+                          orElse: () => {'count': 0, 'qty': 0},
+                        );
+                        final ops = item['operation_details'] as List? ?? [];
+                        return Card(
+                          child: ListTile(
+                            title: Text('${item['name']} (${item['item_id']})'),
+                            subtitle: Text(
+                              '${ops.length} Operations • Usage: ${usage['count']} logs, ${usage['qty']} qty',
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.blue),
-                              onPressed: () => _editItem(item),
-                              tooltip: 'Edit Item',
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.visibility,
+                                    color: Colors.green,
+                                  ),
+                                  onPressed: () => _viewItemDetails(item),
+                                  tooltip: 'View Operations',
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.edit,
+                                      color: Colors.blue),
+                                  onPressed: () => _editItem(item),
+                                  tooltip: 'Edit Item',
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.delete,
+                                      color: Colors.red),
+                                  onPressed: () => _deleteItem(item['item_id']),
+                                  tooltip: 'Delete Item',
+                                ),
+                              ],
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () => _deleteItem(item['item_id']),
-                              tooltip: 'Delete Item',
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+                          ),
+                        );
+                      },
+                    ),
         ],
       ),
     );
@@ -5909,22 +5869,21 @@ class _OperationsTabState extends State<OperationsTab> {
         agg[name]!['count'] = (agg[name]!['count'] as int) + 1;
         agg[name]!['qty'] = (agg[name]!['qty'] as int) + qty;
       }
-      final list =
-          agg.entries
-              .map(
-                (e) => <String, dynamic>{
-                  'operation': e.key,
-                  'count': e.value['count'] ?? 0,
-                  'qty': e.value['qty'] ?? 0,
-                  'last_produced': e.value['last_produced'],
-                },
-              )
-              .toList()
-            ..sort((a, b) {
-              final c = (b['count'] as int).compareTo(a['count'] as int);
-              if (c != 0) return c;
-              return (b['qty'] as int).compareTo(a['qty'] as int);
-            });
+      final list = agg.entries
+          .map(
+            (e) => <String, dynamic>{
+              'operation': e.key,
+              'count': e.value['count'] ?? 0,
+              'qty': e.value['qty'] ?? 0,
+              'last_produced': e.value['last_produced'],
+            },
+          )
+          .toList()
+        ..sort((a, b) {
+          final c = (b['count'] as int).compareTo(a['count'] as int);
+          if (c != 0) return c;
+          return (b['qty'] as int).compareTo(a['qty'] as int);
+        });
       if (mounted && list.isNotEmpty) {
         setState(() {
           _allOperationUsage = list;
@@ -6076,66 +6035,66 @@ class _OperationsTabState extends State<OperationsTab> {
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
                 : filteredOps.isEmpty
-                ? const Center(child: Text('No operations found.'))
-                : ListView.builder(
-                    itemCount: filteredOps.length,
-                    itemBuilder: (context, index) {
-                      final op = filteredOps[index];
-                      final usage = _allOperationUsage.firstWhere(
-                        (u) => u['operation'] == op['op_name'],
-                        orElse: () => {'count': 0, 'qty': 0},
-                      );
-                      return Card(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        child: ListTile(
-                          onTap: () => _showOperationDetail(op, usage),
-                          title: Text(op['op_name']),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Item: ${op['item_name']} (${op['item_id']})',
-                              ),
-                              Text(
-                                'Target: ${op['target']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
-                              ),
-                              if (op['created_at'] != null ||
-                                  op['last_produced'] != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 4.0),
-                                  child: Text(
-                                    '${op['created_at'] != null ? 'Created: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['created_at'].toString()))}' : ''}'
-                                    '${op['created_at'] != null && op['last_produced'] != null ? ' • ' : ''}'
-                                    '${op['last_produced'] != null ? 'Last Produced: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['last_produced'].toString()))}' : ''}',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.grey.shade600,
-                                    ),
+                    ? const Center(child: Text('No operations found.'))
+                    : ListView.builder(
+                        itemCount: filteredOps.length,
+                        itemBuilder: (context, index) {
+                          final op = filteredOps[index];
+                          final usage = _allOperationUsage.firstWhere(
+                            (u) => u['operation'] == op['op_name'],
+                            orElse: () => {'count': 0, 'qty': 0},
+                          );
+                          return Card(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            child: ListTile(
+                              onTap: () => _showOperationDetail(op, usage),
+                              title: Text(op['op_name']),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Item: ${op['item_name']} (${op['item_id']})',
                                   ),
-                                ),
-                            ],
-                          ),
-                          isThreeLine: true,
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (op['imageUrl'] != null)
-                                const Icon(Icons.image, color: Colors.blue),
-                              if (op['pdfUrl'] != null)
-                                const Icon(
-                                  Icons.picture_as_pdf,
-                                  color: Colors.red,
-                                ),
-                              const Icon(
-                                Icons.chevron_right,
-                                color: Colors.grey,
+                                  Text(
+                                    'Target: ${op['target']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
+                                  ),
+                                  if (op['created_at'] != null ||
+                                      op['last_produced'] != null)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4.0),
+                                      child: Text(
+                                        '${op['created_at'] != null ? 'Created: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['created_at'].toString()))}' : ''}'
+                                        '${op['created_at'] != null && op['last_produced'] != null ? ' • ' : ''}'
+                                        '${op['last_produced'] != null ? 'Last Produced: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['last_produced'].toString()))}' : ''}',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                    ),
+                                ],
                               ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                              isThreeLine: true,
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (op['imageUrl'] != null)
+                                    const Icon(Icons.image, color: Colors.blue),
+                                  if (op['pdfUrl'] != null)
+                                    const Icon(
+                                      Icons.picture_as_pdf,
+                                      color: Colors.red,
+                                    ),
+                                  const Icon(
+                                    Icons.chevron_right,
+                                    color: Colors.grey,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -6494,75 +6453,80 @@ class _ShiftsTabState extends State<ShiftsTab> {
           _isLoading
               ? const Center(child: CircularProgressIndicator())
               : _shifts.isEmpty
-              ? const Center(child: Text('No shifts found.'))
-              : ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _shifts.length,
-                  itemBuilder: (context, index) {
-                    final shift = _shifts[index];
-                    return Card(
-                      margin: const EdgeInsets.symmetric(vertical: 4),
-                      child: ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: Colors.indigo.shade100,
-                          child: const Icon(
-                            Icons.schedule,
-                            color: Colors.indigo,
-                          ),
-                        ),
-                        title: Text(
-                          shift['name'] ?? '',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        subtitle: Text(
-                          'Time: ${shift['start_time']} - ${shift['end_time']}',
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.blue),
-                              tooltip: 'Edit Shift',
-                              onPressed: () => _editShift(shift),
+                  ? const Center(child: Text('No shifts found.'))
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _shifts.length,
+                      itemBuilder: (context, index) {
+                        final shift = _shifts[index];
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          child: ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: Colors.indigo.shade100,
+                              child: const Icon(
+                                Icons.schedule,
+                                color: Colors.indigo,
+                              ),
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              tooltip: 'Delete Shift',
-                              onPressed: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (context) => AlertDialog(
-                                    title: const Text('Delete Shift'),
-                                    content: const Text(
-                                      'Are you sure you want to delete this shift?',
-                                    ),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.pop(context),
-                                        child: const Text('Cancel'),
-                                      ),
-                                      TextButton(
-                                        onPressed: () {
-                                          _deleteShift(shift['id']);
-                                          Navigator.pop(context);
-                                        },
-                                        child: const Text(
-                                          'Delete',
-                                          style: TextStyle(color: Colors.red),
+                            title: Text(
+                              shift['name'] ?? '',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            subtitle: Text(
+                              'Time: ${shift['start_time']} - ${shift['end_time']}',
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.edit,
+                                      color: Colors.blue),
+                                  tooltip: 'Edit Shift',
+                                  onPressed: () => _editShift(shift),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.delete,
+                                      color: Colors.red),
+                                  tooltip: 'Delete Shift',
+                                  onPressed: () {
+                                    showDialog(
+                                      context: context,
+                                      builder: (context) => AlertDialog(
+                                        title: const Text('Delete Shift'),
+                                        content: const Text(
+                                          'Are you sure you want to delete this shift?',
                                         ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context),
+                                            child: const Text('Cancel'),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              _deleteShift(shift['id']);
+                                              Navigator.pop(context);
+                                            },
+                                            child: const Text(
+                                              'Delete',
+                                              style:
+                                                  TextStyle(color: Colors.red),
+                                            ),
+                                          ),
+                                        ],
                                       ),
-                                    ],
-                                  ),
-                                );
-                              },
+                                    );
+                                  },
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+                          ),
+                        );
+                      },
+                    ),
         ],
       ),
     );
@@ -6653,13 +6617,13 @@ class _SecurityTabState extends State<SecurityTab> {
     if (_isLoading) return const Center(child: CircularProgressIndicator());
 
     if (_missingTable) {
-      return Center(
+      return const Center(
         child: SingleChildScrollView(
           child: Padding(
-            padding: const EdgeInsets.all(16.0),
+            padding: EdgeInsets.all(16.0),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: const [
+              children: [
                 Icon(Icons.security, size: 64, color: Colors.grey),
                 SizedBox(height: 16),
                 Text(
