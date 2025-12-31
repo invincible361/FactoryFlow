@@ -775,6 +775,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     // Record attendance check-in
     await _updateAttendance(isCheckOut: false, eventTime: _startTime);
 
+    // Trigger notification for production start
+    await _showLocalNotification(
+      "Production Started",
+      "You have started production on ${_selectedMachine!.name} for ${_selectedItem!.name} (${_selectedOperation!}).",
+    );
+
     // Save initial log for "In" time visibility
     try {
       final initialLog = ProductionLog(
@@ -1503,27 +1509,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             IconButton(
               icon: const Icon(Icons.image, color: Colors.blue),
               tooltip: 'View Operation Image',
-              onPressed: () {
-                showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    content: SizedBox(
-                      width: 500,
-                      child: Image.network(
-                        detail.imageUrl!,
-                        fit: BoxFit.contain,
-                        errorBuilder: (c, e, st) =>
-                            const Text('Image failed to load'),
-                      ),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx),
-                        child: const Text('Close'),
-                      ),
-                    ],
-                  ),
-                );
+              onPressed: () async {
+                final uri = Uri.parse(detail.imageUrl!);
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
               },
             ),
           if ((detail.pdfUrl ?? '').isNotEmpty)
@@ -1977,24 +1967,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                           _persistState();
                         },
                 ),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: IconButton(
-                    icon: const Icon(Icons.add),
-                    tooltip: 'Add another machine',
-                    onPressed: _isTimerRunning
-                        ? null
-                        : () {
-                            setState(() {
-                              _extraEntries.add({
-                                'machineId': null,
-                                'itemId': null,
-                                'operation': null,
-                              });
-                            });
-                          },
-                  ),
-                ),
                 if (_extraEntries.isNotEmpty)
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2182,6 +2154,27 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                         _persistState();
                       },
               ),
+              if (!_isTimerRunning)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _extraEntries.add({
+                          'machineId': null,
+                          'itemId': null,
+                          'operation': null,
+                        });
+                      });
+                    },
+                    icon: const Icon(Icons.add_circle_outline),
+                    label: const Text('Add Another Machine'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue,
+                      side: const BorderSide(color: Colors.blue),
+                    ),
+                  ),
+                ),
               if (_selectedOperation != null) ...[
                 const SizedBox(height: 16),
                 Builder(
@@ -2200,46 +2193,56 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                           ),
                           const SizedBox(height: 8),
                           detail.imageUrl!.startsWith('http')
-                              ? Image.network(
-                                  detail.imageUrl!,
-                                  height:
-                                      MediaQuery.of(context).orientation ==
-                                          Orientation.landscape
-                                      ? 150
-                                      : 250,
-                                  width: double.infinity,
-                                  fit: BoxFit.contain,
-                                  loadingBuilder:
-                                      (context, child, loadingProgress) {
-                                        if (loadingProgress == null) {
-                                          return child;
-                                        }
-                                        return SizedBox(
-                                          height:
-                                              MediaQuery.of(
-                                                    context,
-                                                  ).orientation ==
-                                                  Orientation.landscape
-                                              ? 150
-                                              : 250,
-                                          child: Center(
-                                            child: CircularProgressIndicator(
-                                              value:
-                                                  loadingProgress
-                                                          .expectedTotalBytes !=
-                                                      null
-                                                  ? loadingProgress
-                                                            .cumulativeBytesLoaded /
-                                                        loadingProgress
-                                                            .expectedTotalBytes!
-                                                  : null,
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                  errorBuilder: (context, error, stackTrace) {
-                                    return _buildErrorWidget();
+                              ? GestureDetector(
+                                  onTap: () async {
+                                    final uri = Uri.parse(detail.imageUrl!);
+                                    if (await canLaunchUrl(uri)) {
+                                      await launchUrl(
+                                        uri,
+                                        mode: LaunchMode.externalApplication,
+                                      );
+                                    }
                                   },
+                                  child: Image.network(
+                                    detail.imageUrl!,
+                                    height:
+                                        MediaQuery.of(context).orientation ==
+                                            Orientation.landscape
+                                        ? 150
+                                        : 250,
+                                    width: double.infinity,
+                                    fit: BoxFit.contain,
+                                    loadingBuilder: (context, child, loadingProgress) {
+                                      if (loadingProgress == null) {
+                                        return child;
+                                      }
+                                      return SizedBox(
+                                        height:
+                                            MediaQuery.of(
+                                                  context,
+                                                ).orientation ==
+                                                Orientation.landscape
+                                            ? 150
+                                            : 250,
+                                        child: Center(
+                                          child: CircularProgressIndicator(
+                                            value:
+                                                loadingProgress
+                                                        .expectedTotalBytes !=
+                                                    null
+                                                ? loadingProgress
+                                                          .cumulativeBytesLoaded /
+                                                      loadingProgress
+                                                          .expectedTotalBytes!
+                                                : null,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return _buildErrorWidget();
+                                    },
+                                  ),
                                 )
                               : Image.asset(
                                   'assets/images/${detail.imageUrl!}',
