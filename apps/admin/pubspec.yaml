@@ -2,7 +2,7 @@ name: admin_app
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.3+1
+version: 1.0.4+1
 
 environment:
   sdk: '>=3.2.3 <4.0.0'
@@ -18,7 +18,7 @@ dependencies:
   device_info_plus: ^12.3.0
   url_launcher: ^6.3.1
   excel: ^4.0.5
-  share_plus: ^10.1.4
+  share_plus: 10.1.1
   fl_chart: ^0.70.2
   file_picker: ^10.3.8
 
