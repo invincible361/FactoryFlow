@@ -3,10 +3,21 @@ import 'package:factoryflow_core/factoryflow_core.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await SupabaseService.initialize();
-  await NotificationService.initialize();
-  runApp(const AdminApp());
+  try {
+    WidgetsFlutterBinding.ensureInitialized();
+    await SupabaseService.initialize();
+    await NotificationService.initialize();
+    runApp(const AdminApp());
+  } catch (e) {
+    debugPrint('Initialization error: $e');
+    runApp(MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: Text('Failed to initialize app: $e'),
+        ),
+      ),
+    ));
+  }
 }
 
 class AdminApp extends StatelessWidget {

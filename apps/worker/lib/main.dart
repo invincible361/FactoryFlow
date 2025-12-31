@@ -217,24 +217,28 @@ Future<void> _showNotification(String title, String body) async {
 }
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    WidgetsFlutterBinding.ensureInitialized();
+    await SupabaseService.initialize();
+    await NotificationService.initialize();
 
-  if (!kIsWeb &&
-      (Platform.isAndroid ||
-          Platform.isIOS ||
-          Platform.isMacOS ||
-          Platform.isWindows)) {
-    try {
-      await Workmanager().initialize(callbackDispatcher);
-      await NotificationService.initialize();
-      await NotificationService.requestPermissions();
-    } catch (e) {
-      debugPrint('Error initializing background tasks or notifications: $e');
-    }
+    // Initialize Workmanager
+    Workmanager().initialize(
+      callbackDispatcher,
+      isInDebugMode: kDebugMode,
+    );
+
+    runApp(const WorkerApp());
+  } catch (e) {
+    debugPrint('Initialization error: $e');
+    runApp(MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: Text('Failed to initialize app: $e'),
+        ),
+      ),
+    ));
   }
-
-  await SupabaseService.initialize();
-  runApp(const WorkerApp());
 }
 
 class WorkerApp extends StatelessWidget {
