@@ -12,12 +12,23 @@ export 'models/item.dart';
 export 'models/machine.dart';
 export 'models/production_log.dart';
 export 'models/worker_boundary_event.dart';
+export 'models/theme_mode.dart';
 
+export 'services/attendance_service.dart';
 export 'services/location_service.dart';
 export 'services/log_service.dart';
 export 'services/mock_data.dart';
 export 'services/update_service.dart';
 export 'services/notification_service.dart';
 export 'services/supabase_service.dart';
+export 'services/biometric_service.dart';
 
 export 'utils/time_utils.dart';
+export 'utils/app_colors.dart';
+export 'utils/web_download_helper.dart';
+export 'widgets/app_sidebar.dart';
+export 'widgets/attendance_sidebar_item.dart';
+export 'widgets/theme_controller.dart';
+export 'widgets/modern_login_screen.dart';
+export 'widgets/out_of_bounds_tab.dart';
+export 'widgets/geofence_tab.dart';

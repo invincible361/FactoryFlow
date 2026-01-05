@@ -56,6 +56,7 @@ class MockData {
         name: 'CNC Machine $i',
         type: 'CNC',
         items: items, // All items available for now
+        photoUrl: 'cnc_machine.png',
       ));
     }
     // 4 VMC Machines
@@ -65,6 +66,7 @@ class MockData {
         name: 'VMC Machine $i',
         type: 'VMC',
         items: items, // All items available for now
+        photoUrl: 'vmc_machine.png',
       ));
     }
     return list;

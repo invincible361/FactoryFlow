@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -15,13 +16,8 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final _usernameController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _orgCodeController = TextEditingController();
   bool _isLoading = false;
   String _appVersion = '';
-  bool _obscurePassword = true;
 
   @override
   void initState() {
@@ -93,257 +89,110 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  void _login() async {
-    if (_formKey.currentState!.validate()) {
-      setState(() {
-        _isLoading = true;
-      });
+  void _login(String username, String password, String orgCode) async {
+    setState(() {
+      _isLoading = true;
+    });
 
-      try {
-        final username = _usernameController.text.trim();
-        final password = _passwordController.text.trim();
-        final orgCode = _orgCodeController.text.trim();
+    try {
+      if (username.isEmpty || password.isEmpty || orgCode.isEmpty) {
+        throw StateError('All fields are required');
+      }
 
-        if (username.isEmpty || password.isEmpty || orgCode.isEmpty) {
-          throw StateError('All fields are required');
-        }
+      // 1. Owner Login (Admin for organization)
+      final orgResp = await Supabase.instance.client
+          .from('organizations')
+          .select()
+          .eq('organization_code', orgCode)
+          .maybeSingle();
+      if (orgResp == null) {
+        throw StateError('Invalid organization code');
+      }
+      final ownerUser = orgResp['owner_username']?.toString() ?? '';
+      final ownerPass = orgResp['owner_password']?.toString() ?? '';
 
-        // 1. Owner Login (Admin for organization)
-        final orgResp = await Supabase.instance.client
-            .from('organizations')
-            .select()
-            .eq('organization_code', orgCode)
-            .maybeSingle();
-        if (orgResp == null) {
-          throw StateError('Invalid organization code');
-        }
-        final ownerUser = orgResp['owner_username']?.toString() ?? '';
-        final ownerPass = orgResp['owner_password']?.toString() ?? '';
-
-        if (username == ownerUser && password == ownerPass) {
-          await _recordOwnerLogin(orgCode);
-          if (!mounted) return;
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) =>
-                  AdminDashboardScreen(organizationCode: orgCode),
-            ),
-          );
-          return;
-        }
-
-        // Only allow Admin login in Admin App
-        throw StateError(
-          'This app is for Admin use only. Workers/Supervisors should use their respective apps.',
-        );
-      } catch (e) {
+      if (username == ownerUser && password == ownerPass) {
+        await _recordOwnerLogin(orgCode);
         if (!mounted) return;
-
-        String errorMessage = 'An error occurred';
-        if (e is StateError) {
-          errorMessage = 'Invalid username or password';
-        } else {
-          errorMessage = e.toString();
-          // Log detailed error for debugging
-          debugPrint('Detailed Login Error: $e');
-
-          if (errorMessage.contains('Load failed') ||
-              errorMessage.contains('ClientException')) {
-            errorMessage =
-                'Connection failed. This usually means Supabase is blocked by an ad-blocker, firewall, or your network is down.\n\nDetails: $e';
-          } else if (errorMessage.contains('PGRST204') ||
-              errorMessage.contains('column')) {
-            errorMessage =
-                'Database schema mismatch. Please run the migration script.';
-          } else if (errorMessage.contains('Location services are disabled')) {
-            errorMessage =
-                'Location services are disabled. Please enable them in your device settings to log in.';
-          } else if (errorMessage.contains('Location permissions are denied')) {
-            errorMessage =
-                'Location permissions are required for workers to log in. Please grant permission.';
-          } else if (errorMessage.contains('permanently denied')) {
-            errorMessage =
-                'Location permissions are permanently denied. Please enable them in App Settings.';
-          }
-        }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMessage),
-            action: (errorMessage.contains('Location'))
-                ? SnackBarAction(
-                    label: 'Settings',
-                    onPressed: () {
-                      Geolocator.openLocationSettings();
-                    },
-                  )
-                : null,
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) =>
+                AdminDashboardScreen(organizationCode: orgCode),
           ),
         );
-        setState(() {
-          _isLoading = false;
-        });
+        return;
       }
+
+      // Only allow Admin login in Admin App
+      throw StateError(
+        'This app is for Admin use only. Workers/Supervisors should use their respective apps.',
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      String errorMessage = 'An error occurred';
+      if (e is StateError) {
+        errorMessage = 'Invalid username or password';
+      } else {
+        errorMessage = e.toString();
+        // Log detailed error for debugging
+        debugPrint('Detailed Login Error: $e');
+
+        if (errorMessage.contains('Load failed') ||
+            errorMessage.contains('ClientException')) {
+          errorMessage =
+              'Connection failed. This usually means Supabase is blocked by an ad-blocker, firewall, or your network is down.\n\nDetails: $e';
+        } else if (errorMessage.contains('PGRST204') ||
+            errorMessage.contains('column')) {
+          errorMessage =
+              'Database schema mismatch. Please run the migration script.';
+        } else if (errorMessage.contains('Location services are disabled')) {
+          errorMessage =
+              'Location services are disabled. Please enable them in your device settings to log in.';
+        } else if (errorMessage.contains('Location permissions are denied')) {
+          errorMessage =
+              'Location permissions are required for workers to log in. Please grant permission.';
+        } else if (errorMessage.contains('permanently denied')) {
+          errorMessage =
+              'Location permissions are permanently denied. Please enable them in App Settings.';
+        }
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(errorMessage),
+          action: (errorMessage.contains('Location'))
+              ? SnackBarAction(
+                  label: 'Settings',
+                  onPressed: () {
+                    Geolocator.openLocationSettings();
+                  },
+                )
+              : null,
+        ),
+      );
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Admin App')),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Form(
-            key: _formKey,
-            child: LayoutBuilder(
-              builder: (context, viewportConstraints) {
-                return SingleChildScrollView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      minHeight: viewportConstraints.maxHeight > 0
-                          ? viewportConstraints.maxHeight
-                          : 0,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Image.asset(
-                          'assets/images/logo.png',
-                          height: MediaQuery.of(context).orientation ==
-                                  Orientation.landscape
-                              ? 80
-                              : 120,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Icon(
-                              Icons.factory,
-                              size: MediaQuery.of(context).orientation ==
-                                      Orientation.landscape
-                                  ? 60
-                                  : 80,
-                              color: Colors.blue,
-                            );
-                          },
-                        ),
-                        const SizedBox(height: 20),
-                        TextFormField(
-                          controller: _orgCodeController,
-                          decoration: const InputDecoration(
-                            labelText: 'Organization Code',
-                          ),
-                          validator: (value) {
-                            if (value == null || value.isEmpty) {
-                              return 'Please enter organization code';
-                            }
-                            // Only allow alphanumeric characters
-                            if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(value)) {
-                              return 'Invalid characters in organization code';
-                            }
-                            return null;
-                          },
-                        ),
-                        const SizedBox(height: 16),
-                        TextFormField(
-                          controller: _usernameController,
-                          decoration: const InputDecoration(
-                            labelText: 'Username',
-                          ),
-                          validator: (value) {
-                            if (value == null || value.isEmpty) {
-                              return 'Please enter username';
-                            }
-                            return null;
-                          },
-                        ),
-                        const SizedBox(height: 16),
-                        TextFormField(
-                          controller: _passwordController,
-                          decoration: InputDecoration(
-                            labelText: 'Password',
-                            suffixIcon: IconButton(
-                              icon: Icon(
-                                _obscurePassword
-                                    ? Icons.visibility
-                                    : Icons.visibility_off,
-                              ),
-                              onPressed: () {
-                                setState(() {
-                                  _obscurePassword = !_obscurePassword;
-                                });
-                              },
-                            ),
-                          ),
-                          obscureText: _obscurePassword,
-                          validator: (value) {
-                            if (value == null || value.isEmpty) {
-                              return 'Please enter password';
-                            }
-                            return null;
-                          },
-                        ),
-                        const SizedBox(height: 24),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 50,
-                          child: ElevatedButton(
-                            onPressed: _isLoading ? null : _login,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.indigo,
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                            ),
-                            child: _isLoading
-                                ? const CircularProgressIndicator(
-                                    color: Colors.white,
-                                  )
-                                : const Text(
-                                    'Login',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => const FactoryRegistrationPage(),
-                              ),
-                            );
-                          },
-                          child: const Text('Register Factory'),
-                        ),
-                        if (_appVersion.isNotEmpty) ...[
-                          const SizedBox(height: 20),
-                          Text(
-                            _appVersion,
-                            style: TextStyle(
-                              color: Colors.grey[600],
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ),
-      ),
+    final themeController = ThemeController.of(context);
+    final isDark = themeController?.isDarkMode ?? true;
+
+    return ModernLoginScreen(
+      appTitle: 'FactoryFlow',
+      role: 'Admin',
+      version: _appVersion,
+      isLoading: _isLoading,
+      isDarkMode: isDark,
+      logoAsset: 'assets/images/logo.png',
+      onLogin: _login,
     );
   }
-
-  // Removed unused _showRegisterDialog
 }
 
 class FactoryRegistrationPage extends StatefulWidget {

@@ -11,6 +11,10 @@ import 'package:factoryflow_core/factoryflow_core.dart';
 import 'dart:io' as io;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:uuid/uuid.dart';
+import 'dart:async';
+import 'help_screen.dart';
+// Removed local AdminHomeDrawer import as we now use core AppSidebar
 
 // Removed local TimeUtils.formatTo12Hour as we now use TimeUtils.formatTo12Hour
 
@@ -28,17 +32,156 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   String? _factoryName;
   String? _ownerUsername;
   String? _logoUrl;
+  int _unreadNotifications = 0;
+  final SupabaseClient _supabase = Supabase.instance.client;
+  Timer? _locationTimer;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 11, vsync: this);
+    _tabController = TabController(length: 13, vsync: this);
     _fetchOrganization();
+    _fetchUnreadCount();
+    _setupNotificationListener();
+    _startLocationLogging();
+  }
+
+  void _startLocationLogging() {
+    _logAdminLocation();
+    _locationTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
+      _logAdminLocation();
+    });
+  }
+
+  Future<void> _logAdminLocation() async {
+    try {
+      final pos = await LocationService().getCurrentLocation();
+      // Admins are not in the workers table, so we log to production_outofbounds or a separate admin_logs table if needed.
+      // For now, we only log if they are outside to production_outofbounds for history, or just skip logging to boundary_events.
+
+      final org = await _supabase
+          .from('organizations')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .maybeSingle();
+
+      if (org != null) {
+        final lat = (org['latitude'] ?? 0.0) * 1.0;
+        final lng = (org['longitude'] ?? 0.0) * 1.0;
+        final radius = (org['radius_meters'] ?? 500.0) * 1.0;
+
+        final locationService = LocationService();
+        final isInside = locationService.isInside(
+          pos,
+          lat,
+          lng,
+          radius,
+          bufferMultiplier: 1.1,
+        );
+
+        if (!isInside) {
+          // Check if we already have an active out-of-bounds event for this admin to avoid duplicates
+          final prefs = await SharedPreferences.getInstance();
+          final activeEventId = prefs.getString('admin_active_outofbounds_id');
+
+          if (activeEventId == null) {
+            final eventId = const Uuid().v4();
+            await _supabase.from('production_outofbounds').insert({
+              'id': eventId,
+              'worker_id': null, // Admin doesn't have a worker_id
+              'worker_name': 'Admin: $_ownerUsername',
+              'organization_code': widget.organizationCode,
+              'date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+              'exit_time': DateTime.now().toUtc().toIso8601String(),
+              'exit_latitude': pos.latitude,
+              'exit_longitude': pos.longitude,
+            });
+            await prefs.setString('admin_active_outofbounds_id', eventId);
+          }
+        } else {
+          // Admin is back inside, update the event if it exists
+          final prefs = await SharedPreferences.getInstance();
+          final activeEventId = prefs.getString('admin_active_outofbounds_id');
+          if (activeEventId != null) {
+            final entryTime = DateTime.now();
+            try {
+              final event = await _supabase
+                  .from('production_outofbounds')
+                  .select('exit_time')
+                  .eq('id', activeEventId)
+                  .maybeSingle();
+
+              String? durationStr;
+              if (event != null) {
+                final exitTime = TimeUtils.parseToLocal(event['exit_time']);
+                final diff = entryTime.difference(exitTime);
+                durationStr = "${diff.inMinutes} mins";
+              }
+
+              await _supabase.from('production_outofbounds').update({
+                'entry_time': entryTime.toUtc().toIso8601String(),
+                'entry_latitude': pos.latitude,
+                'entry_longitude': pos.longitude,
+                'duration_minutes': durationStr,
+              }).eq('id', activeEventId);
+            } catch (e) {
+              debugPrint('Error updating admin return: $e');
+            }
+            await prefs.remove('admin_active_outofbounds_id');
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error logging admin location: $e');
+    }
+  }
+
+  Future<void> _fetchUnreadCount() async {
+    try {
+      final response = await _supabase
+          .from('notifications')
+          .select('id')
+          .eq('organization_code', widget.organizationCode)
+          .eq('read', false);
+
+      if (mounted) {
+        setState(() {
+          _unreadNotifications = (response as List).length;
+        });
+      }
+    } catch (e) {
+      if (e.toString().contains('PGRST205')) {
+        debugPrint('Notifications table not found, skipping unread count');
+      } else {
+        debugPrint('Error fetching unread count: $e');
+      }
+    }
+  }
+
+  void _setupNotificationListener() {
+    _supabase
+        .channel('public:notifications')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'notifications',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'organization_code',
+            value: widget.organizationCode,
+          ),
+          callback: (payload) {
+            _fetchUnreadCount();
+          },
+        )
+        .subscribe();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _locationTimer?.cancel();
+    _supabase.channel('public:notifications').unsubscribe();
     super.dispose();
   }
 
@@ -65,8 +208,55 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
 
   @override
   Widget build(BuildContext context) {
+    final themeController = ThemeController.of(context);
+    final isDarkMode = themeController?.isDarkMode ?? false;
+
+    final backgroundColor = AppColors.getBackground(isDarkMode);
+    final cardColor = AppColors.getCard(isDarkMode);
+    final accentColor = AppColors.getAccent(isDarkMode);
+    final textColor = AppColors.getText(isDarkMode);
+    final secondaryTextColor = AppColors.getSecondaryText(isDarkMode);
+
     return Scaffold(
+      backgroundColor: backgroundColor,
+      drawer: AppSidebar(
+        organizationCode: widget.organizationCode,
+        userName: _ownerUsername ?? 'Admin',
+        organizationName: _factoryName ?? 'Factory Admin',
+        profileImageUrl: _logoUrl,
+        isDarkMode: isDarkMode,
+        currentThemeMode: themeController?.themeMode ?? AppThemeMode.auto,
+        onThemeModeChanged: (mode) => themeController?.onThemeModeChanged(mode),
+        onLogout: () {
+          Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+        },
+        additionalItems: [
+          ListTile(
+            leading: Icon(
+              Icons.help_outline,
+              color: isDarkMode ? Colors.blue[300] : Colors.blue,
+            ),
+            title: Text(
+              'How to Use',
+              style: TextStyle(
+                color: isDarkMode ? Colors.white : Colors.black87,
+              ),
+            ),
+            onTap: () {
+              Navigator.pop(context); // Close drawer
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => HelpScreen(isDarkMode: isDarkMode),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
       appBar: AppBar(
+        backgroundColor: cardColor,
+        elevation: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -81,7 +271,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                       width: 28,
                       fit: BoxFit.cover,
                       errorBuilder: (context, error, stackTrace) =>
-                          const Icon(Icons.factory, size: 28),
+                          Icon(Icons.factory, size: 28, color: accentColor),
                     ),
                   )
                 else
@@ -89,10 +279,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                     'assets/images/logo.png',
                     height: 28,
                     errorBuilder: (context, error, stackTrace) =>
-                        const Icon(Icons.factory, size: 28),
+                        Icon(Icons.factory, size: 28, color: accentColor),
                   ),
                 const SizedBox(width: 10),
-                const Text('Admin App'),
+                Text(
+                  'Admin App',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: textColor,
+                  ),
+                ),
               ],
             ),
             if (_ownerUsername != null && _factoryName != null)
@@ -100,14 +296,53 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                 padding: const EdgeInsets.only(top: 4.0),
                 child: Text(
                   'Welcome, ${_ownerUsername!} — ${_factoryName!}',
-                  style: const TextStyle(fontSize: 12),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: secondaryTextColor,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
           ],
         ),
         actions: [
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: Icon(Icons.notifications_outlined, color: textColor),
+                tooltip: 'Notifications',
+                onPressed: () => _showNotificationsDialog(),
+              ),
+              if (_unreadNotifications > 0)
+                Positioned(
+                  right: 8,
+                  top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 16,
+                      minHeight: 16,
+                    ),
+                    child: Text(
+                      '$_unreadNotifications',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
+          ),
           IconButton(
-            icon: const Icon(Icons.logout),
+            icon: Icon(Icons.logout_rounded, color: textColor),
             tooltip: 'Logout',
             onPressed: () {
               Navigator.of(
@@ -119,8 +354,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
+          indicatorColor: accentColor,
+          indicatorWeight: 3,
+          labelColor: accentColor,
+          unselectedLabelColor: secondaryTextColor,
+          labelStyle: const TextStyle(fontWeight: FontWeight.bold),
           tabs: const [
             Tab(text: 'Reports'),
+            Tab(text: 'Visualisation'),
+            Tab(text: 'Geofence'),
             Tab(text: 'Employees'),
             Tab(text: 'Supervisors'),
             Tab(text: 'Attendance'),
@@ -137,21 +379,58 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
       body: TabBarView(
         controller: _tabController,
         children: [
-          ReportsTab(organizationCode: widget.organizationCode),
-          EmployeesTab(organizationCode: widget.organizationCode),
-          SupervisorsTab(organizationCode: widget.organizationCode),
-          AttendanceTab(organizationCode: widget.organizationCode),
-          MachinesTab(organizationCode: widget.organizationCode),
-          ItemsTab(organizationCode: widget.organizationCode),
-          OperationsTab(organizationCode: widget.organizationCode),
-          ShiftsTab(organizationCode: widget.organizationCode),
+          ReportsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          VisualisationTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          GeofenceTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          EmployeesTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          SupervisorsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          AttendanceTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          MachinesTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          ItemsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          OperationsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          ShiftsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
           ProfileTab(
             organizationCode: widget.organizationCode,
             onProfileUpdated: _fetchOrganization,
+            isDarkMode: isDarkMode,
           ),
-          SecurityTab(organizationCode: widget.organizationCode),
-          OutOfBoundsTab(organizationCode: widget.organizationCode),
+          SecurityTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          OutOfBoundsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
         ],
+      ),
+    );
+  }
+
+  void _showNotificationsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => _NotificationsDialog(
+        organizationCode: widget.organizationCode,
+        onRead: _fetchUnreadCount,
       ),
     );
   }
@@ -160,20 +439,55 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
 Widget _buildFormTextField({
   required TextEditingController controller,
   required String label,
+  required bool isDarkMode,
   String? hint,
   TextInputType? keyboardType,
   bool enabled = true,
+  ValueChanged<String>? onChanged,
+  String? Function(String?)? validator,
+  Widget? prefixIcon,
+  int maxLines = 1,
 }) {
+  final textColor = isDarkMode ? Colors.white : Colors.black;
+  final secondaryTextColor =
+      isDarkMode ? Colors.white70 : Colors.black.withValues(alpha: 0.6);
+  final fillColor = isDarkMode
+      ? Colors.white.withValues(alpha: 0.05)
+      : Colors.grey.withValues(alpha: 0.1);
+  final borderColor = isDarkMode
+      ? Colors.white.withValues(alpha: 0.1)
+      : Colors.black.withValues(alpha: 0.15);
+
   return Padding(
     padding: const EdgeInsets.symmetric(vertical: 8.0),
-    child: TextField(
+    child: TextFormField(
       controller: controller,
       enabled: enabled,
       keyboardType: keyboardType,
+      onChanged: onChanged,
+      validator: validator,
+      maxLines: maxLines,
+      style: TextStyle(color: textColor, fontSize: 14),
       decoration: InputDecoration(
         labelText: label,
+        labelStyle: TextStyle(color: secondaryTextColor),
         hintText: hint,
-        border: const OutlineInputBorder(),
+        hintStyle: TextStyle(color: secondaryTextColor.withValues(alpha: 0.5)),
+        prefixIcon: prefixIcon,
+        filled: true,
+        fillColor: fillColor,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderColor),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderColor),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Color(0xFFA9DFD8)),
+        ),
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 12,
           vertical: 16,
@@ -189,10 +503,12 @@ Widget _buildFormTextField({
 class ProfileTab extends StatefulWidget {
   final String organizationCode;
   final VoidCallback? onProfileUpdated;
+  final bool isDarkMode;
   const ProfileTab({
     super.key,
     required this.organizationCode,
     this.onProfileUpdated,
+    required this.isDarkMode,
   });
 
   @override
@@ -204,6 +520,7 @@ class _ProfileTabState extends State<ProfileTab> {
   final _formKey = GlobalKey<FormState>();
 
   late TextEditingController _orgNameController;
+  late TextEditingController _ownerUsernameController;
   late TextEditingController _facNameController;
   late TextEditingController _addressController;
   late TextEditingController _latController;
@@ -221,6 +538,7 @@ class _ProfileTabState extends State<ProfileTab> {
   void initState() {
     super.initState();
     _orgNameController = TextEditingController();
+    _ownerUsernameController = TextEditingController();
     _facNameController = TextEditingController();
     _addressController = TextEditingController();
     _latController = TextEditingController();
@@ -235,6 +553,7 @@ class _ProfileTabState extends State<ProfileTab> {
   @override
   void dispose() {
     _orgNameController.dispose();
+    _ownerUsernameController.dispose();
     _facNameController.dispose();
     _addressController.dispose();
     _latController.dispose();
@@ -258,6 +577,7 @@ class _ProfileTabState extends State<ProfileTab> {
       if (data != null && mounted) {
         setState(() {
           _orgNameController.text = data['organization_name'] ?? '';
+          _ownerUsernameController.text = data['owner_username'] ?? '';
           _facNameController.text = data['factory_name'] ?? '';
           _addressController.text = data['address'] ?? '';
           _latController.text = (data['latitude'] ?? 0).toString();
@@ -307,8 +627,14 @@ class _ProfileTabState extends State<ProfileTab> {
 
     final fileName =
         '${DateTime.now().millisecondsSinceEpoch}_logo_${_logoFile!.name}';
-    final bytes =
-        _logoFile!.bytes ?? await io.File(_logoFile!.path!).readAsBytes();
+
+    final Uint8List bytes;
+    if (kIsWeb) {
+      if (_logoFile!.bytes == null) return null;
+      bytes = _logoFile!.bytes!;
+    } else {
+      bytes = _logoFile!.bytes ?? await io.File(_logoFile!.path!).readAsBytes();
+    }
 
     return await _uploadToBucketWithAutoCreate(
       'organization_logos',
@@ -388,6 +714,7 @@ class _ProfileTabState extends State<ProfileTab> {
 
       await _supabase.from('organizations').update({
         'organization_name': _orgNameController.text,
+        'owner_username': _ownerUsernameController.text,
         'factory_name': _facNameController.text,
         'address': _addressController.text,
         'latitude': double.tryParse(_latController.text) ?? 0,
@@ -419,352 +746,372 @@ class _ProfileTabState extends State<ProfileTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Organization Profile',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            TextFormField(
-              controller: _orgNameController,
-              decoration: const InputDecoration(
-                labelText: 'Organization Name',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.business),
-              ),
-              validator: (v) => v!.isEmpty ? 'Required' : null,
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _facNameController,
-              decoration: const InputDecoration(
-                labelText: 'Factory Name',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.factory),
-              ),
-              validator: (v) => v!.isEmpty ? 'Required' : null,
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                if (_logoFile != null || _logoUrlController.text.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 16),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: _logoFile != null
-                          ? (kIsWeb
-                              ? Image.memory(
-                                  _logoFile!.bytes!,
-                                  height: 60,
-                                  width: 60,
-                                  fit: BoxFit.cover,
-                                )
-                              : Image.file(
-                                  io.File(_logoFile!.path!),
-                                  height: 60,
-                                  width: 60,
-                                  fit: BoxFit.cover,
-                                ))
-                          : Image.network(
-                              _logoUrlController.text,
-                              height: 60,
-                              width: 60,
-                              fit: BoxFit.cover,
-                              errorBuilder: (ctx, err, st) =>
-                                  const Icon(Icons.factory, size: 60),
-                            ),
-                    ),
-                  ),
-                Expanded(
-                  child: TextFormField(
-                    controller: _logoUrlController,
-                    decoration: InputDecoration(
-                      labelText: 'Logo URL',
-                      border: const OutlineInputBorder(),
-                      prefixIcon: const Icon(Icons.image),
-                      hintText: 'https://example.com/logo.png',
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.upload_file),
-                        onPressed: _pickLogo,
-                        tooltip: 'Select Logo File',
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Security',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _passwordController,
-              decoration: const InputDecoration(
-                labelText: 'Admin Password',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.lock),
-              ),
-              obscureText: true,
-              validator: (v) => v!.length < 6 ? 'Min 6 characters' : null,
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Location & Geofencing',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Set your factory area in acres to automatically calculate the geofence radius.',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _acreController,
-                    decoration: const InputDecoration(
-                      labelText: 'Factory Area (Acres)',
-                      border: OutlineInputBorder(),
-                      suffixText: 'Acres',
-                    ),
-                    keyboardType: TextInputType.number,
-                    onChanged: _calculateRadiusFromAcres,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextFormField(
-                    controller: _radiusController,
-                    decoration: const InputDecoration(
-                      labelText: 'Radius (Meters)',
-                      border: OutlineInputBorder(),
-                      suffixText: 'm',
-                      helperText: 'Includes 15m GPS buffer',
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _latController,
-                    decoration: const InputDecoration(
-                      labelText: 'Latitude',
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextFormField(
-                    controller: _lngController,
-                    decoration: const InputDecoration(
-                      labelText: 'Longitude',
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _addressController,
-              decoration: const InputDecoration(
-                labelText: 'Factory Address',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.location_on),
-              ),
-              maxLines: 2,
-            ),
-            const SizedBox(height: 32),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _isSaving ? null : _updateProfile,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.indigo,
-                  foregroundColor: Colors.white,
-                ),
-                child: _isSaving
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text(
-                        'Update Profile & Settings',
-                        style: TextStyle(fontSize: 16),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 50),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 7. OUT OF BOUNDS TAB
-// ---------------------------------------------------------------------------
-class OutOfBoundsTab extends StatefulWidget {
-  final String organizationCode;
-  const OutOfBoundsTab({super.key, required this.organizationCode});
-
-  @override
-  State<OutOfBoundsTab> createState() => _OutOfBoundsTabState();
-}
-
-class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
-  final _supabase = Supabase.instance.client;
-  List<Map<String, dynamic>> _events = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchEvents();
-  }
-
-  Future<void> _fetchEvents() async {
-    setState(() => _isLoading = true);
-    try {
-      final response = await _supabase
-          .from('production_outofbounds')
-          .select('*')
-          .eq('organization_code', widget.organizationCode)
-          .order('exit_time', ascending: false);
-
-      if (mounted) {
-        setState(() {
-          _events = List<Map<String, dynamic>>.from(response);
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      debugPrint('Fetch events error: $e');
-      // Fallback if production_outofbounds doesn't exist yet
-      try {
-        final fallback = await _supabase
-            .from('worker_boundary_events')
-            .select('*')
-            .eq('organization_code', widget.organizationCode)
-            .order('exit_time', ascending: false);
-        if (mounted) {
-          setState(() {
-            _events = List<Map<String, dynamic>>.from(fallback);
-            _isLoading = false;
-          });
-        }
-      } catch (_) {
-        if (mounted) {
-          setState(() => _isLoading = false);
-        }
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
-
-    if (_events.isEmpty) {
-      return const Center(
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.location_off, size: 64, color: Colors.grey),
-              SizedBox(height: 16),
-              Text(
-                'No "Out of Bounds" events recorded.',
-                style: TextStyle(color: Colors.grey),
-              ),
-            ],
-          ),
+    if (_isLoading) {
+      return Center(
+        child: CircularProgressIndicator(
+          color: widget.isDarkMode
+              ? const Color(0xFFA9DFD8)
+              : const Color(0xFF2E8B57),
         ),
       );
     }
 
-    return RefreshIndicator(
-      onRefresh: _fetchEvents,
-      child: ListView.builder(
-        itemCount: _events.length,
-        itemBuilder: (context, index) {
-          final event = _events[index];
-          final workerName = event['worker_name'] ??
-              (event['workers'] is Map
-                  ? (event['workers'] as Map)['name']
-                  : 'Unknown Worker');
-          final exitTime = TimeUtils.parseToLocal(event['exit_time']);
-          final entryTimeStr = event['entry_time'] as String?;
-          final entryTime = entryTimeStr != null
-              ? TimeUtils.parseToLocal(entryTimeStr)
-              : null;
-          final duration = event['duration_minutes'] ?? 'Still Out';
+    final accentColor =
+        widget.isDarkMode ? const Color(0xFFA9DFD8) : const Color(0xFF2E8B57);
+    final cardColor =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final backgroundColor =
+        widget.isDarkMode ? const Color(0xFF21222D) : const Color(0xFFF5F5F5);
+    final textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final secondaryTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+    final borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.black.withValues(alpha: 0.05);
 
-          return Card(
-            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor: entryTime == null
-                    ? Colors.red.shade100
-                    : Colors.green.shade100,
-                child: Icon(
-                  entryTime == null
-                      ? Icons.exit_to_app
-                      : Icons.assignment_turned_in,
-                  color: entryTime == null ? Colors.red : Colors.green,
-                ),
-              ),
-              title: Text(
-                workerName,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: Column(
+    return RefreshIndicator(
+      onRefresh: _fetchProfile,
+      color: accentColor,
+      backgroundColor: backgroundColor,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(24),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Exited: ${DateFormat('hh:mm a (MMM dd)').format(exitTime)}',
-                  ),
-                  if (entryTime != null)
-                    Text(
-                      'Entered: ${DateFormat('hh:mm a (MMM dd)').format(entryTime)}',
-                    ),
-                  Text(
-                    'Duration: $duration',
+                    'Organization Profile',
                     style: TextStyle(
+                      fontSize: 28,
                       fontWeight: FontWeight.bold,
-                      color: entryTime == null ? Colors.red : Colors.blue,
+                      color: textColor,
+                    ),
+                  ),
+                  Text(
+                    'Manage your factory details and settings',
+                    style: TextStyle(
+                      color: secondaryTextColor,
+                      fontSize: 14,
                     ),
                   ),
                 ],
               ),
-              trailing: IconButton(
-                icon: const Icon(Icons.map, color: Colors.indigo),
-                onPressed: () {
-                  // Optional: Open maps with exit/entry coordinates
-                },
+              const SizedBox(height: 32),
+
+              // Logo Section
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: cardColor,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: borderColor),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black
+                          .withValues(alpha: widget.isDarkMode ? 0.2 : 0.05),
+                      blurRadius: 15,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.branding_watermark_rounded,
+                            color: accentColor.withValues(alpha: 0.5),
+                            size: 16),
+                        const SizedBox(width: 8),
+                        Text(
+                          'BRANDING',
+                          style: TextStyle(
+                            color: accentColor.withValues(alpha: 0.7),
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        _buildLogoPreview(accentColor, widget.isDarkMode),
+                        const SizedBox(width: 24),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Organization Logo',
+                                style: TextStyle(
+                                  color: textColor,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Recommended size: 512x512px',
+                                style: TextStyle(
+                                  color: secondaryTextColor,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              ElevatedButton.icon(
+                                onPressed: _pickLogo,
+                                icon: const Icon(
+                                    Icons.add_photo_alternate_rounded,
+                                    size: 18),
+                                label: Text(_logoFile == null
+                                    ? 'Upload Logo'
+                                    : 'Change Logo'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      accentColor.withValues(alpha: 0.1),
+                                  foregroundColor: accentColor,
+                                  elevation: 0,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 16, vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
+              const SizedBox(height: 24),
+
+              // Basic Info Section
+              _buildSectionHeader('BASIC INFORMATION',
+                  Icons.info_outline_rounded, widget.isDarkMode),
+              _buildFormTextField(
+                controller: _orgNameController,
+                label: 'Organization Name',
+                isDarkMode: widget.isDarkMode,
+                prefixIcon:
+                    Icon(Icons.business_rounded, color: accentColor, size: 20),
+                validator: (v) => v!.isEmpty ? 'Required' : null,
+              ),
+              _buildFormTextField(
+                controller: _ownerUsernameController,
+                label: 'Owner Username',
+                isDarkMode: widget.isDarkMode,
+                prefixIcon:
+                    Icon(Icons.person_rounded, color: accentColor, size: 20),
+                validator: (v) => v!.isEmpty ? 'Required' : null,
+              ),
+              _buildFormTextField(
+                controller: _facNameController,
+                label: 'Factory Name',
+                isDarkMode: widget.isDarkMode,
+                prefixIcon:
+                    Icon(Icons.factory_rounded, color: accentColor, size: 20),
+                validator: (v) => v!.isEmpty ? 'Required' : null,
+              ),
+              _buildFormTextField(
+                controller: _addressController,
+                label: 'Factory Address',
+                isDarkMode: widget.isDarkMode,
+                prefixIcon: Icon(Icons.location_on_rounded,
+                    color: accentColor, size: 20),
+                maxLines: 2,
+              ),
+
+              const SizedBox(height: 24),
+              // Geofencing Section
+              _buildSectionHeader('GEOFENCING & BOUNDARIES', Icons.map_rounded,
+                  widget.isDarkMode),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildFormTextField(
+                      controller: _latController,
+                      label: 'Latitude',
+                      isDarkMode: widget.isDarkMode,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildFormTextField(
+                      controller: _lngController,
+                      label: 'Longitude',
+                      isDarkMode: widget.isDarkMode,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildFormTextField(
+                      controller: _acreController,
+                      label: 'Factory Area (Acres)',
+                      isDarkMode: widget.isDarkMode,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: _calculateRadiusFromAcres,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildFormTextField(
+                      controller: _radiusController,
+                      label: 'Radius (Meters)',
+                      isDarkMode: widget.isDarkMode,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      enabled: false,
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 24),
+              // Security Section
+              _buildSectionHeader(
+                  'SECURITY', Icons.security_rounded, widget.isDarkMode),
+              _buildFormTextField(
+                controller: _passwordController,
+                label: 'Owner Dashboard Password',
+                isDarkMode: widget.isDarkMode,
+                prefixIcon:
+                    Icon(Icons.password_rounded, color: accentColor, size: 20),
+                validator: (v) => v!.isEmpty ? 'Required' : null,
+              ),
+
+              const SizedBox(height: 40),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton.icon(
+                  onPressed: _isSaving ? null : _updateProfile,
+                  icon: _isSaving
+                      ? SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: widget.isDarkMode
+                                ? const Color(0xFF171821)
+                                : Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.check_circle_rounded),
+                  label: Text(
+                    _isSaving ? 'SAVING CHANGES...' : 'UPDATE SETTINGS',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: accentColor,
+                    foregroundColor: widget.isDarkMode
+                        ? const Color(0xFF21222D)
+                        : Colors.white,
+                    elevation: 4,
+                    shadowColor: accentColor.withValues(alpha: 0.3),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 60),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLogoPreview(Color accentColor, bool isDarkMode) {
+    return Container(
+      width: 100,
+      height: 100,
+      decoration: BoxDecoration(
+        color: isDarkMode
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.black.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: accentColor.withValues(alpha: 0.2),
+          width: 2,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: _logoFile != null
+            ? (kIsWeb
+                ? Image.memory(
+                    _logoFile!.bytes!,
+                    fit: BoxFit.cover,
+                  )
+                : Image.file(
+                    io.File(_logoFile!.path!),
+                    fit: BoxFit.cover,
+                  ))
+            : _logoUrlController.text.isNotEmpty
+                ? Image.network(
+                    _logoUrlController.text,
+                    fit: BoxFit.cover,
+                    errorBuilder: (ctx, err, st) => Icon(Icons.factory_rounded,
+                        size: 40,
+                        color: isDarkMode
+                            ? Colors.white.withValues(alpha: 0.1)
+                            : Colors.black.withValues(alpha: 0.1)),
+                  )
+                : Icon(Icons.factory_rounded,
+                    size: 40,
+                    color: isDarkMode
+                        ? Colors.white.withValues(alpha: 0.1)
+                        : Colors.black.withValues(alpha: 0.1)),
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, IconData icon, bool isDarkMode) {
+    final color =
+        isDarkMode ? const Color(0xFFA9DFD8) : const Color(0xFF2E8B57);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color.withValues(alpha: 0.7)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                color: color.withValues(alpha: 0.7),
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+              ),
+              overflow: TextOverflow.ellipsis,
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
@@ -775,7 +1122,9 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
 // ---------------------------------------------------------------------------
 class AttendanceTab extends StatefulWidget {
   final String organizationCode;
-  const AttendanceTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const AttendanceTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<AttendanceTab> createState() => _AttendanceTabState();
@@ -791,6 +1140,13 @@ class _AttendanceTabState extends State<AttendanceTab> {
   List<Map<String, dynamic>> _employees = [];
   String? _selectedEmployeeId;
   DateTimeRange? _selectedDateRange;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchEmployees();
+    _fetchAttendance();
+  }
 
   Future<List<Map<String, dynamic>>> _fetchProductionForAttendance(
     String workerId,
@@ -868,19 +1224,13 @@ class _AttendanceTabState extends State<AttendanceTab> {
     }
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchEmployees();
-    _fetchAttendance();
-  }
-
   Future<void> _fetchEmployees() async {
     try {
       final resp = await _supabase
           .from('workers')
-          .select('worker_id, name')
+          .select('worker_id, name, role')
           .eq('organization_code', widget.organizationCode)
+          .neq('role', 'supervisor')
           .order('name', ascending: true);
       if (mounted) {
         setState(() {
@@ -1027,16 +1377,26 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
       final fileBytes = excel.encode();
       if (fileBytes != null) {
-        final directory = await getTemporaryDirectory();
         final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
         final fileName = 'Operator_Efficiency_$timestamp.xlsx';
-        final file = io.File('${directory.path}/$fileName');
-        await file.writeAsBytes(fileBytes);
 
-        if (mounted) {
-          await share_plus.Share.shareXFiles([
-            share_plus.XFile(file.path),
-          ], text: 'Operator Efficiency Report');
+        if (kIsWeb) {
+          await WebDownloadHelper.download(
+            fileBytes,
+            fileName,
+            mimeType:
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          );
+        } else {
+          final directory = await getTemporaryDirectory();
+          final file = io.File('${directory.path}/$fileName');
+          await file.writeAsBytes(fileBytes);
+
+          if (mounted) {
+            await share_plus.Share.shareXFiles([
+              share_plus.XFile(file.path),
+            ], text: 'Operator Efficiency Report');
+          }
         }
       }
     } catch (e) {
@@ -1060,18 +1420,47 @@ class _AttendanceTabState extends State<AttendanceTab> {
     final dateStr = record['date'];
     final shiftName = record['shift_name'];
 
+    final Color dialogBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color cardBg = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.black.withValues(alpha: 0.05);
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.5)
+        : Colors.black.withValues(alpha: 0.6);
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        backgroundColor: dialogBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
           children: [
-            Text(workerName),
-            Text(
-              'Attendance Detail - $dateStr',
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.normal,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    workerName,
+                    style: TextStyle(
+                      color: textColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 20,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Attendance Detail - $dateStr',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: subTextColor,
+                      fontWeight: FontWeight.normal,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ),
             ),
           ],
@@ -1083,9 +1472,8 @@ class _AttendanceTabState extends State<AttendanceTab> {
             future: _fetchProductionForAttendance(workerId, dateStr, shiftName),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const SizedBox(
-                  height: 100,
-                  child: Center(child: CircularProgressIndicator()),
+                return const Center(
+                  child: CircularProgressIndicator(color: Color(0xFFA9DFD8)),
                 );
               }
 
@@ -1096,88 +1484,232 @@ class _AttendanceTabState extends State<AttendanceTab> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _detailSection('Shift Info', [
-                      _detailRow('Shift Name', record['shift_name'] ?? 'N/A'),
-                      _detailRow('Status', record['status'] ?? 'On Time'),
-                      _detailRow(
-                        'Check In',
-                        TimeUtils.formatTo12Hour(record['check_in']),
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: widget.isDarkMode
+                              ? Colors.white.withValues(alpha: 0.05)
+                              : Colors.black.withValues(alpha: 0.05),
+                        ),
                       ),
-                      _detailRow(
-                        'Check Out',
-                        TimeUtils.formatTo12Hour(record['check_out']),
-                      ),
-                      _detailRow(
-                        'Verified',
-                        (record['is_verified'] ?? false) ? 'Yes' : 'No',
-                      ),
-                    ]),
-                    const Divider(),
-                    const Text(
-                      'Production Activity',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
+                      child: _detailSection('Shift Info', [
+                        _detailRow('Shift Name', record['shift_name'] ?? 'N/A'),
+                        _detailRow('Status', record['status'] ?? 'On Time'),
+                        _detailRow(
+                          'Check In',
+                          TimeUtils.formatTo12Hour(record['check_in']),
+                        ),
+                        _detailRow(
+                          'Check Out',
+                          TimeUtils.formatTo12Hour(record['check_out']),
+                        ),
+                        _detailRow(
+                          'Verified',
+                          (record['is_verified'] ?? false) ? 'Yes' : 'No',
+                        ),
+                      ]),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: Text(
+                        'Production Activity',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          color: textColor,
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 12),
                     if (logs.isEmpty)
-                      const Text(
-                        'No production activity recorded for this shift.',
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: cardBg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: widget.isDarkMode
+                                ? Colors.white.withValues(alpha: 0.05)
+                                : Colors.black.withValues(alpha: 0.05),
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.history_toggle_off,
+                              color: subTextColor.withValues(alpha: 0.4),
+                              size: 32,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'No production activity recorded.',
+                              style: TextStyle(
+                                color: subTextColor,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
                       )
                     else
                       ...logs.map(
-                        (log) => Card(
+                        (log) => Container(
                           margin: const EdgeInsets.only(bottom: 8),
-                          child: Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Item: ${log['item_name'] ?? 'Unknown'}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: cardBg,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: widget.isDarkMode
+                                  ? Colors.white.withValues(alpha: 0.05)
+                                  : Colors.black.withValues(alpha: 0.05),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      'Item: ${log['item_name'] ?? 'Unknown'}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: textColor,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ),
+                                  Flexible(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 4,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: (log['performance_diff'] ?? 0) >=
+                                                0
+                                            ? Colors.green
+                                                .withValues(alpha: 0.1)
+                                            : Colors.red.withValues(alpha: 0.1),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: Text(
+                                        'Diff: ${log['performance_diff'] >= 0 ? "+" : ""}${log['performance_diff']}',
+                                        style: TextStyle(
+                                          color:
+                                              (log['performance_diff'] ?? 0) >=
+                                                      0
+                                                  ? Colors.green
+                                                  : Colors.red,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Operation: ${log['operation']}',
+                                style: TextStyle(
+                                  color: subTextColor,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              Text(
+                                'Machine: ${log['machine_name'] ?? 'N/A'}',
+                                style: TextStyle(
+                                  color: subTextColor,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.timer_outlined,
+                                    size: 14,
+                                    color: subTextColor.withValues(alpha: 0.6),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      '${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} - ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: subTextColor,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Qty: ${log['quantity']}',
+                                    style: TextStyle(
+                                      color: widget.isDarkMode
+                                          ? const Color(0xFFA9DFD8)
+                                          : const Color(0xFF2E8B57),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (log['remarks'] != null &&
+                                  log['remarks'].toString().isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: widget.isDarkMode
+                                        ? Colors.white.withValues(alpha: 0.03)
+                                        : Colors.black.withValues(alpha: 0.03),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    'Remarks: ${log['remarks']}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontStyle: FontStyle.italic,
+                                      color: subTextColor,
+                                    ),
                                   ),
                                 ),
-                                Text('Operation: ${log['operation']}'),
-                                Text(
-                                  'Machine: ${log['machine_name'] ?? 'N/A'}',
-                                ),
+                              ],
+                              if (log['created_by_supervisor'] == true) ...[
+                                const SizedBox(height: 4),
                                 Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
                                   children: [
-                                    Text('Qty: ${log['quantity']}'),
+                                    Icon(
+                                      Icons.verified_user_outlined,
+                                      size: 14,
+                                      color: Colors.blueAccent
+                                          .withValues(alpha: 0.7),
+                                    ),
+                                    const SizedBox(width: 4),
                                     Text(
-                                      'Diff: ${log['performance_diff'] >= 0 ? "+" : ""}${log['performance_diff']}',
+                                      'Logged by Supervisor (${log['supervisor_id'] ?? 'Unknown'})',
                                       style: TextStyle(
-                                        color: log['performance_diff'] >= 0
-                                            ? Colors.green
-                                            : Colors.red,
+                                        fontSize: 11,
                                         fontWeight: FontWeight.bold,
+                                        color: Colors.blueAccent
+                                            .withValues(alpha: 0.7),
                                       ),
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  'Time: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} - ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                                if (log['remarks'] != null)
-                                  Text(
-                                    'Remarks: ${log['remarks']}',
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      fontStyle: FontStyle.italic,
-                                    ),
-                                  ),
                               ],
-                            ),
+                            ],
                           ),
                         ),
                       ),
@@ -1190,7 +1722,10 @@ class _AttendanceTabState extends State<AttendanceTab> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
+            child: const Text(
+              'Close',
+              style: TextStyle(color: Color(0xFFA9DFD8)),
+            ),
           ),
         ],
       ),
@@ -1203,27 +1738,58 @@ class _AttendanceTabState extends State<AttendanceTab> {
       children: [
         Text(
           title,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+            color: Color(0xFFA9DFD8),
+          ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
         ...rows,
       ],
     );
   }
 
   Widget _detailRow(String label, String value) {
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.6)
+        : Colors.black.withValues(alpha: 0.6);
+
+    Color valueColor = textColor;
+    if (value == 'Absent') {
+      valueColor = Colors.red;
+    } else if (value == 'Early Leave' ||
+        value == 'Overtime' ||
+        value == 'Both') {
+      valueColor = Colors.orangeAccent;
+    } else if (value == 'On Time') {
+      valueColor = Colors.green;
+    }
+
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: const TextStyle(color: Colors.grey)),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(color: subTextColor, fontSize: 13),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           const SizedBox(width: 8),
           Flexible(
             child: Text(
               value,
-              style: const TextStyle(fontWeight: FontWeight.w500),
+              style: TextStyle(
+                fontWeight: FontWeight.w500,
+                color: valueColor,
+                fontSize: 13,
+              ),
               textAlign: TextAlign.end,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],
@@ -1233,203 +1799,428 @@ class _AttendanceTabState extends State<AttendanceTab> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
+    final Color cardColor =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    const Color accentColor = Color(0xFFA9DFD8);
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.12);
+
+    return RefreshIndicator(
+      onRefresh: _fetchAttendance,
+      color: accentColor,
+      backgroundColor:
+          widget.isDarkMode ? const Color(0xFF21222D) : Colors.white,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Daily Attendance',
+                            style: TextStyle(
+                              color: textColor,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            'Track and manage operator presence',
+                            style: TextStyle(
+                              color: subTextColor,
+                              fontSize: 13,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    _buildExportButton(accentColor),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                _buildFilters(cardColor, accentColor, textColor, subTextColor,
+                    borderColor),
+              ],
+            ),
+          ),
+          if (_isLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(100.0),
+                child: CircularProgressIndicator(color: accentColor),
+              ),
+            )
+          else if (_attendance.isEmpty)
+            _buildEmptyState()
+          else
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              itemCount: _attendance.length,
+              itemBuilder: (context, index) {
+                final record = _attendance[index];
+                return _buildAttendanceCard(record, cardColor);
+              },
+            ),
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExportButton(Color accentColor) {
+    return ElevatedButton.icon(
+      onPressed: _isExporting ? null : _exportToExcel,
+      icon: _isExporting
+          ? SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                    widget.isDarkMode ? const Color(0xFF21222D) : Colors.white),
+              ),
+            )
+          : const Icon(Icons.ios_share_rounded, size: 18),
+      label: Text(_isExporting ? 'Exporting...' : 'Export Excel'),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: accentColor,
+        foregroundColor:
+            widget.isDarkMode ? const Color(0xFF21222D) : Colors.white,
+        elevation: 0,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        textStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+    );
+  }
+
+  Widget _buildFilters(Color cardColor, Color accentColor, Color textColor,
+      Color subTextColor, Color borderColor) {
+    return Row(
       children: [
-        Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Expanded(
+          flex: 2,
+          child: Theme(
+            data: Theme.of(context).copyWith(
+              canvasColor:
+                  widget.isDarkMode ? const Color(0xFF21222D) : Colors.white,
+            ),
+            child: DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: _selectedEmployeeId,
+              dropdownColor:
+                  widget.isDarkMode ? const Color(0xFF21222D) : Colors.white,
+              style: TextStyle(color: textColor, fontSize: 14),
+              decoration: InputDecoration(
+                labelText: 'Filter by Employee',
+                labelStyle: TextStyle(
+                  color: subTextColor,
+                  fontSize: 12,
+                ),
+                filled: true,
+                fillColor: widget.isDarkMode
+                    ? Colors.white.withValues(alpha: 0.05)
+                    : Colors.black.withValues(alpha: 0.05),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: borderColor,
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: borderColor,
+                  ),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: accentColor.withValues(alpha: 0.5),
+                  ),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              ),
+              items: [
+                DropdownMenuItem(
+                  value: null,
+                  child:
+                      Text('All Employees', style: TextStyle(color: textColor)),
+                ),
+                ..._employees.map((e) => DropdownMenuItem(
+                      value: e['worker_id'].toString(),
+                      child: Text(e['name'].toString(),
+                          style: TextStyle(color: textColor)),
+                    )),
+              ],
+              onChanged: (val) {
+                setState(() => _selectedEmployeeId = val);
+                _fetchAttendance();
+              },
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 2,
+          child: InkWell(
+            onTap: _selectDateRange,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              decoration: BoxDecoration(
+                color: widget.isDarkMode
+                    ? Colors.white.withValues(alpha: 0.05)
+                    : Colors.black.withValues(alpha: 0.05),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: borderColor,
+                ),
+              ),
+              child: Row(
                 children: [
+                  const Icon(Icons.calendar_today_rounded,
+                      size: 16, color: Color(0xFFA9DFD8)),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Daily Attendance History',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.bold,
-                          ),
+                      _selectedDateRange == null
+                          ? 'Select Dates'
+                          : '${DateFormat('MMM dd').format(_selectedDateRange!.start)} - ${DateFormat('MMM dd').format(_selectedDateRange!.end)}',
+                      style: TextStyle(fontSize: 13, color: textColor),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  ElevatedButton.icon(
-                    onPressed: _isExporting ? null : _exportToExcel,
-                    icon: _isExporting
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.download),
-                    label: const Text('Export Excel'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
                 ],
               ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      isExpanded: true,
-                      initialValue: _selectedEmployeeId,
-                      decoration: const InputDecoration(
-                        labelText: 'Filter by Employee',
-                        border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(horizontal: 12),
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: null,
-                          child: Text('All Employees'),
-                        ),
-                        ..._employees.map((e) {
-                          return DropdownMenuItem(
-                            value: e['worker_id'].toString(),
-                            child: Text(e['name'].toString()),
-                          );
-                        }),
-                      ],
-                      onChanged: (val) {
-                        setState(() => _selectedEmployeeId = val);
-                        _fetchAttendance();
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: InkWell(
-                      onTap: _selectDateRange,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 14,
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.calendar_today, size: 18),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                _selectedDateRange == null
-                                    ? 'Select Dates'
-                                    : '${DateFormat('MMM dd').format(_selectedDateRange!.start)} - ${DateFormat('MMM dd').format(_selectedDateRange!.end)}',
-                                style: const TextStyle(fontSize: 12),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_selectedDateRange != null || _selectedEmployeeId != null)
-                    IconButton(
-                      icon: const Icon(Icons.clear, color: Colors.red),
-                      tooltip: 'Clear Filters',
-                      onPressed: () {
-                        setState(() {
-                          _selectedEmployeeId = null;
-                          _selectedDateRange = null;
-                        });
-                        _fetchAttendance();
-                      },
-                    ),
-                ],
-              ),
-            ],
+            ),
           ),
         ),
-        _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _attendance.isEmpty
-                ? const Center(child: Text('No attendance records found.'))
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: _attendance.length,
-                    itemBuilder: (context, index) {
-                      final record = _attendance[index];
-                      final worker = record['workers'] as Map<String, dynamic>?;
-                      final workerName = worker?['name'] ?? 'Unknown Worker';
-                      final status = record['status'] ?? 'On Time';
-
-                      Color statusColor = Colors.green;
-                      if (status.contains('Early Leave')) {
-                        statusColor = Colors.orange;
-                      }
-                      if (status.contains('Overtime')) {
-                        statusColor = Colors.blue;
-                      }
-                      if (status == 'Both') {
-                        statusColor = Colors.purple;
-                      }
-
-                      return Card(
-                        margin: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        child: ListTile(
-                          onTap: () => _showAttendanceDetails(record),
-                          leading: CircleAvatar(
-                            backgroundColor: statusColor.withValues(alpha: 0.1),
-                            child: Icon(Icons.person, color: statusColor),
-                          ),
-                          title: Text(
-                            workerName,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Date: ${record['date']} | Shift: ${record['shift_name'] ?? 'N/A'}',
-                              ),
-                              Text(
-                                'In: ${TimeUtils.formatTo12Hour(record['check_in'], format: 'hh:mm a')} | '
-                                'Out: ${TimeUtils.formatTo12Hour(record['check_out'], format: 'hh:mm a')}',
-                              ),
-                            ],
-                          ),
-                          trailing: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: statusColor.withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: statusColor),
-                            ),
-                            child: Text(
-                              status,
-                              style: TextStyle(
-                                color: statusColor,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+        if (_selectedDateRange != null || _selectedEmployeeId != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: IconButton(
+              icon: Icon(Icons.refresh_rounded, color: subTextColor),
+              onPressed: () {
+                setState(() {
+                  _selectedEmployeeId = null;
+                  _selectedDateRange = null;
+                });
+                _fetchAttendance();
+              },
+            ),
+          ),
       ],
+    );
+  }
+
+  Widget _buildEmptyState() {
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(60.0),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: widget.isDarkMode
+                    ? Colors.white.withValues(alpha: 0.02)
+                    : Colors.black.withValues(alpha: 0.02),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.event_note_rounded,
+                size: 48,
+                color: widget.isDarkMode
+                    ? Colors.white.withValues(alpha: 0.1)
+                    : Colors.black.withValues(alpha: 0.1),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'No Records Found',
+              style: TextStyle(
+                color: textColor,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Try adjusting your filters or date range',
+              style: TextStyle(
+                color: subTextColor,
+                fontSize: 13,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAttendanceCard(Map<String, dynamic> record, Color cardColor) {
+    final worker = record['workers'] as Map<String, dynamic>?;
+    final workerName = worker?['name'] ?? 'Unknown Worker';
+    final status = record['status'] ?? 'On Time';
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+
+    Color statusColor = const Color(0xFFA9DFD8);
+    if (status == 'Absent') {
+      statusColor = Colors.redAccent;
+    } else if (status.contains('Early Leave')) {
+      statusColor = Colors.orangeAccent;
+    } else if (status.contains('Overtime')) {
+      statusColor = Colors.blueAccent;
+    } else if (status == 'Both') {
+      statusColor = Colors.purpleAccent;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+            color: widget.isDarkMode
+                ? Colors.white.withValues(alpha: 0.05)
+                : Colors.black.withValues(alpha: 0.05)),
+        boxShadow: [
+          BoxShadow(
+            color:
+                Colors.black.withValues(alpha: widget.isDarkMode ? 0.2 : 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => _showAttendanceDetails(record),
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: statusColor.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(Icons.person_outline_rounded,
+                      color: statusColor, size: 24),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        workerName,
+                        style: TextStyle(
+                          color: textColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        DateFormat('EEEE, MMM dd')
+                            .format(DateTime.parse(record['date'])),
+                        style: TextStyle(
+                          color: subTextColor,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: statusColor.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          status,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '${TimeUtils.formatTo12Hour(record['check_in'])} - ${record['check_out'] != null ? TimeUtils.formatTo12Hour(record['check_out']) : '--:--'}',
+                        style: TextStyle(
+                          color: textColor,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white.withValues(alpha: 0.2),
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
 
 class ReportsTab extends StatefulWidget {
   final String organizationCode;
-  const ReportsTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const ReportsTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<ReportsTab> createState() => _ReportsTabState();
@@ -1442,62 +2233,150 @@ class _ReportsTabState extends State<ReportsTab> {
   bool _isExporting = false;
   String _filter = 'All'; // All, Today, Week, Month
   List<Map<String, dynamic>> _employees = [];
-  String? _selectedEmployeeId;
-  List<Map<String, dynamic>> _weekLogs = [];
-  List<Map<String, dynamic>> _monthLogs = [];
-  List<Map<String, dynamic>> _extraWeekLogs = [];
   int _extraUnitsToday = 0;
-  bool _isEmployeeScope = false;
-  String _linePeriod = 'Week';
-  List<FlSpot> _lineSpots = [];
 
   Widget _metricTile(String title, String value, Color color, IconData icon) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final isLandscape =
             MediaQuery.of(context).orientation == Orientation.landscape;
+        final isVerySmall = constraints.maxHeight < 80;
+
         return Container(
           decoration: BoxDecoration(
-            color: color,
+            color: cardBg,
             borderRadius: BorderRadius.circular(16),
-          ),
-          padding: EdgeInsets.all(isLandscape ? 10 : 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Icon(icon, color: Colors.black87, size: isLandscape ? 20 : 24),
-              SizedBox(width: isLandscape ? 8 : 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontSize: isLandscape ? 10 : 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+            border: Border.all(
+              color: widget.isDarkMode
+                  ? Colors.white.withValues(alpha: 0.15)
+                  : Colors.black.withValues(alpha: 0.12),
+            ),
+            boxShadow: widget.isDarkMode
+                ? []
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.05),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      value,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: isLandscape ? 14 : 16,
-                        fontWeight: FontWeight.bold,
+                  ],
+          ),
+          padding: EdgeInsets.all(isLandscape ? 8 : 12),
+          child: isVerySmall
+              ? Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(icon, color: color, size: 16),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              value,
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: textColor,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: subTextColor,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
                     ),
                   ],
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(icon, color: color, size: 18),
+                    ),
+                    const SizedBox(height: 8),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        value,
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: textColor,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: subTextColor,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
         );
       },
+    );
+  }
+
+  Widget _logInfoChip(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: color,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1511,9 +2390,26 @@ class _ReportsTabState extends State<ReportsTab> {
   void initState() {
     super.initState();
     _fetchLogs();
-    _fetchEmployeesForDropdown();
     _fetchExtraUnitsTodayOrg();
-    _refreshLineData();
+    _fetchEmployeesForExport();
+  }
+
+  Future<void> _fetchEmployeesForExport() async {
+    try {
+      final resp = await _supabase
+          .from('workers')
+          .select('worker_id, name, role')
+          .eq('organization_code', widget.organizationCode)
+          .neq('role', 'supervisor')
+          .order('name', ascending: true);
+      if (mounted) {
+        setState(() {
+          _employees = List<Map<String, dynamic>>.from(resp);
+        });
+      }
+    } catch (e) {
+      debugPrint('Fetch employees for export error: $e');
+    }
   }
 
   Future<void> _fetchLogs() async {
@@ -1577,157 +2473,6 @@ class _ReportsTabState extends State<ReportsTab> {
         if (mounted) setState(() => _isLoading = false);
       }
     }
-  }
-
-  Future<void> _fetchEmployeesForDropdown() async {
-    try {
-      final resp = await _supabase
-          .from('workers')
-          .select('worker_id, name')
-          .eq('organization_code', widget.organizationCode)
-          .order('name', ascending: true);
-      if (mounted) {
-        setState(() {
-          _employees = List<Map<String, dynamic>>.from(resp);
-        });
-      }
-    } catch (e) {
-      debugPrint('Fetch employees for dropdown error: $e');
-    }
-  }
-
-  Future<List<Map<String, dynamic>>> _fetchLogsFrom(
-    DateTime from, {
-    String? employeeId,
-  }) async {
-    if (employeeId != null) {
-      final response = await _supabase
-          .from('production_logs')
-          .select()
-          .eq('organization_code', widget.organizationCode)
-          .eq('worker_id', employeeId)
-          .gte('created_at', from.toIso8601String())
-          .order('created_at', ascending: true);
-      return List<Map<String, dynamic>>.from(response);
-    } else {
-      final response = await _supabase
-          .from('production_logs')
-          .select()
-          .eq('organization_code', widget.organizationCode)
-          .gte('created_at', from.toIso8601String())
-          .order('created_at', ascending: true);
-      return List<Map<String, dynamic>>.from(response);
-    }
-  }
-
-  Future<void> _loadSelectedEmployeeCharts(String employeeId) async {
-    final now = DateTime.now();
-    final weekFrom = now.subtract(const Duration(days: 6));
-    final monthFrom = now.subtract(const Duration(days: 29));
-    final extraFrom = now.subtract(const Duration(days: 7 * 8));
-    try {
-      final w = await _fetchLogsFrom(weekFrom, employeeId: employeeId);
-      final m = await _fetchLogsFrom(monthFrom, employeeId: employeeId);
-      final e = await _fetchLogsFrom(extraFrom, employeeId: employeeId);
-      if (mounted) {
-        setState(() {
-          _weekLogs = w;
-          _monthLogs = m;
-          _extraWeekLogs = e;
-        });
-      }
-    } catch (e) {
-      debugPrint('Load employee charts error: $e');
-    }
-  }
-
-  List<BarChartGroupData> _buildPeriodGroups(
-    List<Map<String, dynamic>> logs,
-    String period,
-  ) {
-    final now = DateTime.now();
-    final List<BarChartGroupData> groups = [];
-    if (period == 'Day') {
-      final buckets = List<double>.filled(24, 0);
-      for (final l in logs) {
-        final t = DateTime.tryParse(
-          (l['created_at'] ?? '').toString(),
-        )?.toLocal();
-        if (t != null) {
-          buckets[t.hour] += (l['quantity'] ?? 0) * 1.0;
-        }
-      }
-      for (int i = 0; i < buckets.length; i++) {
-        groups.add(
-          BarChartGroupData(
-            x: i,
-            barRods: [
-              BarChartRodData(toY: buckets[i], color: Colors.blueAccent),
-            ],
-          ),
-        );
-      }
-    } else {
-      final days = period == 'Week' ? 7 : 30;
-      final buckets = List<double>.filled(days, 0);
-      for (final l in logs) {
-        final t = DateTime.tryParse(
-          (l['created_at'] ?? '').toString(),
-        )?.toLocal();
-        if (t != null) {
-          final idx = now.difference(t).inDays;
-          final pos = days - 1 - idx;
-          if (pos >= 0 && pos < days) {
-            buckets[pos] += (l['quantity'] ?? 0) * 1.0;
-          }
-        }
-      }
-      for (int i = 0; i < buckets.length; i++) {
-        groups.add(
-          BarChartGroupData(
-            x: i,
-            barRods: [
-              BarChartRodData(toY: buckets[i], color: Colors.blueAccent),
-            ],
-          ),
-        );
-      }
-    }
-    return groups;
-  }
-
-  List<BarChartGroupData> _buildExtraWeekGroups(
-    List<Map<String, dynamic>> logs,
-  ) {
-    final now = DateTime.now();
-    final extraBuckets = List<double>.filled(8, 0);
-    for (final l in logs) {
-      final t = DateTime.tryParse(
-        (l['created_at'] ?? '').toString(),
-      )?.toLocal();
-      if (t != null) {
-        final wStart = DateTime(
-          t.year,
-          t.month,
-          t.day,
-        ).subtract(Duration(days: t.weekday - 1));
-        final weeksAgo =
-            DateTime(now.year, now.month, now.day).difference(wStart).inDays ~/
-                7;
-        final pos = 7 - weeksAgo;
-        final diff = (l['performance_diff'] ?? 0) as int;
-        if (diff > 0 && pos >= 0 && pos < 8) {
-          extraBuckets[pos] += diff * 1.0;
-        }
-      }
-    }
-    return [
-      for (int i = 0; i < extraBuckets.length; i++)
-        BarChartGroupData(
-          x: i,
-          barRods: [BarChartRodData(toY: extraBuckets[i], color: Colors.green)],
-        ),
-    ];
   }
 
   // Build query based on filter
@@ -1812,63 +2557,6 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  List<Map<String, dynamic>> _computeTopItemsPerOperation(
-    List<Map<String, dynamic>> logs,
-  ) {
-    final Map<String, Map<String, int>> agg = {};
-    for (final l in logs) {
-      final op = (l['operation'] ?? '').toString();
-      final item = (l['item_id'] ?? '').toString();
-      final qty = (l['quantity'] ?? 0) as int;
-      if (op.isEmpty || item.isEmpty) continue;
-      agg.putIfAbsent(op, () => {});
-      agg[op]![item] = (agg[op]![item] ?? 0) + qty;
-    }
-    final List<Map<String, dynamic>> result = [];
-    agg.forEach((op, items) {
-      String topItem = '';
-      int topQty = 0;
-      items.forEach((item, qty) {
-        if (qty > topQty) {
-          topQty = qty;
-          topItem = item;
-        }
-      });
-      result.add({'operation': op, 'item_id': topItem, 'total_qty': topQty});
-    });
-    return result;
-  }
-
-  List<Map<String, dynamic>> _computeTopByKey(
-    List<Map<String, dynamic>> logs,
-    String key,
-  ) {
-    final Map<String, Map<String, int>> agg = {};
-    for (final l in logs) {
-      final id = (l[key] ?? '').toString();
-      if (id.isEmpty) continue;
-      final qty = (l['quantity'] ?? 0) as int;
-      agg.putIfAbsent(id, () => {'count': 0, 'qty': 0});
-      agg[id]!['count'] = (agg[id]!['count'] ?? 0) + 1;
-      agg[id]!['qty'] = (agg[id]!['qty'] ?? 0) + qty;
-    }
-    final list = agg.entries
-        .map(
-          (e) => {
-            key: e.key,
-            'count': e.value['count'] ?? 0,
-            'qty': e.value['qty'] ?? 0,
-          },
-        )
-        .toList();
-    list.sort((a, b) {
-      final c = (b['count'] as int).compareTo(a['count'] as int);
-      if (c != 0) return c;
-      return (b['qty'] as int).compareTo(a['qty'] as int);
-    });
-    return list;
-  }
-
   // Aggregate logs: Employee -> Item -> Operation -> {qty, diff, employeeName}
 
   Future<void> _showExportOptions() async {
@@ -1876,15 +2564,48 @@ class _ReportsTabState extends State<ReportsTab> {
     String period = _filter;
     DateTimeRange? customRange;
     final Set<String> selectedWorkers = {};
-    String machinesCsv = '';
-    String itemsCsv = '';
-    String opsCsv = '';
+
+    final machinesController = TextEditingController();
+    final itemsController = TextEditingController();
+    final opsController = TextEditingController();
+
     await showDialog(
       context: context,
       barrierDismissible: true,
       builder: (ctx) {
+        final Color dialogBg =
+            widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+        final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+        final Color subTextColor = widget.isDarkMode
+            ? Colors.white70
+            : Colors.black.withValues(alpha: 0.6);
+        final Color fieldBg = widget.isDarkMode
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.black.withValues(alpha: 0.05);
+        final Color borderColor = widget.isDarkMode
+            ? Colors.white.withValues(alpha: 0.1)
+            : Colors.black.withValues(alpha: 0.1);
+
         return AlertDialog(
-          title: const Text('Export Options'),
+          backgroundColor: dialogBg,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFA9DFD8).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.file_download_outlined,
+                    color: Color(0xFFA9DFD8), size: 20),
+              ),
+              const SizedBox(width: 12),
+              Text('Export Options',
+                  style: TextStyle(color: textColor, fontSize: 18)),
+            ],
+          ),
           content: StatefulBuilder(
             builder: (context, setState) {
               return SizedBox(
@@ -1893,141 +2614,237 @@ class _ReportsTabState extends State<ReportsTab> {
                   constraints: BoxConstraints(
                     maxHeight: MediaQuery.of(context).size.height * 0.8,
                   ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Group By'),
-                        const SizedBox(height: 6),
-                        DropdownButton<String>(
-                          value: groupBy,
-                          isExpanded: true,
-                          items: const [
-                            DropdownMenuItem(
-                              value: 'Worker',
-                              child: Text('Worker'),
+                  child: Theme(
+                    data: Theme.of(context).copyWith(
+                      unselectedWidgetColor:
+                          subTextColor.withValues(alpha: 0.5),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('GROUP BY',
+                              style: TextStyle(
+                                  color: Color(0xFFA9DFD8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.1)),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            decoration: BoxDecoration(
+                              color: fieldBg,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: borderColor),
                             ),
-                            DropdownMenuItem(
-                              value: 'Machine',
-                              child: Text('Machine'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'Operation',
-                              child: Text('Operation'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'Item',
-                              child: Text('Item'),
-                            ),
-                          ],
-                          onChanged: (v) =>
-                              setState(() => groupBy = v ?? 'Worker'),
-                        ),
-                        const SizedBox(height: 12),
-                        const Text('Period'),
-                        const SizedBox(height: 6),
-                        DropdownButton<String>(
-                          value: period,
-                          isExpanded: true,
-                          items: ['All', 'Today', 'Week', 'Month', 'Custom']
-                              .map(
-                                (e) =>
-                                    DropdownMenuItem(value: e, child: Text(e)),
-                              )
-                              .toList(),
-                          onChanged: (v) async {
-                            if (v == null) return;
-                            if (ctx.mounted) setState(() => period = v);
-                            if (v == 'Custom') {
-                              final picked = await showDateRangePicker(
-                                context: context,
-                                firstDate: DateTime(2023),
-                                lastDate: DateTime.now(),
-                                initialDateRange: customRange ??
-                                    DateTimeRange(
-                                      start: DateTime.now().subtract(
-                                        const Duration(days: 7),
-                                      ),
-                                      end: DateTime.now(),
-                                    ),
-                              );
-                              if (picked != null && ctx.mounted) {
-                                setState(() => customRange = picked);
-                              }
-                            }
-                          },
-                        ),
-                        if (period == 'Custom' && customRange != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 8.0),
-                            child: Text(
-                              '${customRange!.start.toIso8601String().substring(0, 10)} — ${customRange!.end.toIso8601String().substring(0, 10)}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w500,
+                            child: DropdownButtonHideUnderline(
+                              child: DropdownButton<String>(
+                                value: groupBy,
+                                isExpanded: true,
+                                dropdownColor: dialogBg,
+                                style:
+                                    TextStyle(color: textColor, fontSize: 14),
+                                items: const [
+                                  DropdownMenuItem(
+                                      value: 'Worker', child: Text('Worker')),
+                                  DropdownMenuItem(
+                                      value: 'Machine', child: Text('Machine')),
+                                  DropdownMenuItem(
+                                      value: 'Operation',
+                                      child: Text('Operation')),
+                                  DropdownMenuItem(
+                                      value: 'Item', child: Text('Item')),
+                                ],
+                                onChanged: (v) =>
+                                    setState(() => groupBy = v ?? 'Worker'),
                               ),
                             ),
                           ),
-                        const SizedBox(height: 12),
-                        const Text('Filter (optional)'),
-                        const SizedBox(height: 6),
-                        ExpansionTile(
-                          title: const Text('Workers'),
-                          initiallyExpanded: false,
-                          children: [
-                            SizedBox(
-                              height: 180,
-                              child: ListView(
-                                children: _employees.map((e) {
-                                  final id = (e['worker_id'] ?? '').toString();
-                                  final name = (e['name'] ?? '').toString();
-                                  final checked = selectedWorkers.contains(id);
-                                  return CheckboxListTile(
-                                    value: checked,
-                                    onChanged: (v) {
-                                      setState(() {
-                                        if (v == true) {
-                                          selectedWorkers.add(id);
-                                        } else {
-                                          selectedWorkers.remove(id);
-                                        }
-                                      });
-                                    },
-                                    title: Text('$name ($id)'),
-                                  );
-                                }).toList(),
+                          const SizedBox(height: 16),
+                          const Text('PERIOD',
+                              style: TextStyle(
+                                  color: Color(0xFFA9DFD8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.1)),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            decoration: BoxDecoration(
+                              color: fieldBg,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: borderColor),
+                            ),
+                            child: DropdownButtonHideUnderline(
+                              child: DropdownButton<String>(
+                                value: period,
+                                isExpanded: true,
+                                dropdownColor: dialogBg,
+                                style:
+                                    TextStyle(color: textColor, fontSize: 14),
+                                items: [
+                                  'All',
+                                  'Today',
+                                  'Week',
+                                  'Month',
+                                  'Custom'
+                                ]
+                                    .map((e) => DropdownMenuItem(
+                                        value: e, child: Text(e)))
+                                    .toList(),
+                                onChanged: (v) async {
+                                  if (v == null) return;
+                                  if (ctx.mounted) setState(() => period = v);
+                                  if (v == 'Custom') {
+                                    final picked = await showDateRangePicker(
+                                      context: context,
+                                      firstDate: DateTime(2023),
+                                      lastDate: DateTime.now(),
+                                      builder: (context, child) {
+                                        return Theme(
+                                          data: Theme.of(context).copyWith(
+                                            colorScheme: widget.isDarkMode
+                                                ? const ColorScheme.dark(
+                                                    primary: Color(0xFFA9DFD8),
+                                                    onPrimary:
+                                                        Color(0xFF21222D),
+                                                    surface: Color(0xFF21222D),
+                                                    onSurface: Colors.white,
+                                                  )
+                                                : const ColorScheme.light(
+                                                    primary: Color(0xFFA9DFD8),
+                                                    onPrimary: Colors.white,
+                                                    surface: Colors.white,
+                                                    onSurface: Colors.black,
+                                                  ),
+                                            dialogTheme: DialogThemeData(
+                                              backgroundColor: dialogBg,
+                                            ),
+                                          ),
+                                          child: child!,
+                                        );
+                                      },
+                                      initialDateRange: customRange ??
+                                          DateTimeRange(
+                                            start: DateTime.now().subtract(
+                                              const Duration(days: 7),
+                                            ),
+                                            end: DateTime.now(),
+                                          ),
+                                    );
+                                    if (picked != null && ctx.mounted) {
+                                      setState(() => customRange = picked);
+                                    }
+                                  }
+                                },
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          decoration: const InputDecoration(
-                            labelText: 'Machine IDs (comma-separated)',
-                            border: OutlineInputBorder(),
-                            isDense: true,
                           ),
-                          onChanged: (v) => machinesCsv = v,
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          decoration: const InputDecoration(
-                            labelText: 'Item IDs (comma-separated)',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                          if (period == 'Custom' && customRange != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8.0),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFA9DFD8)
+                                      .withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  '${customRange!.start.toIso8601String().substring(0, 10)} — ${customRange!.end.toIso8601String().substring(0, 10)}',
+                                  style: const TextStyle(
+                                      color: Color(0xFFA9DFD8),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ),
+                          const SizedBox(height: 16),
+                          const Text('FILTER (OPTIONAL)',
+                              style: TextStyle(
+                                  color: Color(0xFFA9DFD8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.1)),
+                          const SizedBox(height: 8),
+                          Theme(
+                            data: Theme.of(context).copyWith(
+                                dividerColor: Colors.transparent,
+                                listTileTheme: ListTileThemeData(
+                                  textColor: textColor,
+                                  iconColor: const Color(0xFFA9DFD8),
+                                )),
+                            child: ExpansionTile(
+                              title: Text('Workers',
+                                  style: TextStyle(
+                                      color: textColor, fontSize: 14)),
+                              iconColor: const Color(0xFFA9DFD8),
+                              collapsedIconColor: subTextColor,
+                              backgroundColor: fieldBg.withValues(alpha: 0.03),
+                              collapsedBackgroundColor:
+                                  fieldBg.withValues(alpha: 0.03),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8)),
+                              collapsedShape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8)),
+                              children: [
+                                SizedBox(
+                                  height: 180,
+                                  child: ListView(
+                                    padding: EdgeInsets.zero,
+                                    children: _employees.map((e) {
+                                      final id =
+                                          (e['worker_id'] ?? '').toString();
+                                      final name = (e['name'] ?? '').toString();
+                                      final checked =
+                                          selectedWorkers.contains(id);
+                                      return CheckboxListTile(
+                                        value: checked,
+                                        activeColor: const Color(0xFFA9DFD8),
+                                        checkColor: dialogBg,
+                                        onChanged: (v) {
+                                          setState(() {
+                                            if (v == true) {
+                                              selectedWorkers.add(id);
+                                            } else {
+                                              selectedWorkers.remove(id);
+                                            }
+                                          });
+                                        },
+                                        title: Text('$name ($id)',
+                                            style: TextStyle(
+                                                color: subTextColor,
+                                                fontSize: 13)),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                          onChanged: (v) => itemsCsv = v,
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          decoration: const InputDecoration(
-                            labelText: 'Operations (comma-separated)',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                          const SizedBox(height: 12),
+                          _buildFormTextField(
+                            controller: machinesController,
+                            label: 'Machine IDs',
+                            isDarkMode: widget.isDarkMode,
+                            hint: 'Comma-separated (e.g. M1, M2)',
                           ),
-                          onChanged: (v) => opsCsv = v,
-                        ),
-                      ],
+                          _buildFormTextField(
+                            controller: itemsController,
+                            label: 'Item IDs',
+                            isDarkMode: widget.isDarkMode,
+                            hint: 'Comma-separated (e.g. IT1, IT2)',
+                          ),
+                          _buildFormTextField(
+                            controller: opsController,
+                            label: 'Operations',
+                            isDarkMode: widget.isDarkMode,
+                            hint: 'Comma-separated (e.g. OP1, OP2)',
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -2037,23 +2854,24 @@ class _ReportsTabState extends State<ReportsTab> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
+              child: Text('CANCEL', style: TextStyle(color: subTextColor)),
             ),
-            ElevatedButton(
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
               onPressed: () async {
                 Navigator.pop(ctx);
                 final workerIds = selectedWorkers.toList();
-                final machineIds = machinesCsv
+                final machineIds = machinesController.text
                     .split(',')
                     .map((e) => e.trim())
                     .where((e) => e.isNotEmpty)
                     .toList();
-                final itemIds = itemsCsv
+                final itemIds = itemsController.text
                     .split(',')
                     .map((e) => e.trim())
                     .where((e) => e.isNotEmpty)
                     .toList();
-                final operations = opsCsv
+                final operations = opsController.text
                     .split(',')
                     .map((e) => e.trim())
                     .where((e) => e.isNotEmpty)
@@ -2068,12 +2886,25 @@ class _ReportsTabState extends State<ReportsTab> {
                   operations: operations.isEmpty ? null : operations,
                 );
               },
-              child: const Text('Export'),
+              icon: const Icon(Icons.download, size: 16),
+              label: const Text('EXPORT'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFA9DFD8),
+                foregroundColor:
+                    widget.isDarkMode ? const Color(0xFF21222D) : Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
             ),
           ],
         );
       },
     );
+
+    machinesController.dispose();
+    itemsController.dispose();
+    opsController.dispose();
   }
 
   Future<void> _exportWithOptions({
@@ -2245,16 +3076,27 @@ class _ReportsTabState extends State<ReportsTab> {
       final bytes = excel.encode();
       if (bytes == null) throw Exception('Failed to generate Excel bytes');
 
-      final directory = await getTemporaryDirectory();
-      final path =
-          '${directory.path}/production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
-      final file = io.File(path);
-      await file.writeAsBytes(bytes);
+      final fileName =
+          'production_${groupBy.toLowerCase()}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
 
-      if (mounted) {
-        await share_plus.Share.shareXFiles([
-          share_plus.XFile(path),
-        ], text: 'Production Export ($groupBy)');
+      if (kIsWeb) {
+        await WebDownloadHelper.download(
+          bytes,
+          fileName,
+          mimeType:
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+      } else {
+        final directory = await getTemporaryDirectory();
+        final path = '${directory.path}/$fileName';
+        final file = io.File(path);
+        await file.writeAsBytes(bytes);
+
+        if (mounted) {
+          await share_plus.Share.shareXFiles([
+            share_plus.XFile(path),
+          ], text: 'Production Export ($groupBy)');
+        }
       }
 
       if (mounted) {
@@ -2267,6 +3109,147 @@ class _ReportsTabState extends State<ReportsTab> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _exportMasterData() async {
+    setState(() => _isExporting = true);
+    try {
+      final excel = Excel.createExcel();
+      excel.rename('Sheet1', 'Items & Operations');
+
+      // 1. Items & Operations Sheet
+      final itemsSheet = excel['Items & Operations'];
+      itemsSheet.appendRow([
+        TextCellValue('Item ID'),
+        TextCellValue('Item Name'),
+        TextCellValue('Operation Name'),
+        TextCellValue('Target'),
+        TextCellValue('Description'),
+      ]);
+
+      final itemsResp = await _supabase
+          .from('items')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .order('item_id', ascending: true);
+
+      for (var item in itemsResp) {
+        final ops = (item['operation_details'] as List? ?? []);
+        if (ops.isEmpty) {
+          itemsSheet.appendRow([
+            TextCellValue(item['item_id']?.toString() ?? ''),
+            TextCellValue(item['name']?.toString() ?? ''),
+            TextCellValue('N/A'),
+            const IntCellValue(0),
+            TextCellValue(item['description']?.toString() ?? ''),
+          ]);
+        } else {
+          for (var op in ops) {
+            itemsSheet.appendRow([
+              TextCellValue(item['item_id']?.toString() ?? ''),
+              TextCellValue(item['name']?.toString() ?? ''),
+              TextCellValue(op['name']?.toString() ?? ''),
+              IntCellValue(op['target'] ?? 0),
+              TextCellValue(item['description']?.toString() ?? ''),
+            ]);
+          }
+        }
+      }
+
+      // 2. Machines Sheet
+      final machinesSheet = excel['Machines'];
+      machinesSheet.appendRow([
+        TextCellValue('Machine ID'),
+        TextCellValue('Machine Name'),
+        TextCellValue('Type'),
+        TextCellValue('Status'),
+        TextCellValue('Last Maintenance'),
+      ]);
+
+      final machinesResp = await _supabase
+          .from('machines')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .order('machine_id', ascending: true);
+
+      for (var machine in machinesResp) {
+        machinesSheet.appendRow([
+          TextCellValue(machine['machine_id']?.toString() ?? ''),
+          TextCellValue(machine['name']?.toString() ?? ''),
+          TextCellValue(machine['type']?.toString() ?? ''),
+          TextCellValue(machine['status']?.toString() ?? 'Active'),
+          TextCellValue(machine['last_maintenance']?.toString() ?? 'N/A'),
+        ]);
+      }
+
+      // 3. Employees Sheet
+      final employeesSheet = excel['Employees'];
+      employeesSheet.appendRow([
+        TextCellValue('Worker ID'),
+        TextCellValue('Name'),
+        TextCellValue('Role'),
+        TextCellValue('Phone'),
+        TextCellValue('Status'),
+      ]);
+
+      final employeesResp = await _supabase
+          .from('workers')
+          .select()
+          .eq('organization_code', widget.organizationCode)
+          .order('name', ascending: true);
+
+      for (var employee in employeesResp) {
+        employeesSheet.appendRow([
+          TextCellValue(employee['worker_id']?.toString() ?? ''),
+          TextCellValue(employee['name']?.toString() ?? ''),
+          TextCellValue(employee['role']?.toString() ?? ''),
+          TextCellValue(employee['phone']?.toString() ?? ''),
+          TextCellValue(employee['status']?.toString() ?? 'Active'),
+        ]);
+      }
+
+      final bytes = excel.encode();
+      if (bytes == null) throw Exception('Failed to generate Excel bytes');
+
+      final fileName =
+          'Master_Data_${widget.organizationCode}_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+
+      if (kIsWeb) {
+        await WebDownloadHelper.download(
+          bytes,
+          fileName,
+          mimeType:
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+      } else {
+        // Mobile/Desktop: Save to file then share
+        final directory = await getTemporaryDirectory();
+        final path = '${directory.path}/$fileName';
+        final file = io.File(path);
+        await file.writeAsBytes(bytes);
+
+        if (mounted) {
+          await share_plus.Share.shareXFiles([
+            share_plus.XFile(path),
+          ], text: 'Factory Master Data Export (Items, Machines, Employees)');
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Master data export successful!')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Master data export error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
       }
     } finally {
       if (mounted) setState(() => _isExporting = false);
@@ -2327,107 +3310,117 @@ class _ReportsTabState extends State<ReportsTab> {
     }
   }
 
-  Future<void> _refreshLineData() async {
-    try {
-      final now = DateTime.now();
-      DateTime from;
-      int bucketsCount;
-      if (_linePeriod == 'Day') {
-        from = DateTime(now.year, now.month, now.day);
-        bucketsCount = 24;
-      } else if (_linePeriod == 'Week') {
-        from = now.subtract(const Duration(days: 6));
-        bucketsCount = 7;
-      } else {
-        from = now.subtract(const Duration(days: 29));
-        bucketsCount = 30;
-      }
-      final logs = await _fetchLogsFrom(
-        from,
-        employeeId: _isEmployeeScope ? _selectedEmployeeId : null,
-      );
-      final buckets = List<double>.filled(bucketsCount, 0);
-      for (final l in logs) {
-        final t = DateTime.tryParse(
-          (l['created_at'] ?? '').toString(),
-        )?.toLocal();
-        if (t == null) continue;
-        int pos;
-        if (_linePeriod == 'Day') {
-          pos = t.hour;
-        } else {
-          final idx = now.difference(t).inDays;
-          pos = bucketsCount - 1 - idx;
-        }
-        if (pos >= 0 && pos < bucketsCount) {
-          buckets[pos] += (l['quantity'] ?? 0) * 1.0;
-        }
-      }
-      final spots = <FlSpot>[];
-      for (int i = 0; i < buckets.length; i++) {
-        spots.add(FlSpot(i.toDouble(), buckets[i]));
-      }
-      if (mounted) setState(() => _lineSpots = spots);
-    } catch (e) {
-      if (mounted) setState(() => _lineSpots = []);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.12);
+
     return RefreshIndicator(
       onRefresh: () async {
         await Future.wait([
           _fetchLogs(),
-          _fetchEmployeesForDropdown(),
           _fetchExtraUnitsTodayOrg(),
-          _refreshLineData(),
         ]);
       },
       child: ListView(
         children: [
           // Filter Bar
           Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Row(
-              children: [
-                const Text(
-                  'Filter: ',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                DropdownButton<String>(
-                  value: _filter,
-                  items: ['All', 'Today', 'Week', 'Month'].map((String value) {
-                    return DropdownMenuItem<String>(
-                      value: value,
-                      child: Text(value),
-                    );
-                  }).toList(),
-                  onChanged: (newValue) {
-                    if (newValue != null) {
-                      setState(() {
-                        _filter = newValue;
-                        _fetchLogs();
-                      });
-                    }
-                  },
-                ),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.download, color: Colors.green),
-                  onPressed: _isExporting ? null : _showExportOptions,
-                  tooltip: 'Export to Excel',
-                ),
-                if (_isExporting)
-                  const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+            padding: const EdgeInsets.all(12.0),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: cardBg,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: borderColor),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.calendar_today,
+                      color: Color(0xFFA9DFD8), size: 18),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Time Range',
+                    style: TextStyle(
+                      color: textColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
                   ),
-              ],
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: widget.isDarkMode
+                            ? Colors.white.withValues(alpha: 0.05)
+                            : Colors.black.withValues(alpha: 0.03),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _filter,
+                          isExpanded: true,
+                          dropdownColor: cardBg,
+                          style: TextStyle(
+                            color: textColor,
+                            fontSize: 13,
+                          ),
+                          items: ['All', 'Today', 'Week', 'Month']
+                              .map((String value) {
+                            return DropdownMenuItem<String>(
+                              value: value,
+                              child: Text(value),
+                            );
+                          }).toList(),
+                          onChanged: (newValue) {
+                            if (newValue != null) {
+                              setState(() {
+                                _filter = newValue;
+                                _fetchLogs();
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  IconButton(
+                    icon: const Icon(Icons.inventory_2_outlined,
+                        color: Color(0xFFA9DFD8)),
+                    onPressed: _isExporting ? null : _exportMasterData,
+                    tooltip: 'Export Master Data (Items, Machines, Workers)',
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.file_download_outlined,
+                        color: Color(0xFFA9DFD8)),
+                    onPressed: _isExporting ? null : _showExportOptions,
+                    tooltip: 'Export Reports',
+                  ),
+                  if (_isExporting)
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Color(0xFFA9DFD8)),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
-          // Metrics Grid
+          // Metrics Grid (Simple Numbers)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12.0),
             child: GridView.count(
@@ -2435,14 +3428,14 @@ class _ReportsTabState extends State<ReportsTab> {
               physics: const NeverScrollableScrollPhysics(),
               crossAxisCount:
                   MediaQuery.of(context).orientation == Orientation.landscape
-                      ? 4
+                      ? 3
                       : 2,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
               childAspectRatio:
                   MediaQuery.of(context).orientation == Orientation.landscape
-                      ? 2.8
-                      : 2.2,
+                      ? 1.4
+                      : 1.3,
               children: [
                 _metricTile(
                   'Extra Units (24h)',
@@ -2451,488 +3444,17 @@ class _ReportsTabState extends State<ReportsTab> {
                   Icons.trending_up,
                 ),
                 _metricTile(
-                  'Employees',
-                  '${_employees.length}',
-                  Colors.blue.shade100,
-                  Icons.people,
-                ),
-                Builder(
-                  builder: (context) {
-                    final tops = _computeTopItemsPerOperation(_logs);
-                    final recent = tops.take(4).toList();
-                    final summary = recent.isEmpty
-                        ? 'No data'
-                        : recent
-                            .map(
-                              (e) =>
-                                  '${e['operation']} → ${e['item_id']} (${e['total_qty']})',
-                            )
-                            .join(' | ');
-                    return _metricTile(
-                      'Top Items per Operation',
-                      summary,
-                      Colors.orange.shade100,
-                      Icons.build_circle,
-                    );
-                  },
-                ),
-                Builder(
-                  builder: (context) {
-                    final topMachines = _computeTopByKey(_logs, 'machine_id');
-                    final summary = topMachines.isEmpty
-                        ? 'No data'
-                        : topMachines
-                            .take(4)
-                            .map(
-                              (e) =>
-                                  '${e['machine_id']} (${e['count']} logs, ${e['qty']} qty)',
-                            )
-                            .join(' | ');
-                    return _metricTile(
-                      'Most Used Machines',
-                      summary,
-                      Colors.pink.shade100,
-                      Icons.precision_manufacturing,
-                    );
-                  },
-                ),
-                Builder(
-                  builder: (context) {
-                    final topItems = _computeTopByKey(_logs, 'item_id');
-                    final summary = topItems.isEmpty
-                        ? 'No data'
-                        : topItems
-                            .take(4)
-                            .map(
-                              (e) =>
-                                  '${e['item_id']} (${e['count']} logs, ${e['qty']} qty)',
-                            )
-                            .join(' | ');
-                    return _metricTile(
-                      'Most Used Items',
-                      summary,
-                      Colors.teal.shade100,
-                      Icons.widgets,
-                    );
-                  },
-                ),
-                Builder(
-                  builder: (context) {
-                    final topOps = _computeTopByKey(_logs, 'operation');
-                    final summary = topOps.isEmpty
-                        ? 'No data'
-                        : topOps
-                            .take(4)
-                            .map(
-                              (e) =>
-                                  '${e['operation']} (${e['count']} logs, ${e['qty']} qty)',
-                            )
-                            .join(' | ');
-                    return _metricTile(
-                      'Most Performed Operations',
-                      summary,
-                      Colors.indigo.shade100,
-                      Icons.build,
-                    );
-                  },
+                  'Total Logs',
+                  '${_logs.length}',
+                  Colors.purple.shade100,
+                  Icons.list_alt,
                 ),
               ],
             ),
           ),
-          // Line chart controls
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12.0,
-              vertical: 8.0,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: !_isEmployeeScope,
-                          onChanged: (v) {
-                            setState(() {
-                              _isEmployeeScope = false;
-                            });
-                            _refreshLineData();
-                          },
-                        ),
-                        const Text('All employees'),
-                      ],
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: _isEmployeeScope,
-                          onChanged: (v) {
-                            setState(() {
-                              _isEmployeeScope = true;
-                            });
-                            _refreshLineData();
-                          },
-                        ),
-                        const Text('Specific employee'),
-                      ],
-                    ),
-                    if (_isEmployeeScope)
-                      DropdownButton<String>(
-                        value: _selectedEmployeeId,
-                        hint: const Text('Select employee'),
-                        items: _employees.map((w) {
-                          final id = (w['worker_id'] ?? '').toString();
-                          final name = (w['name'] ?? '').toString();
-                          return DropdownMenuItem<String>(
-                            value: id,
-                            child: Text('$name ($id)'),
-                          );
-                        }).toList(),
-                        onChanged: (v) {
-                          setState(() => _selectedEmployeeId = v);
-                          _refreshLineData();
-                        },
-                      ),
-                  ],
-                ),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: _linePeriod == 'Day',
-                          onChanged: (v) {
-                            setState(() => _linePeriod = 'Day');
-                            _refreshLineData();
-                          },
-                        ),
-                        const Text('Daily'),
-                      ],
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: _linePeriod == 'Week',
-                          onChanged: (v) {
-                            setState(() => _linePeriod = 'Week');
-                            _refreshLineData();
-                          },
-                        ),
-                        const Text('Weekly'),
-                      ],
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: _linePeriod == 'Month',
-                          onChanged: (v) {
-                            setState(() => _linePeriod = 'Month');
-                            _refreshLineData();
-                          },
-                        ),
-                        const Text('Monthly'),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: MediaQuery.of(context).orientation ==
-                          Orientation.landscape
-                      ? 180
-                      : 240,
-                  child: LineChart(
-                    LineChartData(
-                      lineTouchData: LineTouchData(
-                        enabled: true,
-                        touchTooltipData: LineTouchTooltipData(
-                          getTooltipItems: (touchedSpots) {
-                            return touchedSpots
-                                .map(
-                                  (s) => LineTooltipItem(
-                                    s.y.toStringAsFixed(0),
-                                    const TextStyle(color: Colors.white),
-                                  ),
-                                )
-                                .toList();
-                          },
-                        ),
-                      ),
-                      gridData:
-                          const FlGridData(show: true, drawVerticalLine: false),
-                      titlesData: FlTitlesData(
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 26,
-                            getTitlesWidget: (value, meta) {
-                              final v = value.toInt();
-                              if (_linePeriod == 'Day') {
-                                if (v % 3 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                final hour = v % 12 == 0 ? 12 : v % 12;
-                                final amPm = v < 12 ? 'AM' : 'PM';
-                                return Text(
-                                  '$hour $amPm',
-                                  style: const TextStyle(fontSize: 10),
-                                );
-                              } else if (_linePeriod == 'Week') {
-                                if ((v + 1) % 2 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  '${v + 1}',
-                                  style: const TextStyle(fontSize: 11),
-                                );
-                              } else {
-                                if ((v + 1) % 5 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  '${v + 1}',
-                                  style: const TextStyle(fontSize: 11),
-                                );
-                              }
-                            },
-                          ),
-                        ),
-                        leftTitles: const AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 40,
-                          ),
-                        ),
-                        topTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        rightTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                      ),
-                      borderData: FlBorderData(show: false),
-                      lineBarsData: [
-                        LineChartBarData(
-                          spots: _lineSpots,
-                          isCurved: true,
-                          color: Colors.blueAccent,
-                          barWidth: 3,
-                          dotData: const FlDotData(show: true),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Employee selection and graphs
-          if (_employees.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: Row(
-                children: [
-                  const Text(
-                    'Employee: ',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  DropdownButton<String>(
-                    value: _selectedEmployeeId,
-                    hint: const Text('Select employee'),
-                    items: _employees.map((w) {
-                      final id = (w['worker_id'] ?? '').toString();
-                      final name = (w['name'] ?? '').toString();
-                      return DropdownMenuItem<String>(
-                        value: id,
-                        child: Text('$name ($id)'),
-                      );
-                    }).toList(),
-                    onChanged: (v) {
-                      setState(() {
-                        _selectedEmployeeId = v;
-                      });
-                      if (v != null) {
-                        _loadSelectedEmployeeCharts(v);
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-          if (_selectedEmployeeId != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12.0,
-                vertical: 8.0,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text(
-                    'Efficiency (Week)',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(
-                    height: MediaQuery.of(context).orientation ==
-                            Orientation.landscape
-                        ? 180
-                        : 240,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
-                        gridData: const FlGridData(
-                          show: true,
-                          drawVerticalLine: false,
-                        ),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 26,
-                              getTitlesWidget: (value, meta) {
-                                final v = value.toInt();
-                                if ((v + 1) % 2 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  '${v + 1}',
-                                  style: const TextStyle(fontSize: 10),
-                                );
-                              },
-                            ),
-                          ),
-                          leftTitles: const AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 40,
-                            ),
-                          ),
-                          topTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                          rightTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Efficiency (Month)',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(
-                    height: MediaQuery.of(context).orientation ==
-                            Orientation.landscape
-                        ? 180
-                        : 240,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
-                        gridData: const FlGridData(
-                          show: true,
-                          drawVerticalLine: false,
-                        ),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 26,
-                              getTitlesWidget: (value, meta) {
-                                final v = value.toInt();
-                                if ((v + 1) % 5 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  '${v + 1}',
-                                  style: const TextStyle(fontSize: 10),
-                                );
-                              },
-                            ),
-                          ),
-                          leftTitles: const AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 40,
-                            ),
-                          ),
-                          topTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                          rightTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Weekly Extra Work',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(
-                    height: MediaQuery.of(context).orientation ==
-                            Orientation.landscape
-                        ? 150
-                        : 200,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: _buildExtraWeekGroups(_extraWeekLogs),
-                        gridData: const FlGridData(
-                          show: true,
-                          drawVerticalLine: false,
-                        ),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 24,
-                              getTitlesWidget: (value, meta) {
-                                final v = value.toInt();
-                                if ((v + 1) % 2 != 0) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Text(
-                                  'W${v + 1}',
-                                  style: const TextStyle(fontSize: 10),
-                                );
-                              },
-                            ),
-                          ),
-                          leftTitles: const AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              reservedSize: 40,
-                            ),
-                          ),
-                          topTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                          rightTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: false),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          const SizedBox(height: 12),
+          // Summary Reports (Wider Cards)
+          const SizedBox(height: 12),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8.0),
             child: _isLoading
@@ -2987,116 +3509,269 @@ class _ReportsTabState extends State<ReportsTab> {
                             }
                           }
 
-                          return ListTile(
-                            title: Text('$employeeName - $itemName'),
-                            subtitle: Column(
+                          return Container(
+                            margin: const EdgeInsets.symmetric(
+                              vertical: 6,
+                              horizontal: 12,
+                            ),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: cardBg,
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: borderColor,
+                              ),
+                            ),
+                            child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  '${log['operation']} | Worker Qty: ${log['quantity']} | Supervisor Qty: ${(log['supervisor_quantity'] ?? '-')}',
-                                ),
-                                if (log['target'] != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 2.0),
-                                    child: Text(
-                                      'Efficiency: ${_computeEfficiency(log['quantity'] as int, log['target'] as int)}%',
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.deepPurple,
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            employeeName,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                              color: textColor,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            itemName,
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color: subTextColor,
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                  ),
-                                if (log['start_time'] != null ||
-                                    log['end_time'] != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 2.0),
-                                    child: Text(
-                                      'Start: ${TimeUtils.formatTo12Hour(log['start_time'], format: 'hh:mm a')} | '
-                                      'End: ${TimeUtils.formatTo12Hour(log['end_time'], format: 'hh:mm a')}',
-                                      style: const TextStyle(fontSize: 12),
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        Text(
+                                          TimeUtils.formatTo12Hour(
+                                            log['created_at'],
+                                            format: 'MMM dd',
+                                          ),
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: textColor,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        Text(
+                                          TimeUtils.formatTo12Hour(
+                                            log['created_at'],
+                                            format: 'hh:mm a',
+                                          ),
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: subTextColor,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 16),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _logInfoChip(
+                                      Icons.settings_outlined,
+                                      '${log['operation']}',
+                                      const Color(0xFFA9DFD8),
+                                    ),
+                                    _logInfoChip(
+                                      Icons.inventory_2_outlined,
+                                      'Qty: ${log['quantity']}',
+                                      const Color(0xFFC2EBAE),
+                                    ),
+                                    if (log['target'] != null)
+                                      _logInfoChip(
+                                        Icons.bolt_outlined,
+                                        '${_computeEfficiency(log['quantity'] as int, log['target'] as int)}% Eff',
+                                        Colors.amber.shade300,
+                                      ),
+                                  ],
+                                ),
+                                if (inOutTime.isNotEmpty ||
+                                    workingHours.isNotEmpty) ...[
+                                  const SizedBox(height: 12),
+                                  Container(
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: widget.isDarkMode
+                                          ? Colors.white.withValues(alpha: 0.03)
+                                          : Colors.black
+                                              .withValues(alpha: 0.03),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.access_time,
+                                          size: 14,
+                                          color: subTextColor,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              if (inOutTime.isNotEmpty)
+                                                Text(
+                                                  inOutTime,
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    color: subTextColor,
+                                                  ),
+                                                ),
+                                              if (workingHours.isNotEmpty)
+                                                Text(
+                                                  workingHours,
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    color: Color(0xFFA9DFD8),
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                if (inOutTime.isNotEmpty)
-                                  Text(
-                                    inOutTime,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w500,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                if (workingHours.isNotEmpty)
-                                  Text(
-                                    workingHours,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.blue,
-                                      fontSize: 12,
-                                    ),
-                                  ),
+                                ],
                                 if (remarks != null && remarks.isNotEmpty)
                                   Padding(
-                                    padding: const EdgeInsets.only(top: 4.0),
-                                    child: Text(
-                                      'Remark: $remarks',
-                                      style: const TextStyle(
-                                        fontStyle: FontStyle.italic,
-                                        color: Colors.orange,
-                                        fontSize: 12,
+                                    padding: const EdgeInsets.only(top: 10.0),
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange
+                                            .withValues(alpha: 0.05),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: Colors.orange
+                                              .withValues(alpha: 0.1),
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.chat_bubble_outline,
+                                            size: 14,
+                                            color: Colors.orange,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              remarks,
+                                              style: const TextStyle(
+                                                fontStyle: FontStyle.italic,
+                                                color: Colors.orange,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ),
-                              ],
-                            ),
-                            trailing: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(
-                                  TimeUtils.formatTo12Hour(
-                                    log['created_at'],
-                                    format: 'MM/dd hh:mm a',
-                                  ),
-                                  style: const TextStyle(fontSize: 12),
+                                const SizedBox(height: 12),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    if ((log['is_verified'] ?? false) == true)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.green
+                                              .withValues(alpha: 0.1),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.verified_user_outlined,
+                                              color: Colors.green,
+                                              size: 14,
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              'Verified: ${log['verified_by']}',
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.green,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      )
+                                    else
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.amber
+                                              .withValues(alpha: 0.1),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                            color: Colors.orange
+                                                .withValues(alpha: 0.2),
+                                          ),
+                                        ),
+                                        child: const Row(
+                                          children: [
+                                            Icon(
+                                              Icons.pending_actions,
+                                              color: Colors.orange,
+                                              size: 14,
+                                            ),
+                                            SizedBox(width: 6),
+                                            Text(
+                                              'Pending Verification',
+                                              style: TextStyle(
+                                                color: Colors.orange,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    if (log['supervisor_quantity'] != null)
+                                      Text(
+                                        'Supervisor Qty: ${log['supervisor_quantity']}',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: subTextColor,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                  ],
                                 ),
-                                const SizedBox(height: 4),
-                                if ((log['verified_at'] ?? '') != '')
-                                  Text(
-                                    'Verified: ${TimeUtils.formatTo12Hour(log['verified_at'], format: 'MM/dd hh:mm a')}',
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.green,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                if ((log['verified_by'] ?? '') != '')
-                                  Text(
-                                    'By: ${log['verified_by']}',
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.green,
-                                    ),
-                                  ),
-                                if ((log['is_verified'] ?? false) != true)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color:
-                                          Colors.amber.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: Colors.orange),
-                                    ),
-                                    child: const Text(
-                                      'Verification Awaited',
-                                      style: TextStyle(
-                                        color: Colors.orange,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
                               ],
                             ),
                           );
@@ -3109,12 +3784,1832 @@ class _ReportsTabState extends State<ReportsTab> {
   }
 }
 
+class VisualisationTab extends StatefulWidget {
+  final String organizationCode;
+  final bool isDarkMode;
+  const VisualisationTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
+
+  @override
+  State<VisualisationTab> createState() => _VisualisationTabState();
+}
+
+class _VisualisationTabState extends State<VisualisationTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _employees = [];
+  String? _selectedEmployeeId;
+  List<Map<String, dynamic>> _weekLogs = [];
+  List<Map<String, dynamic>> _monthLogs = [];
+  List<Map<String, dynamic>> _extraWeekLogs = [];
+  List<Map<String, dynamic>> _summaryLogs = [];
+  Map<String, List<FlSpot>> _comparativeSpots = {}; // workerId -> spots
+  List<String> _comparativeWorkerIds = []; // To map index to workerId
+  bool _isEmployeeScope = false;
+  String _linePeriod = 'Week';
+  int _currentOffset = 0;
+  final PageController _pageController = PageController(initialPage: 500);
+  List<FlSpot> _lineSpots = [];
+  String _currentRangeTitle = '';
+
+  // Machine/Item/Operation Visualisation State
+  String _selectedMachineId = 'All';
+  String _selectedItemId = 'All';
+  String _selectedOperation = 'All';
+  List<Map<String, dynamic>> _machinesList = [];
+  List<Map<String, dynamic>> _itemsList = [];
+  List<String> _operationsList = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchEmployeesForDropdown();
+    _fetchFilterData();
+    _fetchSummaryData();
+    _refreshLineData();
+  }
+
+  List<Map<String, dynamic>> get _filteredSummaryLogs {
+    return _summaryLogs.where((log) {
+      bool machineMatch = _selectedMachineId == 'All' ||
+          log['machine_id'].toString() == _selectedMachineId;
+      bool itemMatch = _selectedItemId == 'All' ||
+          log['item_id'].toString() == _selectedItemId;
+      bool opMatch = _selectedOperation == 'All' ||
+          log['operation'].toString() == _selectedOperation;
+      return machineMatch && itemMatch && opMatch;
+    }).toList();
+  }
+
+  Future<void> _fetchSummaryData() async {
+    try {
+      final now = DateTime.now();
+      final start = DateTime(now.year, now.month, now.day)
+          .subtract(const Duration(days: 30));
+
+      final response = await _supabase
+          .from('production_logs')
+          .select('operation, item_id, machine_id, quantity, created_at')
+          .eq('organization_code', widget.organizationCode)
+          .gte('created_at', start.toIso8601String());
+
+      if (mounted) {
+        setState(() {
+          _summaryLogs = List<Map<String, dynamic>>.from(response);
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching summary data: $e');
+    }
+  }
+
+  Future<void> _fetchFilterData() async {
+    try {
+      final machinesResp = await _supabase
+          .from('machines')
+          .select('machine_id, name')
+          .eq('organization_code', widget.organizationCode)
+          .order('name');
+      final itemsResp = await _supabase
+          .from('items')
+          .select('item_id, name')
+          .eq('organization_code', widget.organizationCode)
+          .order('name');
+      final logsResp = await _supabase
+          .from('production_logs')
+          .select('operation')
+          .eq('organization_code', widget.organizationCode);
+
+      final ops = (logsResp as List)
+          .map((e) => e['operation']?.toString() ?? '')
+          .where((e) => e.isNotEmpty)
+          .toSet()
+          .toList();
+      ops.sort();
+
+      if (mounted) {
+        setState(() {
+          _machinesList = List<Map<String, dynamic>>.from(machinesResp);
+          _itemsList = List<Map<String, dynamic>>.from(itemsResp);
+          _operationsList = ops;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching filter data: $e');
+    }
+  }
+
+  Future<void> _fetchEmployeesForDropdown() async {
+    try {
+      final response = await _supabase
+          .from('workers')
+          .select('worker_id, name, role')
+          .eq('organization_code', widget.organizationCode)
+          .neq('role', 'supervisor')
+          .order('name');
+      if (mounted) {
+        setState(() {
+          _employees = List<Map<String, dynamic>>.from(response);
+          if (_employees.isNotEmpty && _selectedEmployeeId == null) {
+            _selectedEmployeeId = _employees.first['worker_id'].toString();
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching employees for dropdown: $e');
+    }
+  }
+
+  Widget _buildUsageChart({
+    required String title,
+    required List<Map<String, dynamic>> data,
+    required String key,
+    required Color barColor,
+  }) {
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+
+    final top5 = data.take(5).toList();
+
+    if (top5.isEmpty) {
+      return SizedBox(
+        height: 200,
+        child: Center(
+          child: Text(
+            'No data available',
+            style: TextStyle(
+              color: subTextColor,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return _chartCard(
+      title: title,
+      child: Column(
+        children: [
+          AspectRatio(
+            aspectRatio: 1.5,
+            child: BarChart(
+              BarChartData(
+                alignment: BarChartAlignment.spaceAround,
+                maxY: top5.isEmpty
+                    ? 10
+                    : top5
+                            .map((e) => (e['qty'] as num).toDouble())
+                            .reduce((a, b) => a > b ? a : b) *
+                        1.2,
+                barTouchData: BarTouchData(
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => cardBg,
+                    tooltipRoundedRadius: 8,
+                    getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                      return BarTooltipItem(
+                        rod.toY.toStringAsFixed(0),
+                        TextStyle(
+                          color: textColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                titlesData: FlTitlesData(
+                  show: true,
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 60,
+                      getTitlesWidget: (value, meta) {
+                        final index = value.toInt();
+                        if (index < 0 || index >= top5.length) {
+                          return const SizedBox.shrink();
+                        }
+                        final label = top5[index][key].toString();
+                        return SideTitleWidget(
+                          meta: meta,
+                          space: 8,
+                          child: RotatedBox(
+                            quarterTurns: 1,
+                            child: Text(
+                              label.length > 10
+                                  ? '${label.substring(0, 8)}..'
+                                  : label,
+                              style: TextStyle(
+                                color: subTextColor,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 40,
+                      getTitlesWidget: (value, meta) {
+                        return Text(
+                          value.toInt().toString(),
+                          style: TextStyle(
+                            color: subTextColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                ),
+                gridData: const FlGridData(show: false),
+                borderData: FlBorderData(show: false),
+                barGroups: top5.asMap().entries.map((entry) {
+                  return BarChartGroupData(
+                    x: entry.key,
+                    barRods: [
+                      BarChartRodData(
+                        toY: (entry.value['qty'] as num).toDouble(),
+                        color: barColor,
+                        width: 16,
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(4)),
+                      ),
+                    ],
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          ...top5.map((e) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                          color: barColor, shape: BoxShape.circle),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        e[key].toString(),
+                        style: TextStyle(
+                          color: textColor,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      '${e['qty']} units (${e['count']} logs)',
+                      style: TextStyle(
+                          color: subTextColor,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryCard(
+      String title, String summary, Color accentColor, IconData icon) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: widget.isDarkMode
+              ? Colors.white.withValues(alpha: 0.1)
+              : Colors.black.withValues(alpha: 0.05),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: accentColor, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            summary,
+            style: TextStyle(
+              color: subTextColor,
+              fontSize: 13,
+              height: 1.5,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _chartCard({required String title, required Widget child}) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: widget.isDarkMode
+              ? Colors.white.withValues(alpha: 0.1)
+              : Colors.black.withValues(alpha: 0.05),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: textColor,
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterChip({
+    required String label,
+    required bool isSelected,
+    required Function(bool) onSelected,
+  }) {
+    return FilterChip(
+      label: Text(label),
+      selected: isSelected,
+      onSelected: onSelected,
+      selectedColor: const Color(0xFFA9DFD8).withValues(alpha: 0.2),
+      checkmarkColor: const Color(0xFFA9DFD8),
+      labelStyle: TextStyle(
+        color: isSelected
+            ? const Color(0xFFA9DFD8)
+            : (widget.isDarkMode ? Colors.white70 : Colors.black54),
+        fontSize: 12,
+        fontWeight: FontWeight.bold,
+      ),
+      backgroundColor: widget.isDarkMode ? Colors.white10 : Colors.black12,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(
+          color: isSelected ? const Color(0xFFA9DFD8) : Colors.transparent,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilterDropdown({
+    required String label,
+    required String value,
+    required List<DropdownMenuItem<String>> items,
+    required void Function(String?) onChanged,
+  }) {
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: subTextColor,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: widget.isDarkMode
+                ? Colors.white.withValues(alpha: 0.05)
+                : Colors.black.withValues(alpha: 0.03),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: widget.isDarkMode
+                  ? Colors.white.withValues(alpha: 0.1)
+                  : Colors.black.withValues(alpha: 0.05),
+            ),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: value,
+              isExpanded: true,
+              dropdownColor: cardBg,
+              style: TextStyle(
+                color: textColor,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
+              items: items,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  List<Map<String, dynamic>> _computeTopItemsPerOperation(
+      List<Map<String, dynamic>> logs) {
+    final Map<String, Map<String, dynamic>> aggregation = {};
+    for (final log in logs) {
+      final op = log['operation'] ?? 'Unknown';
+      final item = log['item_id'] ?? 'Unknown';
+      final qty = (log['quantity'] ?? 0) as int;
+      final key = '$op|$item';
+      if (!aggregation.containsKey(key)) {
+        aggregation[key] = {
+          'operation': op,
+          'item_id': item,
+          'total_qty': 0,
+        };
+      }
+      aggregation[key]!['total_qty'] += qty;
+    }
+    final list = aggregation.values.toList();
+    list.sort((a, b) => b['total_qty'].compareTo(a['total_qty']));
+    return list;
+  }
+
+  List<Map<String, dynamic>> _computeTopByKey(
+      List<Map<String, dynamic>> logs, String key) {
+    final Map<String, Map<String, dynamic>> aggregation = {};
+    for (final log in logs) {
+      final val = log[key] ?? 'Unknown';
+      final qty = (log['quantity'] ?? 0) as int;
+      if (!aggregation.containsKey(val)) {
+        aggregation[val] = {
+          key: val,
+          'count': 0,
+          'qty': 0,
+        };
+      }
+      aggregation[val]!['count'] += 1;
+      aggregation[val]!['qty'] += qty;
+    }
+    final list = aggregation.values.toList();
+    list.sort((a, b) => b['qty'].compareTo(a['qty']));
+    return list;
+  }
+
+  Future<void> _refreshLineData() async {
+    try {
+      final now = DateTime.now();
+      DateTime start;
+      DateTime end;
+
+      if (_linePeriod == 'Day') {
+        final date = now.add(Duration(days: _currentOffset));
+        start = DateTime(date.year, date.month, date.day);
+        end = start.add(const Duration(days: 1));
+        _currentRangeTitle = DateFormat('MMM d, yyyy').format(start);
+      } else if (_linePeriod == 'Week') {
+        // Start of current week (Monday)
+        final weekday = now.weekday; // 1 = Monday, ..., 7 = Sunday
+        final currentWeekStart = DateTime(now.year, now.month, now.day)
+            .subtract(Duration(days: weekday - 1));
+        start = currentWeekStart.add(Duration(days: _currentOffset * 7));
+        end = start.add(const Duration(days: 7));
+        _currentRangeTitle =
+            '${DateFormat('MMM d').format(start)} - ${DateFormat('MMM d, yyyy').format(end.subtract(const Duration(seconds: 1)))}';
+      } else if (_linePeriod == 'Month') {
+        start = DateTime(now.year, now.month + _currentOffset, 1);
+        end = DateTime(start.year, start.month + 1, 1);
+        _currentRangeTitle = DateFormat('MMMM yyyy').format(start);
+      } else {
+        // Year
+        start = DateTime(now.year + _currentOffset, 1, 1);
+        end = DateTime(start.year + 1, 1, 1);
+        _currentRangeTitle = DateFormat('yyyy').format(start);
+      }
+
+      var query = _supabase
+          .from('production_logs')
+          .select(
+              'created_at, quantity, machine_id, item_id, operation, worker_id')
+          .eq('organization_code', widget.organizationCode)
+          .gte('created_at', start.toUtc().toIso8601String())
+          .lt('created_at', end.toUtc().toIso8601String());
+
+      if (_isEmployeeScope && _selectedEmployeeId != null) {
+        query = query.eq('worker_id', _selectedEmployeeId!);
+      }
+      if (_selectedMachineId != 'All') {
+        query = query.eq('machine_id', _selectedMachineId);
+      }
+      if (_selectedItemId != 'All') {
+        query = query.eq('item_id', _selectedItemId);
+      }
+      if (_selectedOperation != 'All') {
+        query = query.eq('operation', _selectedOperation);
+      }
+
+      final response = await query;
+      final logs = List<Map<String, dynamic>>.from(response);
+
+      // Comparative data
+      final Map<String, Map<int, double>> workerGrouped = {};
+      for (final log in logs) {
+        final wId = log['worker_id']?.toString() ?? 'Unknown';
+        final dt = DateTime.parse(log['created_at']).toLocal();
+        int index;
+        if (_linePeriod == 'Day') {
+          index = dt.hour;
+        } else if (_linePeriod == 'Week') {
+          index = dt.difference(start).inDays;
+        } else if (_linePeriod == 'Month') {
+          index = dt.day - 1;
+        } else {
+          index = dt.month - 1;
+        }
+
+        workerGrouped.putIfAbsent(wId, () => {});
+        workerGrouped[wId]![index] =
+            (workerGrouped[wId]![index] ?? 0) + (log['quantity'] ?? 0);
+      }
+
+      final Map<String, List<FlSpot>> compSpots = {};
+      int maxIdx;
+      if (_linePeriod == 'Day') {
+        maxIdx = 23;
+      } else if (_linePeriod == 'Week') {
+        maxIdx = 6;
+      } else if (_linePeriod == 'Month') {
+        maxIdx = DateTime(start.year, start.month + 1, 0).day - 1;
+      } else {
+        maxIdx = 11;
+      }
+
+      workerGrouped.forEach((wId, groupedData) {
+        final List<FlSpot> s = [];
+        for (int i = 0; i <= maxIdx; i++) {
+          s.add(FlSpot(i.toDouble(), groupedData[i] ?? 0));
+        }
+        compSpots[wId] = s;
+      });
+
+      // Group by period and create spots
+      final Map<int, double> grouped = {};
+      for (final log in logs) {
+        final dt = DateTime.parse(log['created_at']).toLocal();
+        int index;
+        if (_linePeriod == 'Day') {
+          index = dt.hour;
+        } else if (_linePeriod == 'Week') {
+          index = dt.difference(start).inDays;
+        } else if (_linePeriod == 'Month') {
+          index = dt.day - 1;
+        } else {
+          // Year - group by month (0-11)
+          index = dt.month - 1;
+        }
+        grouped[index] = (grouped[index] ?? 0) + (log['quantity'] ?? 0);
+      }
+
+      final List<FlSpot> spots = [];
+      int maxIndex;
+      if (_linePeriod == 'Day') {
+        maxIndex = 23;
+      } else if (_linePeriod == 'Week') {
+        maxIndex = 6;
+      } else if (_linePeriod == 'Month') {
+        // Last day of that month
+        maxIndex = DateTime(start.year, start.month + 1, 0).day - 1;
+      } else {
+        // Year
+        maxIndex = 11;
+      }
+
+      for (int i = 0; i <= maxIndex; i++) {
+        spots.add(FlSpot(i.toDouble(), grouped[i] ?? 0));
+      }
+
+      if (mounted) {
+        setState(() {
+          _lineSpots = spots;
+          _comparativeSpots = compSpots;
+          _comparativeWorkerIds = compSpots.keys.toList();
+        });
+      }
+    } catch (e) {
+      debugPrint('Error refreshing line data: $e');
+    }
+  }
+
+  Future<void> _loadSelectedEmployeeCharts(String workerId) async {
+    try {
+      final now = DateTime.now();
+      final weekStart = now.subtract(const Duration(days: 7));
+      final monthStart = DateTime(now.year, now.month, 1);
+
+      final weekResp = await _supabase
+          .from('production_logs')
+          .select('created_at, quantity')
+          .eq('worker_id', workerId)
+          .gte('created_at', weekStart.toIso8601String());
+
+      final monthResp = await _supabase
+          .from('production_logs')
+          .select('created_at, quantity')
+          .eq('worker_id', workerId)
+          .gte('created_at', monthStart.toIso8601String());
+
+      final extraResp = await _supabase
+          .from('production_logs')
+          .select('created_at, performance_diff')
+          .eq('worker_id', workerId)
+          .gte('created_at', weekStart.toIso8601String());
+
+      if (mounted) {
+        setState(() {
+          _weekLogs = List<Map<String, dynamic>>.from(weekResp);
+          _monthLogs = List<Map<String, dynamic>>.from(monthResp);
+          _extraWeekLogs = List<Map<String, dynamic>>.from(extraResp);
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading employee charts: $e');
+    }
+  }
+
+  List<BarChartGroupData> _buildPeriodGroups(
+      List<Map<String, dynamic>> logs, String period) {
+    final Map<int, double> grouped = {};
+    final now = DateTime.now();
+    final start = period == 'Week'
+        ? now.subtract(const Duration(days: 7))
+        : DateTime(now.year, now.month, 1);
+
+    for (final log in logs) {
+      final dt = DateTime.parse(log['created_at']).toLocal();
+      int index = period == 'Week' ? dt.difference(start).inDays : dt.day - 1;
+      grouped[index] = (grouped[index] ?? 0) + (log['quantity'] ?? 0);
+    }
+
+    final List<BarChartGroupData> groups = [];
+    final int maxIndex = period == 'Week' ? 6 : 30;
+    for (int i = 0; i <= maxIndex; i++) {
+      groups.add(
+        BarChartGroupData(
+          x: i,
+          barRods: [
+            BarChartRodData(
+              toY: grouped[i] ?? 0,
+              color: const Color(0xFFA9DFD8),
+              width: 12,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ],
+        ),
+      );
+    }
+    return groups;
+  }
+
+  List<BarChartGroupData> _buildExtraWeekGroups(
+      List<Map<String, dynamic>> logs) {
+    final Map<int, double> grouped = {};
+    final now = DateTime.now();
+    final start = now.subtract(const Duration(days: 7));
+
+    for (final log in logs) {
+      final dt = DateTime.parse(log['created_at']).toLocal();
+      final index = dt.difference(start).inDays;
+      final diff = (log['performance_diff'] ?? 0) as int;
+      if (diff > 0) {
+        grouped[index] = (grouped[index] ?? 0) + diff;
+      }
+    }
+
+    final List<BarChartGroupData> groups = [];
+    for (int i = 0; i <= 6; i++) {
+      groups.add(
+        BarChartGroupData(
+          x: i,
+          barRods: [
+            BarChartRodData(
+              toY: grouped[i] ?? 0,
+              color: Colors.amber.shade300,
+              width: 12,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ],
+        ),
+      );
+    }
+    return groups;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.12);
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchEmployeesForDropdown();
+        await _fetchFilterData();
+        await _fetchSummaryData();
+        await _refreshLineData();
+      },
+      child: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          // Global Filter Section
+          _chartCard(
+            title: 'Filters',
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildFilterDropdown(
+                        label: 'Machine',
+                        value: _selectedMachineId,
+                        items: [
+                          const DropdownMenuItem(
+                              value: 'All', child: Text('All Machines')),
+                          ..._machinesList.map((m) => DropdownMenuItem(
+                                value: m['machine_id'].toString(),
+                                child: Text(m['name'] ?? m['machine_id']),
+                              )),
+                        ],
+                        onChanged: (v) {
+                          setState(() => _selectedMachineId = v!);
+                          _refreshLineData();
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _buildFilterDropdown(
+                        label: 'Item',
+                        value: _selectedItemId,
+                        items: [
+                          const DropdownMenuItem(
+                              value: 'All', child: Text('All Items')),
+                          ..._itemsList.map((i) => DropdownMenuItem(
+                                value: i['item_id'].toString(),
+                                child: Text(i['name'] ?? i['item_id']),
+                              )),
+                        ],
+                        onChanged: (v) {
+                          setState(() => _selectedItemId = v!);
+                          _refreshLineData();
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildFilterDropdown(
+                        label: 'Operation',
+                        value: _selectedOperation,
+                        items: [
+                          const DropdownMenuItem(
+                              value: 'All', child: Text('All Operations')),
+                          ..._operationsList.map((o) => DropdownMenuItem(
+                                value: o,
+                                child: Text(o),
+                              )),
+                        ],
+                        onChanged: (v) {
+                          setState(() => _selectedOperation = v!);
+                          _refreshLineData();
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Builder(
+            builder: (context) {
+              final tops = _computeTopItemsPerOperation(_filteredSummaryLogs);
+              final recent = tops.take(4).toList();
+              final summary = recent.isEmpty
+                  ? 'No data'
+                  : recent
+                      .map(
+                        (e) =>
+                            '${e['operation']} → ${e['item_id']} (${e['total_qty']})',
+                      )
+                      .join('\n');
+              return _summaryCard(
+                'Top Items per Operation (Last 30d)',
+                summary,
+                Colors.orange,
+                Icons.build_circle,
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Builder(
+            builder: (context) {
+              final topMachines =
+                  _computeTopByKey(_filteredSummaryLogs, 'machine_id');
+              final summary = topMachines.isEmpty
+                  ? 'No data'
+                  : topMachines
+                      .take(4)
+                      .map(
+                        (e) =>
+                            '${e['machine_id']} (${e['count']} logs, ${e['qty']} qty)',
+                      )
+                      .join('\n');
+              return _summaryCard(
+                'Most Used Machines (Last 30d)',
+                summary,
+                Colors.pink,
+                Icons.precision_manufacturing,
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Builder(
+            builder: (context) {
+              final topItems =
+                  _computeTopByKey(_filteredSummaryLogs, 'item_id');
+              final summary = topItems.isEmpty
+                  ? 'No data'
+                  : topItems
+                      .take(4)
+                      .map(
+                        (e) =>
+                            '${e['item_id']} (${e['count']} logs, ${e['qty']} qty)',
+                      )
+                      .join('\n');
+              return _summaryCard(
+                'Most Used Items (Last 30d)',
+                summary,
+                widget.isDarkMode ? Colors.teal : Colors.teal.shade700,
+                Icons.widgets,
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Builder(
+            builder: (context) {
+              final topOps =
+                  _computeTopByKey(_filteredSummaryLogs, 'operation');
+              final summary = topOps.isEmpty
+                  ? 'No data'
+                  : topOps
+                      .take(4)
+                      .map(
+                        (e) =>
+                            '${e['operation']} (${e['count']} logs, ${e['qty']} qty)',
+                      )
+                      .join('\n');
+              return _summaryCard(
+                'Most Performed Operations (Last 30d)',
+                summary,
+                widget.isDarkMode ? Colors.indigo : Colors.indigo.shade700,
+                Icons.build,
+              );
+            },
+          ),
+          const SizedBox(height: 20),
+          // Detailed Usage Charts
+          _buildUsageChart(
+            title: 'Machine Usage Analytics (Last 30d)',
+            data: _computeTopByKey(_filteredSummaryLogs, 'machine_id'),
+            key: 'machine_id',
+            barColor: Colors.pink.shade300,
+          ),
+          const SizedBox(height: 12),
+          _buildUsageChart(
+            title: 'Item Usage Analytics (Last 30d)',
+            data: _computeTopByKey(_filteredSummaryLogs, 'item_id'),
+            key: 'item_id',
+            barColor: Colors.teal.shade300,
+          ),
+          const SizedBox(height: 12),
+          _buildUsageChart(
+            title: 'Operation Analytics (Last 30d)',
+            data: _computeTopByKey(_filteredSummaryLogs, 'operation'),
+            key: 'operation',
+            barColor: Colors.indigo.shade300,
+          ),
+          // Line chart controls
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Production Quantity Overview Filter',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: subTextColor,
+                ),
+              ),
+              const SizedBox(height: 12),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildFilterChip(
+                      label: 'All Employees',
+                      isSelected: !_isEmployeeScope,
+                      onSelected: (v) {
+                        setState(() {
+                          _isEmployeeScope = false;
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _buildFilterChip(
+                      label: 'Specific Employee',
+                      isSelected: _isEmployeeScope,
+                      onSelected: (v) {
+                        setState(() {
+                          _isEmployeeScope = true;
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                    if (_isEmployeeScope) ...[
+                      const SizedBox(width: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: cardBg,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: borderColor,
+                          ),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _selectedEmployeeId,
+                            hint: Text(
+                              'Select employee',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: subTextColor,
+                              ),
+                            ),
+                            dropdownColor: cardBg,
+                            style: TextStyle(
+                              color: textColor,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            items: _employees.map((w) {
+                              final id = (w['worker_id'] ?? '').toString();
+                              final name = (w['name'] ?? '').toString();
+                              return DropdownMenuItem<String>(
+                                value: id,
+                                child: Text('$name ($id)'),
+                              );
+                            }).toList(),
+                            onChanged: (v) {
+                              setState(() => _selectedEmployeeId = v);
+                              _refreshLineData();
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildFilterChip(
+                      label: 'Daily',
+                      isSelected: _linePeriod == 'Day',
+                      onSelected: (v) {
+                        setState(() {
+                          _linePeriod = 'Day';
+                          _currentOffset = 0;
+                          _pageController.jumpToPage(500);
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _buildFilterChip(
+                      label: 'Weekly',
+                      isSelected: _linePeriod == 'Week',
+                      onSelected: (v) {
+                        setState(() {
+                          _linePeriod = 'Week';
+                          _currentOffset = 0;
+                          _pageController.jumpToPage(500);
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _buildFilterChip(
+                      label: 'Monthly',
+                      isSelected: _linePeriod == 'Month',
+                      onSelected: (v) {
+                        setState(() {
+                          _linePeriod = 'Month';
+                          _currentOffset = 0;
+                          _pageController.jumpToPage(500);
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    _buildFilterChip(
+                      label: 'Yearly',
+                      isSelected: _linePeriod == 'Year',
+                      onSelected: (v) {
+                        setState(() {
+                          _linePeriod = 'Year';
+                          _currentOffset = 0;
+                          _pageController.jumpToPage(500);
+                        });
+                        _refreshLineData();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              _chartCard(
+                title: 'Production Quantity Overview',
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        IconButton(
+                          icon: Icon(Icons.chevron_left, color: textColor),
+                          onPressed: () {
+                            _pageController.previousPage(
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeInOut,
+                            );
+                          },
+                        ),
+                        Text(
+                          _currentRangeTitle,
+                          style: TextStyle(
+                            color: textColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.chevron_right, color: textColor),
+                          onPressed: _currentOffset >= 0
+                              ? null
+                              : () {
+                                  _pageController.nextPage(
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeInOut,
+                                  );
+                                },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    AspectRatio(
+                      aspectRatio: MediaQuery.of(context).orientation ==
+                              Orientation.landscape
+                          ? 16 / 6
+                          : 9 / 5,
+                      child: PageView.builder(
+                        controller: _pageController,
+                        onPageChanged: (index) {
+                          setState(() {
+                            _currentOffset = index - 500;
+                          });
+                          _refreshLineData();
+                        },
+                        itemBuilder: (context, index) {
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 8.0),
+                            child: LineChart(
+                              LineChartData(
+                                lineTouchData: LineTouchData(
+                                  enabled: true,
+                                  handleBuiltInTouches: true,
+                                  touchTooltipData: LineTouchTooltipData(
+                                    getTooltipColor: (_) => cardBg,
+                                    tooltipRoundedRadius: 8,
+                                    getTooltipItems: (touchedSpots) {
+                                      return touchedSpots
+                                          .map(
+                                            (s) => LineTooltipItem(
+                                              s.y.toStringAsFixed(0),
+                                              TextStyle(
+                                                color: textColor,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          )
+                                          .toList();
+                                    },
+                                  ),
+                                ),
+                                gridData: const FlGridData(show: false),
+                                titlesData: FlTitlesData(
+                                  bottomTitles: AxisTitles(
+                                    sideTitles: SideTitles(
+                                      showTitles: true,
+                                      reservedSize: 32,
+                                      getTitlesWidget: (value, meta) {
+                                        final v = value.toInt();
+                                        String text = '';
+                                        if (_linePeriod == 'Day') {
+                                          if (v % 6 != 0) {
+                                            return const SizedBox();
+                                          }
+                                          final hour =
+                                              v % 12 == 0 ? 12 : v % 12;
+                                          final amPm = v < 12 ? 'AM' : 'PM';
+                                          text = '$hour$amPm';
+                                        } else if (_linePeriod == 'Week') {
+                                          final days = [
+                                            'Mon',
+                                            'Tue',
+                                            'Wed',
+                                            'Thu',
+                                            'Fri',
+                                            'Sat',
+                                            'Sun'
+                                          ];
+                                          if (v >= 0 && v < 7) text = days[v];
+                                        } else if (_linePeriod == 'Month') {
+                                          if ((v + 1) % 5 != 0) {
+                                            return const SizedBox();
+                                          }
+                                          text = '${v + 1}';
+                                        } else {
+                                          // Year
+                                          final months = [
+                                            'Jan',
+                                            'Feb',
+                                            'Mar',
+                                            'Apr',
+                                            'May',
+                                            'Jun',
+                                            'Jul',
+                                            'Aug',
+                                            'Sep',
+                                            'Oct',
+                                            'Nov',
+                                            'Dec'
+                                          ];
+                                          if (v >= 0 && v < 12) {
+                                            text = months[v];
+                                          }
+                                        }
+                                        return SideTitleWidget(
+                                          meta: meta,
+                                          space: 10,
+                                          child: Text(
+                                            text,
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              color: subTextColor,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  leftTitles: AxisTitles(
+                                    sideTitles: SideTitles(
+                                      showTitles: true,
+                                      reservedSize: 40,
+                                      getTitlesWidget: (value, meta) {
+                                        return Text(
+                                          value.toInt().toString(),
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: subTextColor,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                  topTitles: const AxisTitles(
+                                    sideTitles: SideTitles(showTitles: false),
+                                  ),
+                                  rightTitles: const AxisTitles(
+                                    sideTitles: SideTitles(showTitles: false),
+                                  ),
+                                ),
+                                borderData: FlBorderData(show: false),
+                                lineBarsData: [
+                                  LineChartBarData(
+                                    spots: _lineSpots,
+                                    isCurved: true,
+                                    gradient: const LinearGradient(
+                                      colors: [
+                                        Color(0xFFA9DFD8),
+                                        Color(0xFFC2EBAE)
+                                      ],
+                                    ),
+                                    barWidth: 3,
+                                    isStrokeCapRound: true,
+                                    dotData: const FlDotData(show: false),
+                                    belowBarData: BarAreaData(
+                                      show: true,
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          const Color(0xFFA9DFD8)
+                                              .withValues(alpha: 0.2),
+                                          const Color(0xFFA9DFD8)
+                                              .withValues(alpha: 0.0),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          // Comparative Production Chart
+          if (_comparativeSpots.isNotEmpty)
+            _chartCard(
+              title: 'Comparative Production by Employee',
+              child: Column(
+                children: [
+                  AspectRatio(
+                    aspectRatio: MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 16 / 6
+                        : 9 / 5,
+                    child: LineChart(
+                      LineChartData(
+                        lineTouchData: LineTouchData(
+                          enabled: true,
+                          touchTooltipData: LineTouchTooltipData(
+                            getTooltipColor: (_) => cardBg,
+                            tooltipRoundedRadius: 8,
+                            getTooltipItems: (touchedSpots) {
+                              return touchedSpots.map((s) {
+                                if (s.barIndex >=
+                                    _comparativeWorkerIds.length) {
+                                  return LineTooltipItem(
+                                    'Unknown: ${s.y.toInt()}',
+                                    TextStyle(
+                                      color: textColor,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  );
+                                }
+                                final workerId =
+                                    _comparativeWorkerIds[s.barIndex];
+                                final worker = _employees.firstWhere(
+                                  (w) => w['worker_id'] == workerId,
+                                  orElse: () => {'name': workerId},
+                                );
+                                return LineTooltipItem(
+                                  '${worker['name']}: ${s.y.toInt()}',
+                                  TextStyle(
+                                    color: s.bar.gradient?.colors.first ??
+                                        textColor,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                );
+                              }).toList();
+                            },
+                          ),
+                        ),
+                        gridData: const FlGridData(show: false),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 32,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                String text = '';
+                                if (_linePeriod == 'Day') {
+                                  if (v % 6 != 0) return const SizedBox();
+                                  final hour = v % 12 == 0 ? 12 : v % 12;
+                                  final amPm = v < 12 ? 'AM' : 'PM';
+                                  text = '$hour$amPm';
+                                } else if (_linePeriod == 'Week') {
+                                  final days = [
+                                    'Mon',
+                                    'Tue',
+                                    'Wed',
+                                    'Thu',
+                                    'Fri',
+                                    'Sat',
+                                    'Sun'
+                                  ];
+                                  if (v >= 0 && v < 7) text = days[v];
+                                } else if (_linePeriod == 'Month') {
+                                  if ((v + 1) % 5 != 0) return const SizedBox();
+                                  text = '${v + 1}';
+                                } else {
+                                  final months = [
+                                    'Jan',
+                                    'Feb',
+                                    'Mar',
+                                    'Apr',
+                                    'May',
+                                    'Jun',
+                                    'Jul',
+                                    'Aug',
+                                    'Sep',
+                                    'Oct',
+                                    'Nov',
+                                    'Dec'
+                                  ];
+                                  if (v >= 0 && v < 12) text = months[v];
+                                }
+                                return SideTitleWidget(
+                                  meta: meta,
+                                  space: 10,
+                                  child: Text(
+                                    text,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: subTextColor,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  value.toInt().toString(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: subTextColor,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          topTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false)),
+                          rightTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false)),
+                        ),
+                        borderData: FlBorderData(show: false),
+                        lineBarsData: _comparativeSpots.entries.map((entry) {
+                          final workerId = entry.key;
+                          final spots = entry.value;
+                          // Generate a unique color based on workerId
+                          final color = Colors.primaries[
+                              workerId.hashCode % Colors.primaries.length];
+
+                          return LineChartBarData(
+                            spots: spots,
+                            isCurved: true,
+                            barWidth: 2,
+                            gradient: LinearGradient(
+                              colors: [
+                                color,
+                                color.withValues(alpha: 0.7),
+                              ],
+                            ),
+                            dotData: const FlDotData(show: false),
+                            belowBarData: BarAreaData(show: false),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    children: _comparativeSpots.keys.map((wId) {
+                      final worker = _employees.firstWhere(
+                        (w) => w['worker_id'] == wId,
+                        orElse: () => {'name': wId},
+                      );
+                      final color = Colors
+                          .primaries[wId.hashCode % Colors.primaries.length];
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            worker['name'] ?? wId,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: textColor,
+                            ),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 20),
+          // Employee selection and graphs
+          if (_employees.isNotEmpty)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Efficiency Analytics Filter',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: subTextColor,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: borderColor,
+                    ),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _selectedEmployeeId,
+                      hint: Text(
+                        'Select employee for efficiency graphs',
+                        style: TextStyle(fontSize: 13, color: subTextColor),
+                      ),
+                      dropdownColor: cardBg,
+                      isExpanded: true,
+                      style: TextStyle(
+                        color: textColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      items: _employees.map((w) {
+                        final id = (w['worker_id'] ?? '').toString();
+                        final name = (w['name'] ?? '').toString();
+                        return DropdownMenuItem<String>(
+                          value: id,
+                          child: Text('$name ($id)'),
+                        );
+                      }).toList(),
+                      onChanged: (v) {
+                        setState(() {
+                          _selectedEmployeeId = v;
+                        });
+                        if (v != null) {
+                          _loadSelectedEmployeeCharts(v);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _chartCard(
+                  title: 'Weekly Production',
+                  child: AspectRatio(
+                    aspectRatio: MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 16 / 5
+                        : 9 / 4,
+                    child: BarChart(
+                      BarChartData(
+                        barTouchData: BarTouchData(
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipColor: (_) => cardBg,
+                            tooltipRoundedRadius: 8,
+                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              return BarTooltipItem(
+                                rod.toY.toStringAsFixed(0),
+                                TextStyle(
+                                  color: textColor,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        barGroups: _buildPeriodGroups(_weekLogs, 'Week'),
+                        gridData: const FlGridData(show: false),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 32,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                return SideTitleWidget(
+                                  meta: meta,
+                                  space: 10,
+                                  child: Text(
+                                    'D${v + 1}',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: subTextColor,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  value.toInt().toString(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: subTextColor,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                        borderData: FlBorderData(show: false),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _chartCard(
+                  title: 'Monthly Production',
+                  child: AspectRatio(
+                    aspectRatio: MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 16 / 5
+                        : 9 / 4,
+                    child: BarChart(
+                      BarChartData(
+                        barTouchData: BarTouchData(
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipColor: (_) => cardBg,
+                            tooltipRoundedRadius: 8,
+                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              return BarTooltipItem(
+                                rod.toY.toStringAsFixed(0),
+                                TextStyle(
+                                  color: textColor,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        barGroups: _buildPeriodGroups(_monthLogs, 'Month'),
+                        gridData: const FlGridData(show: false),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 32,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 5 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return SideTitleWidget(
+                                  meta: meta,
+                                  space: 10,
+                                  child: Text(
+                                    '${v + 1}',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: subTextColor,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  value.toInt().toString(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: subTextColor,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                        borderData: FlBorderData(show: false),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _chartCard(
+                  title: 'Weekly Extra Work',
+                  child: AspectRatio(
+                    aspectRatio: MediaQuery.of(context).orientation ==
+                            Orientation.landscape
+                        ? 16 / 5
+                        : 9 / 4,
+                    child: BarChart(
+                      BarChartData(
+                        barTouchData: BarTouchData(
+                          touchTooltipData: BarTouchTooltipData(
+                            getTooltipColor: (_) => cardBg,
+                            tooltipRoundedRadius: 8,
+                            getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                              return BarTooltipItem(
+                                rod.toY.toStringAsFixed(0),
+                                TextStyle(
+                                  color: textColor,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        barGroups: _buildExtraWeekGroups(_extraWeekLogs),
+                        gridData: const FlGridData(show: false),
+                        titlesData: FlTitlesData(
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 32,
+                              getTitlesWidget: (value, meta) {
+                                final v = value.toInt();
+                                if ((v + 1) % 2 != 0) {
+                                  return const SizedBox.shrink();
+                                }
+                                return SideTitleWidget(
+                                  meta: meta,
+                                  space: 10,
+                                  child: Text(
+                                    'W${v + 1}',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: subTextColor,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 40,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  value.toInt().toString(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: subTextColor,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                          topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                        ),
+                        borderData: FlBorderData(show: false),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 2. WORKERS TAB
 // ---------------------------------------------------------------------------
 class EmployeesTab extends StatefulWidget {
   final String organizationCode;
-  const EmployeesTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const EmployeesTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<EmployeesTab> createState() => _EmployeesTabState();
@@ -3501,32 +5996,39 @@ class _EmployeesTabState extends State<EmployeesTab> {
                     _buildFormTextField(
                       controller: nameEditController,
                       label: 'Name',
+                      isDarkMode: widget.isDarkMode,
                     ),
                     _buildFormTextField(
                       controller: panEditController,
                       label: 'PAN Card',
+                      isDarkMode: widget.isDarkMode,
                     ),
                     _buildFormTextField(
                       controller: aadharEditController,
                       label: 'Aadhar Card',
+                      isDarkMode: widget.isDarkMode,
                     ),
                     _buildFormTextField(
                       controller: ageEditController,
                       label: 'Age',
+                      isDarkMode: widget.isDarkMode,
                       keyboardType: TextInputType.number,
                     ),
                     _buildFormTextField(
                       controller: mobileEditController,
                       label: 'Mobile Number',
+                      isDarkMode: widget.isDarkMode,
                       keyboardType: TextInputType.phone,
                     ),
                     _buildFormTextField(
                       controller: usernameEditController,
                       label: 'Username',
+                      isDarkMode: widget.isDarkMode,
                     ),
                     _buildFormTextField(
                       controller: passwordEditController,
                       label: 'Password',
+                      isDarkMode: widget.isDarkMode,
                     ),
                     const SizedBox(height: 16),
                     Row(
@@ -3694,157 +6196,373 @@ class _EmployeesTabState extends State<EmployeesTab> {
 
   @override
   Widget build(BuildContext context) {
+    final cardBg = widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final subTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+    final borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.12);
+
     return RefreshIndicator(
       onRefresh: _fetchEmployees,
-      child: Padding(
+      child: ListView(
         padding: const EdgeInsets.all(16.0),
-        child: ListView(
-          children: [
-            ExpansionTile(
-              title: const Text('Add New Employee'),
-              children: [
-                _buildFormTextField(
-                  controller: _employeeIdController,
-                  label: 'Employee ID',
+        children: [
+          // Add Employee Section
+          Container(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: borderColor),
+            ),
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: const Icon(Icons.person_add_outlined,
+                    color: Color(0xFFA9DFD8)),
+                title: Text(
+                  'Add New Employee',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-                _buildFormTextField(controller: _nameController, label: 'Name'),
-                _buildFormTextField(
-                  controller: _panController,
-                  label: 'PAN Card (Optional)',
-                  hint: 'ABCDE1234F',
-                ),
-                _buildFormTextField(
-                  controller: _aadharController,
-                  label: 'Aadhar Card',
-                ),
-                _buildFormTextField(
-                  controller: _ageController,
-                  label: 'Age',
-                  keyboardType: TextInputType.number,
-                ),
-                _buildFormTextField(
-                  controller: _mobileController,
-                  label: 'Mobile Number',
-                  keyboardType: TextInputType.phone,
-                ),
-                _buildFormTextField(
-                  controller: _usernameController,
-                  label: 'Username',
-                ),
-                _buildFormTextField(
-                  controller: _passwordController,
-                  label: 'Password',
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: Colors.grey[300],
-                      backgroundImage: _newEmployeePhotoBytes != null
-                          ? MemoryImage(_newEmployeePhotoBytes!)
-                          : null,
-                      child: _newEmployeePhotoBytes == null
-                          ? const Icon(Icons.person, size: 20)
-                          : null,
-                    ),
-                    const SizedBox(width: 12),
-                    ElevatedButton.icon(
-                      onPressed: _pickNewEmployeePhoto,
-                      icon: const Icon(Icons.image),
-                      label: const Text('Pick Photo'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    const Text('Role: '),
-                    const SizedBox(width: 8),
-                    DropdownButton<String>(
-                      value: _role,
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'worker',
-                          child: Text('Worker'),
+                iconColor: const Color(0xFFA9DFD8),
+                collapsedIconColor: subTextColor,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        _buildFormTextField(
+                          controller: _employeeIdController,
+                          label: 'Employee ID',
+                          isDarkMode: widget.isDarkMode,
                         ),
-                        DropdownMenuItem(
-                          value: 'supervisor',
-                          child: Text('Supervisor'),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                            controller: _nameController,
+                            label: 'Name',
+                            isDarkMode: widget.isDarkMode),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _panController,
+                          label: 'PAN Card (Optional)',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'ABCDE1234F',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _aadharController,
+                          label: 'Aadhar Card',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _ageController,
+                          label: 'Age',
+                          isDarkMode: widget.isDarkMode,
+                          keyboardType: TextInputType.number,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _mobileController,
+                          label: 'Mobile Number',
+                          isDarkMode: widget.isDarkMode,
+                          keyboardType: TextInputType.phone,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _usernameController,
+                          label: 'Username',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _passwordController,
+                          label: 'Password',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 20),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                    color: const Color(0xFFA9DFD8), width: 2),
+                              ),
+                              child: CircleAvatar(
+                                radius: 24,
+                                backgroundColor:
+                                    textColor.withValues(alpha: 0.05),
+                                backgroundImage: _newEmployeePhotoBytes != null
+                                    ? MemoryImage(_newEmployeePhotoBytes!)
+                                    : null,
+                                child: _newEmployeePhotoBytes == null
+                                    ? Icon(Icons.person,
+                                        color:
+                                            subTextColor.withValues(alpha: 0.3))
+                                    : null,
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _pickNewEmployeePhoto,
+                                icon: const Icon(Icons.camera_alt_outlined),
+                                label: const Text('Add Photo'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFFA9DFD8),
+                                  side: const BorderSide(
+                                      color: Color(0xFFA9DFD8)),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Text(
+                              'Role: ',
+                              style:
+                                  TextStyle(color: subTextColor, fontSize: 14),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Container(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 12),
+                                decoration: BoxDecoration(
+                                  color: textColor.withValues(alpha: 0.05),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton<String>(
+                                    value: _role,
+                                    dropdownColor: cardBg,
+                                    style: TextStyle(
+                                        color: textColor, fontSize: 14),
+                                    items: const [
+                                      DropdownMenuItem(
+                                          value: 'worker',
+                                          child: Text('Worker')),
+                                      DropdownMenuItem(
+                                          value: 'supervisor',
+                                          child: Text('Supervisor')),
+                                    ],
+                                    onChanged: (val) {
+                                      if (val != null) {
+                                        setState(() => _role = val);
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: _addEmployee,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFA9DFD8),
+                              foregroundColor: widget.isDarkMode
+                                  ? const Color(0xFF21222D)
+                                  : Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text(
+                              'ADD EMPLOYEE',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.2),
+                            ),
+                          ),
                         ),
                       ],
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() {
-                            _role = val;
-                          });
-                        }
-                      },
                     ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              const Icon(Icons.people_outline,
+                  color: Color(0xFFA9DFD8), size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Employee List',
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.9),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${_employeesList.length} Total',
+                style: TextStyle(
+                    color: subTextColor.withValues(alpha: 0.5), fontSize: 12),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_isLoading)
+            const Center(
+                child: Padding(
+              padding: EdgeInsets.all(40.0),
+              child: CircularProgressIndicator(color: Color(0xFFA9DFD8)),
+            ))
+          else if (_employeesList.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.person_off_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.2)),
+                    const SizedBox(height: 16),
+                    Text('No employees found',
+                        style:
+                            TextStyle(color: textColor.withValues(alpha: 0.3))),
                   ],
                 ),
-                const SizedBox(height: 10),
-                ElevatedButton(
-                  onPressed: _addEmployee,
-                  child: const Text('Add Employee'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            if (_isLoading)
-              const Center(child: CircularProgressIndicator())
-            else
-              ListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: _employeesList.length,
-                itemBuilder: (context, index) {
-                  final employee = _employeesList[index];
-                  final photoUrl = _getFirstNotEmpty(employee, [
-                    'photo_url',
-                    'avatar_url',
-                    'image_url',
-                    'imageurl',
-                    'photourl',
-                    'picture_url',
-                  ]);
-                  return Card(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        radius: 20,
-                        backgroundColor: Colors.grey[200],
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _employeesList.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final employee = _employeesList[index];
+                final photoUrl = _getFirstNotEmpty(employee, [
+                  'photo_url',
+                  'avatar_url',
+                  'image_url',
+                  'imageurl',
+                  'photourl',
+                  'picture_url',
+                ]);
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    leading: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color:
+                                const Color(0xFFA9DFD8).withValues(alpha: 0.3)),
+                      ),
+                      child: CircleAvatar(
+                        radius: 22,
+                        backgroundColor: textColor.withValues(alpha: 0.05),
                         backgroundImage:
                             (photoUrl != null && photoUrl.isNotEmpty)
                                 ? NetworkImage(photoUrl)
                                 : null,
                         child: (photoUrl == null || photoUrl.isEmpty)
-                            ? const Icon(Icons.person, color: Colors.grey)
+                            ? Icon(Icons.person,
+                                color: subTextColor.withValues(alpha: 0.3),
+                                size: 24)
                             : null,
                       ),
-                      title: Text(
-                        '${employee['name']} (${employee['worker_id']})',
-                      ),
-                      subtitle: Text('Mobile: ${employee['mobile_number']}'),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.edit, color: Colors.blue),
-                            onPressed: () => _editEmployee(employee),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () =>
-                                _deleteEmployee(employee['worker_id']),
-                          ),
-                        ],
+                    ),
+                    title: Text(
+                      employee['name'] ?? 'No Name',
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
                       ),
                     ),
-                  );
-                },
-              ),
-          ],
-        ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Icon(Icons.badge_outlined,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.4)),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                employee['worker_id'] ?? 'ID: N/A',
+                                style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.5),
+                                  fontSize: 12,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Icon(Icons.phone_outlined,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.4)),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                employee['mobile_number'] ?? 'No mobile',
+                                style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.5),
+                                  fontSize: 12,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit_outlined,
+                              color: Color(0xFFA9DFD8), size: 20),
+                          onPressed: () => _editEmployee(employee),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.redAccent, size: 20),
+                          onPressed: () =>
+                              _deleteEmployee(employee['worker_id']),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
     );
   }
@@ -3855,7 +6573,9 @@ class _EmployeesTabState extends State<EmployeesTab> {
 // ---------------------------------------------------------------------------
 class SupervisorsTab extends StatefulWidget {
   final String organizationCode;
-  const SupervisorsTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const SupervisorsTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<SupervisorsTab> createState() => _SupervisorsTabState();
@@ -4317,37 +7037,45 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
                       _buildFormTextField(
                         controller: _employeeIdController,
                         label: 'Supervisor ID',
+                        isDarkMode: widget.isDarkMode,
                         enabled: false,
                       ),
                       _buildFormTextField(
                         controller: _nameController,
                         label: 'Name',
+                        isDarkMode: widget.isDarkMode,
                       ),
                       _buildFormTextField(
                         controller: _panController,
                         label: 'PAN Card (Optional)',
+                        isDarkMode: widget.isDarkMode,
                       ),
                       _buildFormTextField(
                         controller: _aadharController,
                         label: 'Aadhar Card',
+                        isDarkMode: widget.isDarkMode,
                       ),
                       _buildFormTextField(
                         controller: _ageController,
                         label: 'Age',
+                        isDarkMode: widget.isDarkMode,
                         keyboardType: TextInputType.number,
                       ),
                       _buildFormTextField(
                         controller: _mobileController,
                         label: 'Mobile Number',
+                        isDarkMode: widget.isDarkMode,
                         keyboardType: TextInputType.phone,
                       ),
                       _buildFormTextField(
                         controller: _usernameController,
                         label: 'Username',
+                        isDarkMode: widget.isDarkMode,
                       ),
                       _buildFormTextField(
                         controller: _passwordController,
                         label: 'Password',
+                        isDarkMode: widget.isDarkMode,
                       ),
                       const SizedBox(height: 10),
                       const Row(children: [Text('Role: Supervisor')]),
@@ -4447,144 +7175,324 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
 
   @override
   Widget build(BuildContext context) {
+    final cardBg = widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final subTextColor = widget.isDarkMode
+        ? Colors.white70
+        : Colors.black.withValues(alpha: 0.6);
+    final borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.black.withValues(alpha: 0.12);
+
     return RefreshIndicator(
       onRefresh: _fetchSupervisors,
-      child: Padding(
+      child: ListView(
         padding: const EdgeInsets.all(16.0),
-        child: ListView(
-          children: [
-            ExpansionTile(
-              title: const Text('Add New Supervisor'),
-              children: [
-                _buildFormTextField(
-                  controller: _employeeIdController,
-                  label: 'Supervisor ID',
-                ),
-                _buildFormTextField(controller: _nameController, label: 'Name'),
-                _buildFormTextField(
-                  controller: _panController,
-                  label: 'PAN Card (Optional)',
-                  hint: 'ABCDE1234F',
-                ),
-                _buildFormTextField(
-                  controller: _aadharController,
-                  label: 'Aadhar Card',
-                ),
-                _buildFormTextField(
-                  controller: _ageController,
-                  label: 'Age',
-                  keyboardType: TextInputType.number,
-                ),
-                _buildFormTextField(
-                  controller: _mobileController,
-                  label: 'Mobile Number',
-                  keyboardType: TextInputType.phone,
-                ),
-                _buildFormTextField(
-                  controller: _usernameController,
-                  label: 'Username',
-                ),
-                _buildFormTextField(
-                  controller: _passwordController,
-                  label: 'Password',
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 20,
-                      backgroundColor: Colors.grey[300],
-                      backgroundImage: _newSupervisorPhotoBytes != null
-                          ? MemoryImage(_newSupervisorPhotoBytes!)
-                          : null,
-                      child: _newSupervisorPhotoBytes == null
-                          ? const Icon(Icons.person, size: 20)
-                          : null,
-                    ),
-                    const SizedBox(width: 12),
-                    ElevatedButton.icon(
-                      onPressed: _pickNewSupervisorPhoto,
-                      icon: const Icon(Icons.image),
-                      label: const Text('Pick Photo'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    ElevatedButton(
-                      onPressed: _addSupervisor,
-                      child: const Text('Add Supervisor'),
-                    ),
-                  ],
-                ),
-              ],
+        children: [
+          // Add Supervisor Section
+          Container(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: borderColor),
             ),
-            const SizedBox(height: 20),
-            _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: _list.length,
-                    itemBuilder: (context, index) {
-                      final supervisor = _list[index];
-                      final photoUrl = _getFirstNotEmpty(supervisor, [
-                        'photo_url',
-                        'avatar_url',
-                        'image_url',
-                        'imageurl',
-                        'photourl',
-                        'picture_url',
-                      ]);
-                      return Card(
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            radius: 20,
-                            backgroundColor: Colors.grey[200],
-                            backgroundImage:
-                                (photoUrl != null && photoUrl.isNotEmpty)
-                                    ? NetworkImage(photoUrl)
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: const Icon(Icons.person_add_outlined,
+                    color: Color(0xFFA9DFD8)),
+                title: Text(
+                  'Add New Supervisor',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                iconColor: const Color(0xFFA9DFD8),
+                collapsedIconColor: subTextColor,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        _buildFormTextField(
+                          controller: _employeeIdController,
+                          label: 'Supervisor ID',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                            controller: _nameController,
+                            label: 'Name',
+                            isDarkMode: widget.isDarkMode),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _panController,
+                          label: 'PAN Card (Optional)',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'ABCDE1234F',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _aadharController,
+                          label: 'Aadhar Card',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _ageController,
+                          label: 'Age',
+                          isDarkMode: widget.isDarkMode,
+                          keyboardType: TextInputType.number,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _mobileController,
+                          label: 'Mobile Number',
+                          isDarkMode: widget.isDarkMode,
+                          keyboardType: TextInputType.phone,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _usernameController,
+                          label: 'Username',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _passwordController,
+                          label: 'Password',
+                          isDarkMode: widget.isDarkMode,
+                        ),
+                        const SizedBox(height: 20),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                    color: const Color(0xFFA9DFD8), width: 2),
+                              ),
+                              child: CircleAvatar(
+                                radius: 24,
+                                backgroundColor:
+                                    textColor.withValues(alpha: 0.05),
+                                backgroundImage:
+                                    _newSupervisorPhotoBytes != null
+                                        ? MemoryImage(_newSupervisorPhotoBytes!)
+                                        : null,
+                                child: _newSupervisorPhotoBytes == null
+                                    ? Icon(Icons.person,
+                                        color:
+                                            subTextColor.withValues(alpha: 0.3))
                                     : null,
-                            child: (photoUrl == null || photoUrl.isEmpty)
-                                ? const Icon(Icons.person, color: Colors.grey)
-                                : null,
-                          ),
-                          title: Text(
-                            '${supervisor['name']} (${supervisor['worker_id']})',
-                          ),
-                          subtitle: Text(
-                            'Mobile: ${supervisor['mobile_number']}',
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: 'Edit',
-                                icon: const Icon(
-                                  Icons.edit,
-                                  color: Colors.blue,
-                                ),
-                                onPressed: () => _editSupervisor(supervisor),
                               ),
-                              IconButton(
-                                tooltip: 'Delete',
-                                icon: const Icon(
-                                  Icons.delete,
-                                  color: Colors.red,
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _pickNewSupervisorPhoto,
+                                icon: const Icon(Icons.camera_alt_outlined),
+                                label: const Text('Add Photo'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFFA9DFD8),
+                                  side: const BorderSide(
+                                      color: Color(0xFFA9DFD8)),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
                                 ),
-                                onPressed: () =>
-                                    _deleteSupervisor(supervisor['worker_id']),
                               ),
-                            ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: _addSupervisor,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFA9DFD8),
+                              foregroundColor: widget.isDarkMode
+                                  ? const Color(0xFF21222D)
+                                  : Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text(
+                              'ADD SUPERVISOR',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.2),
+                            ),
                           ),
                         ),
-                      );
-                    },
+                      ],
+                    ),
                   ),
-          ],
-        ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              const Icon(Icons.manage_accounts_outlined,
+                  color: Color(0xFFA9DFD8), size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Supervisor List',
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.9),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${_list.length} Total',
+                style: TextStyle(
+                    color: subTextColor.withValues(alpha: 0.5), fontSize: 12),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_isLoading)
+            const Center(
+                child: Padding(
+              padding: EdgeInsets.all(40.0),
+              child: CircularProgressIndicator(color: Color(0xFFA9DFD8)),
+            ))
+          else if (_list.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.person_off_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.2)),
+                    const SizedBox(height: 16),
+                    Text('No supervisors found',
+                        style:
+                            TextStyle(color: textColor.withValues(alpha: 0.3))),
+                  ],
+                ),
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _list.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final supervisor = _list[index];
+                final photoUrl = _getFirstNotEmpty(supervisor, [
+                  'photo_url',
+                  'avatar_url',
+                  'image_url',
+                  'imageurl',
+                  'photourl',
+                  'picture_url',
+                ]);
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    leading: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color:
+                                const Color(0xFFA9DFD8).withValues(alpha: 0.3)),
+                      ),
+                      child: CircleAvatar(
+                        radius: 22,
+                        backgroundColor: textColor.withValues(alpha: 0.05),
+                        backgroundImage:
+                            (photoUrl != null && photoUrl.isNotEmpty)
+                                ? NetworkImage(photoUrl)
+                                : null,
+                        child: (photoUrl == null || photoUrl.isEmpty)
+                            ? Icon(Icons.person,
+                                color: subTextColor.withValues(alpha: 0.3),
+                                size: 24)
+                            : null,
+                      ),
+                    ),
+                    title: Text(
+                      supervisor['name'] ?? 'No Name',
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Icon(Icons.badge_outlined,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.4)),
+                            const SizedBox(width: 4),
+                            Text(
+                              supervisor['worker_id'] ?? 'ID: N/A',
+                              style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.5),
+                                  fontSize: 12),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Icon(Icons.phone_outlined,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.4)),
+                            const SizedBox(width: 4),
+                            Text(
+                              supervisor['mobile_number'] ?? 'No mobile',
+                              style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.5),
+                                  fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit_outlined,
+                              color: Color(0xFFA9DFD8), size: 20),
+                          onPressed: () => _editSupervisor(supervisor),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.redAccent, size: 20),
+                          onPressed: () =>
+                              _deleteSupervisor(supervisor['worker_id']),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
       ),
     );
   }
@@ -4595,7 +7503,9 @@ class _SupervisorsTabState extends State<SupervisorsTab> {
 // ---------------------------------------------------------------------------
 class MachinesTab extends StatefulWidget {
   final String organizationCode;
-  const MachinesTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const MachinesTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<MachinesTab> createState() => _MachinesTabState();
@@ -4809,132 +7719,384 @@ class _MachinesTabState extends State<MachinesTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black
+            .withValues(alpha: 0.15); // Slightly darker border for visibility
+    final Color accentColor =
+        widget.isDarkMode ? const Color(0xFFC2EBAE) : const Color(0xFF4CAF50);
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchMachines();
+        await _fetchTopUsage();
+      },
       child: ListView(
+        padding: const EdgeInsets.all(16.0),
         children: [
-          if (_topUsage.isNotEmpty)
-            Card(
-              color: Colors.pink.shade50,
+          if (_topUsage.isNotEmpty) ...[
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    accentColor.withValues(
+                        alpha: widget.isDarkMode ? 0.2 : 0.1),
+                    cardBg,
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                    color: accentColor.withValues(
+                        alpha: widget.isDarkMode ? 0.2 : 0.3)),
+              ),
               child: ListTile(
-                leading: const Icon(Icons.trending_up, color: Colors.pink),
-                title: const Text('Most Used Machine'),
-                subtitle: Text(
-                  '${_topUsage.first['machine_id']} (${_topUsage.first['count']} logs, ${_topUsage.first['qty']} qty)',
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(Icons.trending_up, color: accentColor, size: 24),
+                ),
+                title: Text(
+                  'Most Used Machine',
+                  style: TextStyle(
+                    color: subTextColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4.0),
+                  child: Text(
+                    '${_topUsage.first['machine_id']} — ${_topUsage.first['count']} logs',
+                    style: TextStyle(
+                      color: textColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                trailing: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: textColor.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${_topUsage.first['qty']} qty',
+                    style: TextStyle(
+                        color: accentColor, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ),
-          ExpansionTile(
-            title: Text(
-              _editingMachine == null ? 'Add New Machine' : 'Edit Machine',
+            const SizedBox(height: 24),
+          ],
+
+          // Add/Edit Machine Section
+          Container(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: borderColor),
             ),
-            initiallyExpanded: _editingMachine != null,
-            children: [
-              _buildFormTextField(
-                controller: _idController,
-                label: 'Machine ID',
-                enabled: _editingMachine == null,
-              ),
-              _buildFormTextField(
-                controller: _nameController,
-                label: 'Machine Name',
-              ),
-              _buildFormTextField(
-                controller: _typeController,
-                label: 'Machine Type ',
-              ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: Icon(
+                  _editingMachine == null
+                      ? Icons.add_circle_outline
+                      : Icons.edit_note_outlined,
+                  color: accentColor,
+                ),
+                title: Text(
+                  _editingMachine == null ? 'Add New Machine' : 'Edit Machine',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                initiallyExpanded: _editingMachine != null,
+                iconColor: accentColor,
+                collapsedIconColor: subTextColor.withValues(alpha: 0.5),
                 children: [
-                  ElevatedButton(
-                    onPressed:
-                        _editingMachine == null ? _addMachine : _updateMachine,
-                    child: Text(
-                      _editingMachine == null
-                          ? 'Add Machine'
-                          : 'Update Machine',
-                    ),
-                  ),
-                  if (_editingMachine != null) ...[
-                    const SizedBox(width: 10),
-                    TextButton(
-                      onPressed: _clearForm,
-                      child: const Text('Cancel'),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 10),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Existing Machines',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-              ),
-              DropdownButton<String>(
-                value: _sortOption,
-                onChanged: (val) {
-                  if (val != null) setState(() => _sortOption = val);
-                },
-                items: const [
-                  DropdownMenuItem(value: 'default', child: Text('Default')),
-                  DropdownMenuItem(
-                    value: 'most_used',
-                    child: Text('Most Used'),
-                  ),
-                  DropdownMenuItem(
-                    value: 'least_used',
-                    child: Text('Least Used'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _sortedMachines.length,
-                  itemBuilder: (context, index) {
-                    final machine = _sortedMachines[index];
-                    final usage = _topUsage.firstWhere(
-                      (u) => u['machine_id'] == machine['machine_id'],
-                      orElse: () => {'count': 0, 'qty': 0},
-                    );
-                    return Card(
-                      child: ListTile(
-                        leading: const Icon(Icons.precision_manufacturing),
-                        title: Text(
-                          '${machine['name']} (${machine['machine_id']})',
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        _buildFormTextField(
+                          controller: _idController,
+                          label: 'Machine ID',
+                          isDarkMode: widget.isDarkMode,
+                          enabled: _editingMachine == null,
+                          hint: 'e.g. CNC-01',
                         ),
-                        subtitle: Text(
-                          'Type: ${machine['type']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _nameController,
+                          label: 'Machine Name',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'e.g. Vertical Milling Machine',
                         ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _typeController,
+                          label: 'Machine Type',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'e.g. CNC, VMC, Manual',
+                        ),
+                        const SizedBox(height: 24),
+                        Row(
                           children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.blue),
-                              onPressed: () => _editMachine(machine),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () =>
-                                  _deleteMachine(machine['machine_id']),
+                            if (_editingMachine != null) ...[
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: _clearForm,
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: subTextColor,
+                                    side: BorderSide(
+                                        color:
+                                            textColor.withValues(alpha: 0.2)),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                  ),
+                                  child: const Text('CANCEL'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                            ],
+                            Expanded(
+                              flex: 2,
+                              child: ElevatedButton(
+                                onPressed: _editingMachine == null
+                                    ? _addMachine
+                                    : _updateMachine,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFA9DFD8),
+                                  foregroundColor: widget.isDarkMode
+                                      ? const Color(0xFF21222D)
+                                      : Colors.white,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                child: Text(
+                                  _editingMachine == null
+                                      ? 'ADD MACHINE'
+                                      : 'UPDATE MACHINE',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2),
+                                ),
+                              ),
                             ),
                           ],
                         ),
-                      ),
-                    );
-                  },
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Header and Sort
+          Row(
+            children: [
+              const Icon(Icons.precision_manufacturing_outlined,
+                  color: Color(0xFFA9DFD8), size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Machine List',
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.9),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
                 ),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: cardBg,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: borderColor),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: _sortOption,
+                    dropdownColor: cardBg,
+                    icon: Icon(Icons.sort, color: accentColor, size: 18),
+                    style: TextStyle(color: textColor, fontSize: 13),
+                    onChanged: (val) {
+                      if (val != null) setState(() => _sortOption = val);
+                    },
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'default', child: Text('Name (A-Z)')),
+                      DropdownMenuItem(
+                          value: 'most_used', child: Text('Most Used')),
+                      DropdownMenuItem(
+                          value: 'least_used', child: Text('Least Used')),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+
+          if (_isLoading)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: CircularProgressIndicator(color: accentColor),
+              ),
+            )
+          else if (_machines.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.precision_manufacturing_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.1)),
+                    const SizedBox(height: 16),
+                    Text('No machines found',
+                        style:
+                            TextStyle(color: textColor.withValues(alpha: 0.3))),
+                  ],
+                ),
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _sortedMachines.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final machine = _sortedMachines[index];
+                final usage = _topUsage.firstWhere(
+                  (u) => u['machine_id'] == machine['machine_id'],
+                  orElse: () => {'count': 0, 'qty': 0},
+                );
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    leading: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: accentColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(Icons.precision_manufacturing,
+                          color: accentColor, size: 22),
+                    ),
+                    title: Text(
+                      machine['name'] ?? 'Unnamed Machine',
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: textColor.withValues(alpha: 0.05),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                machine['machine_id'] ?? 'N/A',
+                                style: TextStyle(
+                                  color: subTextColor,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Type: ${machine['type'] ?? 'N/A'}',
+                              style:
+                                  TextStyle(color: subTextColor, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Icon(Icons.history,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.5)),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${usage['count']} logs • ${usage['qty']} total qty',
+                              style: TextStyle(
+                                  color: subTextColor,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: Icon(Icons.edit_outlined,
+                              color: accentColor, size: 20),
+                          onPressed: () => _editMachine(machine),
+                          tooltip: 'Edit',
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.redAccent, size: 20),
+                          onPressed: () =>
+                              _deleteMachine(machine['machine_id']),
+                          tooltip: 'Delete',
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
         ],
       ),
     );
@@ -4946,7 +8108,9 @@ class _MachinesTabState extends State<MachinesTab> {
 // ---------------------------------------------------------------------------
 class ItemsTab extends StatefulWidget {
   final String organizationCode;
-  const ItemsTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const ItemsTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<ItemsTab> createState() => _ItemsTabState();
@@ -5264,94 +8428,188 @@ class _ItemsTabState extends State<ItemsTab> {
         .map((op) => OperationDetail.fromJson(op))
         .toList();
 
+    final Color dialogBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.5)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color accentColor = AppColors.getAccent(widget.isDarkMode);
+    final Color cardBg = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.08)
+        : Colors.black.withValues(alpha: 0.05);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.2)
+        : Colors.black.withValues(alpha: 0.1);
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('${item['name']} (${item['item_id']})'),
+        backgroundColor: dialogBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: accentColor.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.layers, color: accentColor, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item['name'] ?? 'Unnamed Item',
+                    style: TextStyle(color: textColor, fontSize: 18),
+                  ),
+                  Text(
+                    'ID: ${item['item_id']}',
+                    style: TextStyle(
+                      color: subTextColor,
+                      fontSize: 12,
+                      fontWeight: FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
         content: SizedBox(
           width: MediaQuery.of(context).size.width * 0.9,
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.8,
+              maxHeight: MediaQuery.of(context).size.height * 0.7,
             ),
             child: ListView(
               shrinkWrap: true,
               children: [
-                const Text(
-                  'Operations:',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 10),
-                ...ops.map(
-                  (op) => ListTile(
-                    title: Text(op.name),
-                    subtitle: Text('Target: ${op.target}'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (op.imageUrl != null)
-                          IconButton(
-                            icon: const Icon(Icons.image, color: Colors.blue),
-                            tooltip: 'View Image',
-                            onPressed: () {
-                              showDialog(
-                                context: context,
-                                builder: (ctx) => AlertDialog(
-                                  content: SizedBox(
-                                    width:
-                                        MediaQuery.of(context).size.width * 0.9,
-                                    child: ConstrainedBox(
-                                      constraints: BoxConstraints(
-                                        maxHeight:
-                                            MediaQuery.of(context).size.height *
-                                                0.8,
-                                      ),
-                                      child: Image.network(
-                                        op.imageUrl!,
-                                        width: MediaQuery.of(
-                                          context,
-                                        ).size.width,
-                                        fit: BoxFit.contain,
-                                        errorBuilder: (c, e, st) =>
-                                            const Text('Image failed to load'),
-                                      ),
-                                    ),
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(ctx),
-                                      child: const Text('Close'),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                        if (op.pdfUrl != null)
-                          IconButton(
-                            icon: const Icon(
-                              Icons.picture_as_pdf,
-                              color: Colors.red,
-                            ),
-                            tooltip: 'Open PDF',
-                            onPressed: () async {
-                              final messenger = ScaffoldMessenger.of(context);
-                              final uri = Uri.parse(op.pdfUrl!);
-                              if (!await launchUrl(
-                                uri,
-                                mode: LaunchMode.externalApplication,
-                              )) {
-                                messenger.showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Failed to open PDF'),
-                                  ),
-                                );
-                              }
-                            },
-                          ),
-                      ],
-                    ),
+                Text(
+                  'OPERATIONS WORKFLOW',
+                  style: TextStyle(
+                    color: accentColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.1,
                   ),
+                ),
+                const SizedBox(height: 12),
+                ...ops.asMap().entries.map(
+                  (entry) {
+                    final idx = entry.key;
+                    final op = entry.value;
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: borderColor),
+                      ),
+                      child: ListTile(
+                        leading: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color:
+                                const Color(0xFFA9DFD8).withValues(alpha: 0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Text(
+                            '${idx + 1}',
+                            style: const TextStyle(
+                              color: Color(0xFFA9DFD8),
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          op.name,
+                          style: TextStyle(color: textColor, fontSize: 14),
+                        ),
+                        subtitle: Text(
+                          'Target: ${op.target}',
+                          style: TextStyle(
+                            color: subTextColor,
+                            fontSize: 12,
+                          ),
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (op.imageUrl != null)
+                              IconButton(
+                                icon: const Icon(Icons.image_outlined,
+                                    color: Color(0xFFA9DFD8), size: 20),
+                                tooltip: 'View Image',
+                                onPressed: () {
+                                  showDialog(
+                                    context: context,
+                                    builder: (ctx) => AlertDialog(
+                                      backgroundColor: dialogBg,
+                                      content: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          ClipRRect(
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                            child: Image.network(
+                                              op.imageUrl!,
+                                              fit: BoxFit.contain,
+                                              errorBuilder: (c, e, st) =>
+                                                  Padding(
+                                                padding:
+                                                    const EdgeInsets.all(20.0),
+                                                child: Text(
+                                                  'Image failed to load',
+                                                  style: TextStyle(
+                                                      color: subTextColor),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.pop(ctx),
+                                          child: Text('CLOSE',
+                                              style: TextStyle(
+                                                  color: subTextColor)),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            if (op.pdfUrl != null)
+                              IconButton(
+                                icon: const Icon(Icons.picture_as_pdf_outlined,
+                                    color: Colors.redAccent, size: 20),
+                                tooltip: 'Open PDF',
+                                onPressed: () async {
+                                  final messenger =
+                                      ScaffoldMessenger.of(context);
+                                  final uri = Uri.parse(op.pdfUrl!);
+                                  if (!await launchUrl(
+                                    uri,
+                                    mode: LaunchMode.externalApplication,
+                                  )) {
+                                    messenger.showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Failed to open PDF'),
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ],
             ),
@@ -5360,14 +8618,24 @@ class _ItemsTabState extends State<ItemsTab> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
+            child: Text('CLOSE', style: TextStyle(color: subTextColor)),
           ),
-          ElevatedButton(
+          const SizedBox(width: 8),
+          ElevatedButton.icon(
             onPressed: () {
               Navigator.pop(context);
               _editItem(item);
             },
-            child: const Text('Edit Item'),
+            icon: const Icon(Icons.edit_outlined, size: 16),
+            label: const Text('EDIT ITEM'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: accentColor,
+              foregroundColor:
+                  widget.isDarkMode ? const Color(0xFF21222D) : Colors.black87,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
           ),
         ],
       ),
@@ -5522,274 +8790,616 @@ class _ItemsTabState extends State<ItemsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black
+            .withValues(alpha: 0.15); // Slightly darker border for visibility
+    final Color accentColor =
+        widget.isDarkMode ? const Color(0xFFC2EBAE) : const Color(0xFF4CAF50);
+    final Color secondaryAccentColor =
+        widget.isDarkMode ? const Color(0xFFA9DFD8) : const Color(0xFF2E8B57);
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchItems();
+        await _fetchTopItemUsage();
+      },
       child: ListView(
+        padding: const EdgeInsets.all(16.0),
         children: [
-          if (_topItemUsage.isNotEmpty)
-            Card(
-              color: Colors.teal.shade50,
+          if (_topItemUsage.isNotEmpty) ...[
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    secondaryAccentColor.withValues(
+                        alpha: widget.isDarkMode ? 0.2 : 0.1),
+                    cardBg,
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: secondaryAccentColor.withValues(
+                      alpha: widget.isDarkMode ? 0.2 : 0.3),
+                ),
+              ),
               child: ListTile(
-                leading: const Icon(Icons.trending_up, color: Colors.teal),
-                title: const Text('Most Used Item'),
-                subtitle: Text(
-                  '${_topItemUsage.first['item_id']} (${_topItemUsage.first['count']} logs, ${_topItemUsage.first['qty']} qty)',
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: secondaryAccentColor.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(Icons.trending_up,
+                      color: secondaryAccentColor, size: 24),
+                ),
+                title: Text(
+                  'Most Used Item',
+                  style: TextStyle(
+                    color: subTextColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4.0),
+                  child: Text(
+                    '${_topItemUsage.first['item_id']} — ${_topItemUsage.first['count']} logs',
+                    style: TextStyle(
+                      color: textColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                trailing: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: textColor.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${_topItemUsage.first['qty']} qty',
+                    style: TextStyle(
+                        color: secondaryAccentColor,
+                        fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ),
-          Text(
-            _editingItem == null ? 'Add New Item' : 'Edit Item',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            const SizedBox(height: 24),
+          ],
+
+          // Add/Edit Item Section
+          Container(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: borderColor),
+            ),
+            child: Theme(
+              data: Theme.of(context).copyWith(
+                dividerColor: Colors.transparent,
+                colorScheme: ColorScheme.fromSeed(
+                  seedColor: accentColor,
+                  brightness:
+                      widget.isDarkMode ? Brightness.dark : Brightness.light,
+                ),
+              ),
+              child: ExpansionTile(
+                leading: Icon(
+                  _editingItem == null
+                      ? Icons.add_circle_outline
+                      : Icons.edit_note_outlined,
+                  color: accentColor,
+                ),
+                title: Text(
+                  _editingItem == null ? 'Add New Item' : 'Edit Item',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                initiallyExpanded: _editingItem != null,
+                iconColor: accentColor,
+                collapsedIconColor: subTextColor,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildFormTextField(
+                          controller: _itemIdController,
+                          label: 'Item ID',
+                          isDarkMode: widget.isDarkMode,
+                          enabled: _editingItem == null,
+                          hint: 'e.g. 5001',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildFormTextField(
+                          controller: _itemNameController,
+                          label: 'Item Name',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'e.g. Polo Shirt',
+                        ),
+                        const SizedBox(height: 24),
+                        Row(
+                          children: [
+                            Icon(Icons.layers_outlined,
+                                color: accentColor, size: 18),
+                            const SizedBox(width: 8),
+                            Text(
+                              _editingOperationIndex == null
+                                  ? 'Add Operation'
+                                  : 'Edit Operation',
+                              style: TextStyle(
+                                color: textColor,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: textColor.withValues(alpha: 0.05),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: borderColor),
+                          ),
+                          child: Column(
+                            children: [
+                              _buildFormTextField(
+                                controller: _opNameController,
+                                label: 'Operation Name',
+                                isDarkMode: widget.isDarkMode,
+                                hint: 'e.g. Front Pocket',
+                              ),
+                              const SizedBox(height: 12),
+                              _buildFormTextField(
+                                controller: _opTargetController,
+                                label: 'Target Quantity',
+                                isDarkMode: widget.isDarkMode,
+                                keyboardType: TextInputType.number,
+                                hint: 'e.g. 100',
+                              ),
+                              const SizedBox(height: 16),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: OutlinedButton.icon(
+                                      onPressed: _pickFile,
+                                      icon: const Icon(Icons.attach_file,
+                                          size: 18),
+                                      label: Text(
+                                        _opFile != null
+                                            ? _opFile!.name
+                                            : 'Pick Image/PDF',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: subTextColor,
+                                        side: BorderSide(color: borderColor),
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 12),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(10)),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+                              Row(
+                                children: [
+                                  if (_editingOperationIndex != null) ...[
+                                    Expanded(
+                                      child: TextButton(
+                                        onPressed: () {
+                                          setState(() {
+                                            _editingOperationIndex = null;
+                                            _opNameController.clear();
+                                            _opTargetController.clear();
+                                            _opFile = null;
+                                          });
+                                        },
+                                        child: Text('Cancel',
+                                            style:
+                                                TextStyle(color: subTextColor)),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                  ],
+                                  Expanded(
+                                    flex: 2,
+                                    child: ElevatedButton(
+                                      onPressed: _addOperation,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: accentColor,
+                                        foregroundColor: widget.isDarkMode
+                                            ? const Color(0xFF21222D)
+                                            : Colors.black,
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 12),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(10)),
+                                      ),
+                                      child: Text(
+                                        _editingOperationIndex == null
+                                            ? 'ADD OPERATION'
+                                            : 'UPDATE OPERATION',
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        // Operations Preview
+                        if (_operations.isNotEmpty) ...[
+                          const SizedBox(height: 16),
+                          Text(
+                            'Item Operations:',
+                            style: TextStyle(
+                                color: subTextColor,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 8),
+                          ..._operations.asMap().entries.map((entry) {
+                            final idx = entry.key;
+                            final op = entry.value;
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              decoration: BoxDecoration(
+                                color: textColor.withValues(alpha: 0.03),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: ListTile(
+                                dense: true,
+                                leading: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: accentColor.withValues(alpha: 0.1),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Text(
+                                    '${idx + 1}',
+                                    style: TextStyle(
+                                        color: accentColor,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12),
+                                  ),
+                                ),
+                                title: Text(
+                                  op.name,
+                                  style:
+                                      TextStyle(color: textColor, fontSize: 14),
+                                ),
+                                subtitle: Text(
+                                  'Target: ${op.target}',
+                                  style: TextStyle(
+                                      color: subTextColor, fontSize: 12),
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (op.imageUrl != null ||
+                                        op.existingUrl != null ||
+                                        op.newFile != null)
+                                      Icon(Icons.image_outlined,
+                                          size: 16, color: subTextColor),
+                                    const SizedBox(width: 8),
+                                    IconButton(
+                                      icon: Icon(Icons.edit_outlined,
+                                          size: 18, color: accentColor),
+                                      onPressed: () =>
+                                          _editOperationInList(idx),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 18, color: Colors.redAccent),
+                                      onPressed: () {
+                                        setState(
+                                            () => _operations.removeAt(idx));
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+
+                        const SizedBox(height: 24),
+                        Row(
+                          children: [
+                            if (_editingItem != null) ...[
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: _clearItemForm,
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: subTextColor,
+                                    side: BorderSide(color: borderColor),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                  ),
+                                  child: const Text('CANCEL'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                            ],
+                            Expanded(
+                              flex: 2,
+                              child: ElevatedButton(
+                                onPressed: _editingItem == null
+                                    ? _addItem
+                                    : _updateItem,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: accentColor,
+                                  foregroundColor: widget.isDarkMode
+                                      ? const Color(0xFF21222D)
+                                      : Colors.black,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                child: Text(
+                                  _editingItem == null
+                                      ? 'SAVE ITEM'
+                                      : 'UPDATE ITEM',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-          const SizedBox(height: 10),
-          _buildFormTextField(
-            controller: _itemIdController,
-            label: 'Item ID (e.g. 5001)',
-            enabled: _editingItem == null,
-          ),
-          _buildFormTextField(
-            controller: _itemNameController,
-            label: 'Item Name (e.g. Shirt)',
+
+          const SizedBox(height: 32),
+
+          // Header and Search/Sort
+          Column(
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.layers_outlined, color: accentColor, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Item List',
+                    style: TextStyle(
+                      color: textColor.withValues(alpha: 0.9),
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: borderColor),
+                      ),
+                      child: TextField(
+                        style: TextStyle(color: textColor, fontSize: 14),
+                        onChanged: (val) => setState(() => _searchQuery = val),
+                        decoration: InputDecoration(
+                          hintText: 'Search items...',
+                          hintStyle: TextStyle(
+                              color: textColor.withValues(alpha: 0.3)),
+                          border: InputBorder.none,
+                          icon: Icon(Icons.search,
+                              color: textColor.withValues(alpha: 0.3),
+                              size: 18),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: cardBg,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: borderColor),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _sortOption,
+                        dropdownColor: cardBg,
+                        icon: Icon(Icons.sort, color: accentColor, size: 18),
+                        style: TextStyle(color: textColor, fontSize: 13),
+                        onChanged: (val) {
+                          if (val != null) setState(() => _sortOption = val);
+                        },
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'default', child: Text('Name (A-Z)')),
+                          DropdownMenuItem(
+                              value: 'most_used', child: Text('Most Used')),
+                          DropdownMenuItem(
+                              value: 'least_used', child: Text('Least Used')),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
 
           const SizedBox(height: 16),
-          Text(
-            _editingOperationIndex == null ? 'Operations' : 'Edit Operation',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              border: Border.all(color: Colors.grey),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Column(
-              children: [
-                _buildFormTextField(
-                  controller: _opNameController,
-                  label: 'Operation Name (e.g. Collar)',
-                ),
-                _buildFormTextField(
-                  controller: _opTargetController,
-                  label: 'Target Quantity',
-                  keyboardType: TextInputType.number,
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _pickFile,
-                      icon: const Icon(Icons.attach_file),
-                      label: const Text('Pick Image/PDF'),
-                    ),
-                    const SizedBox(width: 10),
-                    if (_opFile != null)
-                      Expanded(
-                        child: Text(
-                          _opFile!.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    ElevatedButton(
-                      onPressed: _addOperation,
-                      child: Text(
-                        _editingOperationIndex == null
-                            ? 'Add Operation'
-                            : 'Update Operation',
-                      ),
-                    ),
-                    if (_editingOperationIndex != null) ...[
-                      const SizedBox(width: 10),
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _editingOperationIndex = null;
-                            _opNameController.clear();
-                            _opTargetController.clear();
-                            _opFile = null;
-                          });
-                        },
-                        child: const Text('Cancel'),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
 
-          // Operation List Preview
-          if (_operations.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            ListView.builder(
+          if (_isLoadingItems)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: CircularProgressIndicator(color: accentColor),
+              ),
+            )
+          else if (_items.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.layers_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.1)),
+                    const SizedBox(height: 16),
+                    Text('No items found',
+                        style:
+                            TextStyle(color: textColor.withValues(alpha: 0.3))),
+                  ],
+                ),
+              ),
+            )
+          else
+            ListView.separated(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: _operations.length,
+              itemCount: _sortedItems.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
               itemBuilder: (context, index) {
-                final op = _operations[index];
-                return ListTile(
-                  title: Text(op.name),
-                  subtitle: Text('Target: ${op.target}'),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (op.imageUrl != null || op.existingUrl != null)
-                        const Icon(Icons.image, color: Colors.blue),
-                      if (op.pdfUrl != null || op.existingPdfUrl != null)
-                        const Icon(Icons.picture_as_pdf, color: Colors.red),
-                      IconButton(
-                        icon: const Icon(Icons.edit, color: Colors.blue),
-                        onPressed: () => _editOperationInList(index),
+                final item = _sortedItems[index];
+                final usage = _topItemUsage.firstWhere(
+                  (u) => u['item_id'] == item['item_id'],
+                  orElse: () => {'count': 0, 'qty': 0},
+                );
+                final opCount =
+                    (item['operation_details'] as List? ?? []).length;
+
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    onTap: () => _viewItemDetails(item),
+                    leading: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: accentColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.remove_circle,
-                          color: Colors.red,
+                      child: Icon(Icons.layers, color: accentColor, size: 22),
+                    ),
+                    title: Text(
+                      item['name'] ?? 'Unnamed Item',
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: textColor.withValues(alpha: 0.05),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                item['item_id'] ?? 'N/A',
+                                style: TextStyle(
+                                  color: textColor.withValues(alpha: 0.7),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '$opCount operations',
+                              style:
+                                  TextStyle(color: subTextColor, fontSize: 12),
+                            ),
+                          ],
                         ),
-                        onPressed: () {
-                          setState(() {
-                            _operations.removeAt(index);
-                          });
-                        },
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Icon(Icons.history,
+                                size: 12,
+                                color: textColor.withValues(alpha: 0.3)),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${usage['count']} logs • ${usage['qty']} total qty',
+                              style: TextStyle(
+                                  color: textColor.withValues(alpha: 0.4),
+                                  fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: Icon(Icons.edit_outlined,
+                              color: accentColor, size: 20),
+                          onPressed: () => _editItem(item),
+                          tooltip: 'Edit',
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.redAccent, size: 20),
+                          onPressed: () => _deleteItem(item['item_id']),
+                          tooltip: 'Delete',
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },
             ),
-          ],
-
-          const SizedBox(height: 20),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                ),
-                onPressed: _editingItem == null ? _addItem : _updateItem,
-                child: Text(
-                  _editingItem == null
-                      ? 'Save Item to Database'
-                      : 'Update Item',
-                ),
-              ),
-              if (_editingItem != null) ...[
-                const SizedBox(width: 10),
-                TextButton(
-                  onPressed: _clearItemForm,
-                  child: const Text('Cancel'),
-                ),
-              ],
-            ],
-          ),
-          const Divider(thickness: 2),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0),
-            child: Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      'Existing Items',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
-                    ),
-                    DropdownButton<String>(
-                      value: _sortOption,
-                      onChanged: (val) {
-                        if (val != null) setState(() => _sortOption = val);
-                      },
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'default',
-                          child: Text('Default'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'most_used',
-                          child: Text('Most Used'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'least_used',
-                          child: Text('Least Used'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  onChanged: (val) => setState(() => _searchQuery = val),
-                  decoration: const InputDecoration(
-                    hintText: 'Search items...',
-                    prefixIcon: Icon(Icons.search),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          _isLoadingItems
-              ? const Center(child: CircularProgressIndicator())
-              : _sortedItems.isEmpty
-                  ? const Center(child: Text('No items found.'))
-                  : ListView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _sortedItems.length,
-                      itemBuilder: (context, index) {
-                        final item = _sortedItems[index];
-                        final usage = _topItemUsage.firstWhere(
-                          (u) => u['item_id'] == item['item_id'],
-                          orElse: () => {'count': 0, 'qty': 0},
-                        );
-                        final ops = item['operation_details'] as List? ?? [];
-                        return Card(
-                          child: ListTile(
-                            title: Text('${item['name']} (${item['item_id']})'),
-                            subtitle: Text(
-                              '${ops.length} Operations • Usage: ${usage['count']} logs, ${usage['qty']} qty',
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.visibility,
-                                    color: Colors.green,
-                                  ),
-                                  onPressed: () => _viewItemDetails(item),
-                                  tooltip: 'View Operations',
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.edit,
-                                      color: Colors.blue),
-                                  onPressed: () => _editItem(item),
-                                  tooltip: 'Edit Item',
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete,
-                                      color: Colors.red),
-                                  onPressed: () => _deleteItem(item['item_id']),
-                                  tooltip: 'Delete Item',
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
         ],
       ),
     );
@@ -5801,7 +9411,9 @@ class _ItemsTabState extends State<ItemsTab> {
 // ---------------------------------------------------------------------------
 class OperationsTab extends StatefulWidget {
   final String organizationCode;
-  const OperationsTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const OperationsTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<OperationsTab> createState() => _OperationsTabState();
@@ -5973,129 +9585,284 @@ class _OperationsTabState extends State<OperationsTab> {
   @override
   Widget build(BuildContext context) {
     final filteredOps = _sortedOperations;
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black
+            .withValues(alpha: 0.12); // Slightly darker border for visibility
+    final Color accentColor =
+        widget.isDarkMode ? const Color(0xFFC2EBAE) : const Color(0xFF4CAF50);
 
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchOperations();
+        await _fetchTopOperationUsage();
+      },
+      child: ListView(
+        padding: const EdgeInsets.all(16.0),
         children: [
-          if (_topOperation.isNotEmpty)
-            Card(
-              color: Colors.indigo.shade50,
+          if (_topOperation.isNotEmpty) ...[
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    accentColor.withValues(
+                        alpha: widget.isDarkMode ? 0.2 : 0.1),
+                    cardBg,
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: accentColor.withValues(
+                      alpha: widget.isDarkMode ? 0.2 : 0.3),
+                ),
+              ),
               child: ListTile(
-                leading: const Icon(Icons.trending_up, color: Colors.indigo),
-                title: const Text('Most Performed Operation'),
-                subtitle: Text(
-                  '$_topOperationName (${_topOperation['count']} logs, ${_topOperation['qty']} qty)',
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(Icons.auto_awesome, color: accentColor, size: 24),
+                ),
+                title: Text(
+                  'Most Performed Operation',
+                  style: TextStyle(
+                    color: subTextColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4.0),
+                  child: Text(
+                    _topOperationName,
+                    style: TextStyle(
+                      color: textColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                trailing: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: textColor.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${_topOperation['count']} logs',
+                    style: TextStyle(
+                        color: accentColor, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ),
-          Row(
+            const SizedBox(height: 24),
+          ],
+
+          // Header and Search/Sort
+          Column(
             children: [
-              const Expanded(
-                child: Text(
-                  'All Operations',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-                ),
-              ),
-              const SizedBox(width: 8),
-              DropdownButton<String>(
-                value: _sortOption,
-                onChanged: (val) {
-                  if (val != null) setState(() => _sortOption = val);
-                },
-                items: const [
-                  DropdownMenuItem(value: 'default', child: Text('Default')),
-                  DropdownMenuItem(
-                    value: 'most_used',
-                    child: Text('Most Used'),
-                  ),
-                  DropdownMenuItem(
-                    value: 'least_used',
-                    child: Text('Least Used'),
+              Row(
+                children: [
+                  const Icon(Icons.settings_suggest_outlined,
+                      color: Color(0xFFC2EBAE), size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'All Operations',
+                    style: TextStyle(
+                      color: textColor.withValues(alpha: 0.9),
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  onChanged: (val) => setState(() => _searchQuery = val),
-                  decoration: const InputDecoration(
-                    hintText: 'Search...',
-                    prefixIcon: Icon(Icons.search),
-                    border: OutlineInputBorder(),
-                    contentPadding: EdgeInsets.symmetric(horizontal: 10),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: borderColor),
+                      ),
+                      child: TextField(
+                        style: TextStyle(color: textColor, fontSize: 14),
+                        onChanged: (val) => setState(() => _searchQuery = val),
+                        decoration: InputDecoration(
+                          hintText: 'Search operations...',
+                          hintStyle: TextStyle(
+                              color: subTextColor.withValues(alpha: 0.5)),
+                          border: InputBorder.none,
+                          icon: Icon(Icons.search,
+                              color: subTextColor.withValues(alpha: 0.5),
+                              size: 18),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: cardBg,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: borderColor),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _sortOption,
+                        dropdownColor: cardBg,
+                        icon: const Icon(Icons.sort,
+                            color: Color(0xFFC2EBAE), size: 18),
+                        style: TextStyle(color: textColor, fontSize: 13),
+                        onChanged: (val) {
+                          if (val != null) setState(() => _sortOption = val);
+                        },
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'default', child: Text('Name (A-Z)')),
+                          DropdownMenuItem(
+                              value: 'most_used', child: Text('Most Used')),
+                          DropdownMenuItem(
+                              value: 'least_used', child: Text('Least Used')),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : filteredOps.isEmpty
-                    ? const Center(child: Text('No operations found.'))
-                    : ListView.builder(
-                        itemCount: filteredOps.length,
-                        itemBuilder: (context, index) {
-                          final op = filteredOps[index];
-                          final usage = _allOperationUsage.firstWhere(
-                            (u) => u['operation'] == op['op_name'],
-                            orElse: () => {'count': 0, 'qty': 0},
-                          );
-                          return Card(
-                            margin: const EdgeInsets.symmetric(vertical: 4),
-                            child: ListTile(
-                              onTap: () => _showOperationDetail(op, usage),
-                              title: Text(op['op_name']),
-                              subtitle: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Item: ${op['item_name']} (${op['item_id']})',
-                                  ),
-                                  Text(
-                                    'Target: ${op['target']} • Usage: ${usage['count']} logs, ${usage['qty']} qty',
-                                  ),
-                                  if (op['created_at'] != null ||
-                                      op['last_produced'] != null)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 4.0),
-                                      child: Text(
-                                        '${op['created_at'] != null ? 'Created: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['created_at'].toString()))}' : ''}'
-                                        '${op['created_at'] != null && op['last_produced'] != null ? ' • ' : ''}'
-                                        '${op['last_produced'] != null ? 'Last Produced: ${DateFormat('yyyy-MM-dd').format(DateTime.parse(op['last_produced'].toString()))}' : ''}',
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              isThreeLine: true,
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (op['imageUrl'] != null)
-                                    const Icon(Icons.image, color: Colors.blue),
-                                  if (op['pdfUrl'] != null)
-                                    const Icon(
-                                      Icons.picture_as_pdf,
-                                      color: Colors.red,
-                                    ),
-                                  const Icon(
-                                    Icons.chevron_right,
-                                    color: Colors.grey,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
+
+          const SizedBox(height: 16),
+
+          if (_isLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(40.0),
+                child: CircularProgressIndicator(color: Color(0xFFC2EBAE)),
+              ),
+            )
+          else if (filteredOps.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.settings_suggest_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.1)),
+                    const SizedBox(height: 16),
+                    Text('No operations found',
+                        style: TextStyle(
+                            color: subTextColor.withValues(alpha: 0.5))),
+                  ],
+                ),
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: filteredOps.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final op = filteredOps[index];
+                final usage = _allOperationUsage.firstWhere(
+                  (u) => u['operation'] == op['op_name'],
+                  orElse: () => {'count': 0, 'qty': 0},
+                );
+
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    onTap: () => _showOperationDetail(op, usage),
+                    leading: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFC2EBAE).withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
                       ),
-          ),
+                      child: const Icon(Icons.settings_suggest_outlined,
+                          color: Color(0xFFC2EBAE), size: 24),
+                    ),
+                    title: Text(
+                      op['op_name'],
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
+                        Text(
+                          'Item: ${op['item_name']} (${op['item_id']})',
+                          style: TextStyle(color: subTextColor, fontSize: 12),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Icon(Icons.history,
+                                size: 12,
+                                color: subTextColor.withValues(alpha: 0.5)),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${usage['count']} logs • ${usage['qty']} qty',
+                              style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.6),
+                                  fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (op['imageUrl'] != null)
+                          Icon(Icons.image_outlined,
+                              size: 18,
+                              color: subTextColor.withValues(alpha: 0.5)),
+                        if (op['pdfUrl'] != null) ...[
+                          const SizedBox(width: 8),
+                          Icon(Icons.picture_as_pdf_outlined,
+                              size: 18,
+                              color: subTextColor.withValues(alpha: 0.5)),
+                        ],
+                        const SizedBox(width: 8),
+                        Icon(Icons.chevron_right,
+                            color: subTextColor.withValues(alpha: 0.3),
+                            size: 20),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
         ],
       ),
     );
@@ -6105,11 +9872,22 @@ class _OperationsTabState extends State<OperationsTab> {
     Map<String, dynamic> op,
     Map<String, dynamic> usage,
   ) {
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+
     showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: Text(op['op_name']),
+          backgroundColor: cardBg,
+          title: Text(
+            op['op_name'],
+            style: TextStyle(color: textColor, fontWeight: FontWeight.bold),
+          ),
           content: SizedBox(
             width: MediaQuery.of(context).size.width * 0.9,
             child: ConstrainedBox(
@@ -6125,62 +9903,127 @@ class _OperationsTabState extends State<OperationsTab> {
                         op['imageUrl'].toString().isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16.0),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.network(
-                            op['imageUrl'],
-                            width: MediaQuery.of(context).size.width,
-                            height: 200,
-                            fit: BoxFit.cover,
-                            errorBuilder: (ctx, err, stack) => Container(
-                              height: 200,
-                              color: Colors.grey[200],
-                              child: const Center(
-                                child: Icon(Icons.broken_image, size: 50),
+                        child: InkWell(
+                          onTap: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) => Dialog.fullscreen(
+                                backgroundColor: Colors.black,
+                                child: Stack(
+                                  children: [
+                                    InteractiveViewer(
+                                      minScale: 0.5,
+                                      maxScale: 4.0,
+                                      child: Center(
+                                        child: Image.network(
+                                          op['imageUrl'],
+                                          fit: BoxFit.contain,
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      top: 40,
+                                      right: 20,
+                                      child: IconButton(
+                                        icon: const Icon(Icons.close,
+                                            size: 30, color: Colors.white),
+                                        onPressed: () => Navigator.pop(context),
+                                        style: IconButton.styleFrom(
+                                          backgroundColor: Colors.black
+                                              .withValues(alpha: 0.6),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Hero(
+                              tag: 'op_image_${op['imageUrl']}',
+                              child: Image.network(
+                                op['imageUrl'],
+                                width: MediaQuery.of(context).size.width,
+                                height: 200,
+                                fit: BoxFit.cover,
+                                errorBuilder: (ctx, err, stack) => Container(
+                                  height: 200,
+                                  decoration: BoxDecoration(
+                                    color: textColor.withValues(alpha: 0.05),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Center(
+                                    child: Icon(Icons.broken_image,
+                                        size: 40,
+                                        color:
+                                            textColor.withValues(alpha: 0.2)),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                         ),
                       ),
-                    _detailItem('Item Name', op['item_name']),
-                    _detailItem('Item ID', op['item_id']),
-                    _detailItem('Target Quantity', op['target'].toString()),
+                    _detailItem(
+                        'Item Name', op['item_name'], textColor, subTextColor),
+                    _detailItem(
+                        'Item ID', op['item_id'], textColor, subTextColor),
+                    _detailItem('Target Quantity', op['target'].toString(),
+                        textColor, subTextColor),
                     if (op['created_at'] != null)
                       _detailItem(
                         'Created At',
-                        DateFormat(
-                          'yyyy-MM-dd hh:mm a',
-                        ).format(DateTime.parse(op['created_at'].toString())),
+                        DateFormat('yyyy-MM-dd hh:mm a').format(
+                            DateTime.parse(op['created_at'].toString())),
+                        textColor,
+                        subTextColor,
                       ),
-                    const Divider(),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12.0),
+                      child: Divider(color: textColor.withValues(alpha: 0.1)),
+                    ),
                     const Text(
                       'Usage Statistics',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
+                        color: Color(0xFFC2EBAE),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    _detailItem('Total Logs', usage['count'].toString()),
-                    _detailItem('Total Quantity', usage['qty'].toString()),
+                    const SizedBox(height: 12),
+                    _detailItem('Total Logs', usage['count'].toString(),
+                        textColor, subTextColor),
+                    _detailItem('Total Quantity', usage['qty'].toString(),
+                        textColor, subTextColor),
                     if (op['last_produced'] != null)
                       _detailItem(
                         'Last Produced',
                         DateFormat('yyyy-MM-dd hh:mm a').format(
                           DateTime.parse(op['last_produced'].toString()),
                         ),
+                        textColor,
+                        subTextColor,
                       ),
                     if (op['pdfUrl'] != null &&
                         op['pdfUrl'].toString().isNotEmpty)
                       Padding(
-                        padding: const EdgeInsets.only(top: 16.0),
-                        child: ElevatedButton.icon(
-                          onPressed: () => _launchURL(op['pdfUrl']),
-                          icon: const Icon(Icons.picture_as_pdf),
-                          label: const Text('View PDF Guide'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.red.shade50,
-                            foregroundColor: Colors.red,
+                        padding: const EdgeInsets.only(top: 20.0),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () => _launchURL(op['pdfUrl']),
+                            icon: const Icon(Icons.picture_as_pdf),
+                            label: const Text('VIEW PDF GUIDE'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor:
+                                  Colors.redAccent.withValues(alpha: 0.1),
+                              foregroundColor: Colors.redAccent,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10)),
+                            ),
                           ),
                         ),
                       ),
@@ -6192,7 +10035,11 @@ class _OperationsTabState extends State<OperationsTab> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
+              child: Text('CLOSE',
+                  style: TextStyle(
+                      color: subTextColor,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold)),
             ),
           ],
         );
@@ -6200,19 +10047,26 @@ class _OperationsTabState extends State<OperationsTab> {
     );
   }
 
-  Widget _detailItem(String label, String value) {
+  Widget _detailItem(
+      String label, String value, Color textColor, Color subTextColor) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.0),
-      child: Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: '$label: ',
-              style: const TextStyle(fontWeight: FontWeight.bold),
+      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label: ',
+            style: TextStyle(
+                color: subTextColor, fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                  color: textColor, fontSize: 13, fontWeight: FontWeight.bold),
             ),
-            TextSpan(text: value),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -6236,7 +10090,9 @@ class _OperationsTabState extends State<OperationsTab> {
 // ---------------------------------------------------------------------------
 class ShiftsTab extends StatefulWidget {
   final String organizationCode;
-  const ShiftsTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const ShiftsTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<ShiftsTab> createState() => _ShiftsTabState();
@@ -6382,151 +10238,284 @@ class _ShiftsTabState extends State<ShiftsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.7)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.15)
+        : Colors.black.withValues(alpha: 0.12);
+    const Color accentColor = Color(0xFFC2EBAE);
+
+    return RefreshIndicator(
+      onRefresh: _fetchShifts,
       child: ListView(
+        padding: const EdgeInsets.all(16.0),
         children: [
-          Text(
-            _editingShift == null ? 'Add New Shift' : 'Edit Shift',
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _nameController,
-            decoration: const InputDecoration(
-              labelText: 'Shift Name (e.g. Morning)',
-              border: OutlineInputBorder(),
+          // Add/Edit Shift Section
+          Container(
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: borderColor),
             ),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _startController,
-                  readOnly: true,
-                  onTap: () => _selectTime(context, _startController),
-                  decoration: const InputDecoration(
-                    labelText: 'Start Time',
-                    border: OutlineInputBorder(),
-                    suffixIcon: Icon(Icons.access_time),
+            child: Theme(
+              data:
+                  Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: Icon(
+                  _editingShift == null
+                      ? Icons.add_circle_outline
+                      : Icons.edit_note_outlined,
+                  color: accentColor,
+                ),
+                title: Text(
+                  _editingShift == null ? 'Add New Shift' : 'Edit Shift',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _endController,
-                  readOnly: true,
-                  onTap: () => _selectTime(context, _endController),
-                  decoration: const InputDecoration(
-                    labelText: 'End Time',
-                    border: OutlineInputBorder(),
-                    suffixIcon: Icon(Icons.access_time),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ElevatedButton(
-                onPressed: _addOrUpdateShift,
-                child: Text(
-                  _editingShift == null ? 'Add Shift' : 'Update Shift',
-                ),
-              ),
-              if (_editingShift != null) ...[
-                const SizedBox(width: 10),
-                TextButton(onPressed: _clearForm, child: const Text('Cancel')),
-              ],
-            ],
-          ),
-          const Divider(height: 32, thickness: 2),
-          const Text(
-            'Existing Shifts',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-          ),
-          const SizedBox(height: 10),
-          _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _shifts.isEmpty
-                  ? const Center(child: Text('No shifts found.'))
-                  : ListView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _shifts.length,
-                      itemBuilder: (context, index) {
-                        final shift = _shifts[index];
-                        return Card(
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: Colors.indigo.shade100,
-                              child: const Icon(
-                                Icons.schedule,
-                                color: Colors.indigo,
+                initiallyExpanded: _editingShift != null,
+                iconColor: accentColor,
+                collapsedIconColor: subTextColor,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildFormTextField(
+                          controller: _nameController,
+                          label: 'Shift Name',
+                          isDarkMode: widget.isDarkMode,
+                          hint: 'e.g. Morning Shift',
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: InkWell(
+                                onTap: () =>
+                                    _selectTime(context, _startController),
+                                child: IgnorePointer(
+                                  child: _buildFormTextField(
+                                    controller: _startController,
+                                    label: 'Start Time',
+                                    isDarkMode: widget.isDarkMode,
+                                    hint: 'Tap to select',
+                                  ),
+                                ),
                               ),
                             ),
-                            title: Text(
-                              shift['name'] ?? '',
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            subtitle: Text(
-                              'Time: ${shift['start_time']} - ${shift['end_time']}',
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.edit,
-                                      color: Colors.blue),
-                                  tooltip: 'Edit Shift',
-                                  onPressed: () => _editShift(shift),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: InkWell(
+                                onTap: () =>
+                                    _selectTime(context, _endController),
+                                child: IgnorePointer(
+                                  child: _buildFormTextField(
+                                    controller: _endController,
+                                    label: 'End Time',
+                                    isDarkMode: widget.isDarkMode,
+                                    hint: 'Tap to select',
+                                  ),
                                 ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete,
-                                      color: Colors.red),
-                                  tooltip: 'Delete Shift',
-                                  onPressed: () {
-                                    showDialog(
-                                      context: context,
-                                      builder: (context) => AlertDialog(
-                                        title: const Text('Delete Shift'),
-                                        content: const Text(
-                                          'Are you sure you want to delete this shift?',
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(context),
-                                            child: const Text('Cancel'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () {
-                                              _deleteShift(shift['id']);
-                                              Navigator.pop(context);
-                                            },
-                                            child: const Text(
-                                              'Delete',
-                                              style:
-                                                  TextStyle(color: Colors.red),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ],
+                              ),
                             ),
-                          ),
-                        );
-                      },
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        Row(
+                          children: [
+                            if (_editingShift != null) ...[
+                              Expanded(
+                                child: OutlinedButton(
+                                  onPressed: _clearForm,
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: subTextColor,
+                                    side: BorderSide(color: borderColor),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                  ),
+                                  child: const Text('CANCEL'),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                            ],
+                            Expanded(
+                              flex: 2,
+                              child: ElevatedButton(
+                                onPressed: _addOrUpdateShift,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: accentColor,
+                                  foregroundColor: widget.isDarkMode
+                                      ? const Color(0xFF21222D)
+                                      : Colors.white,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12)),
+                                ),
+                                child: Text(
+                                  _editingShift == null
+                                      ? 'ADD SHIFT'
+                                      : 'UPDATE SHIFT',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // Header
+          Row(
+            children: [
+              const Icon(Icons.schedule_outlined, color: accentColor, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Existing Shifts',
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.9),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+
+          if (_isLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(40.0),
+                child: CircularProgressIndicator(color: accentColor),
+              ),
+            )
+          else if (_shifts.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Column(
+                  children: [
+                    Icon(Icons.schedule_outlined,
+                        size: 48, color: textColor.withValues(alpha: 0.1)),
+                    const SizedBox(height: 16),
+                    Text('No shifts found',
+                        style: TextStyle(
+                            color: subTextColor.withValues(alpha: 0.5))),
+                  ],
+                ),
+              ),
+            )
+          else
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _shifts.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                final shift = _shifts[index];
+                return Container(
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    leading: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: accentColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.schedule,
+                          color: accentColor, size: 22),
+                    ),
+                    title: Text(
+                      shift['name'] ?? '',
+                      style: TextStyle(
+                        color: textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 4.0),
+                      child: Text(
+                        'Time: ${shift['start_time']} - ${shift['end_time']}',
+                        style: TextStyle(color: subTextColor, fontSize: 13),
+                      ),
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit_outlined,
+                              color: accentColor, size: 20),
+                          onPressed: () => _editShift(shift),
+                          tooltip: 'Edit',
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.redAccent, size: 20),
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) => AlertDialog(
+                                backgroundColor: cardBg,
+                                title: Text('Delete Shift',
+                                    style: TextStyle(color: textColor)),
+                                content: Text(
+                                  'Are you sure you want to delete this shift?',
+                                  style: TextStyle(color: subTextColor),
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: Text('CANCEL',
+                                        style: TextStyle(color: subTextColor)),
+                                  ),
+                                  TextButton(
+                                    onPressed: () {
+                                      _deleteShift(shift['id']);
+                                      Navigator.pop(context);
+                                    },
+                                    child: const Text('DELETE',
+                                        style:
+                                            TextStyle(color: Colors.redAccent)),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                          tooltip: 'Delete',
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
         ],
       ),
     );
@@ -6538,7 +10527,9 @@ class _ShiftsTabState extends State<ShiftsTab> {
 // ---------------------------------------------------------------------------
 class SecurityTab extends StatefulWidget {
   final String organizationCode;
-  const SecurityTab({super.key, required this.organizationCode});
+  final bool isDarkMode;
+  const SecurityTab(
+      {super.key, required this.organizationCode, required this.isDarkMode});
 
   @override
   State<SecurityTab> createState() => _SecurityTabState();
@@ -6614,27 +10605,70 @@ class _SecurityTabState extends State<SecurityTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
+    final Color cardBg =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final Color textColor = widget.isDarkMode ? Colors.white : Colors.black;
+    final Color subTextColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.5)
+        : Colors.black.withValues(alpha: 0.6);
+    final Color borderColor = widget.isDarkMode
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.black.withValues(alpha: 0.05);
+    const Color accentColor = Color(0xFFA9DFD8);
+
+    if (_isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: accentColor),
+      );
+    }
 
     if (_missingTable) {
-      return const Center(
+      return Center(
         child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
           child: Padding(
-            padding: EdgeInsets.all(16.0),
+            padding: const EdgeInsets.all(24.0),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.security, size: 64, color: Colors.grey),
-                SizedBox(height: 16),
-                Text(
-                  'No login security available.',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: textColor.withValues(alpha: 0.05),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(Icons.security_update_warning_outlined,
+                      size: 48, color: textColor.withValues(alpha: 0.2)),
                 ),
-                SizedBox(height: 8),
+                const SizedBox(height: 24),
+                Text(
+                  'Security logs unavailable',
+                  style: TextStyle(
+                      color: textColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
                 Text(
                   'Make sure the "owner_logs" table exists in Supabase.',
-                  style: TextStyle(color: Colors.grey),
+                  style: TextStyle(color: subTextColor),
                   textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+                ElevatedButton.icon(
+                  onPressed: _fetchLogs,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('RETRY'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: accentColor,
+                    foregroundColor: widget.isDarkMode
+                        ? const Color(0xFF21222D)
+                        : Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
                 ),
               ],
             ),
@@ -6643,22 +10677,50 @@ class _SecurityTabState extends State<SecurityTab> {
       );
     }
 
-    if (_logs.isEmpty) {
-      return const Center(
+    if (_logs.isEmpty && _employeeLogs.isEmpty) {
+      return Center(
         child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.security, size: 64, color: Colors.grey),
-              SizedBox(height: 16),
-              Text(
-                'No login history found.',
-                style: TextStyle(color: Colors.grey),
+              Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: textColor.withValues(alpha: 0.05),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.security_outlined,
+                    size: 48, color: textColor.withValues(alpha: 0.2)),
               ),
-              SizedBox(height: 8),
+              const SizedBox(height: 24),
               Text(
-                '(Make sure "owner_logs" table exists in Supabase)',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+                'No security logs found',
+                style: TextStyle(
+                    color: textColor,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Login history will appear here once users sign in.',
+                style: TextStyle(color: subTextColor),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton.icon(
+                onPressed: _fetchLogs,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('REFRESH'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: accentColor,
+                  foregroundColor: widget.isDarkMode
+                      ? const Color(0xFF21222D)
+                      : Colors.white,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                ),
               ),
             ],
           ),
@@ -6666,68 +10728,339 @@ class _SecurityTabState extends State<SecurityTab> {
       );
     }
 
-    return ListView(
-      children: [
-        const Padding(
-          padding: EdgeInsets.all(16.0),
-          child: Text(
-            'Owner/Admin Login History',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-        ),
-        if (_logs.isEmpty)
-          const Center(child: Text('No owner/admin logins found.'))
-        else
-          ..._logs.map((log) {
-            final timeStr = log['login_time'] as String?;
-            final time =
-                DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
-            final device = log['device_name'] ?? 'Unknown';
-            final os = log['os_version'] ?? 'Unknown';
-            return Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: ListTile(
-                leading: const Icon(Icons.security, color: Colors.blue),
-                title: Text('Logged in at ${TimeUtils.formatTo12Hour(time)}'),
-                subtitle: Text('Device: $device\nOS: $os'),
-                isThreeLine: true,
+    return RefreshIndicator(
+      onRefresh: _fetchLogs,
+      color: accentColor,
+      backgroundColor: cardBg,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        children: [
+          _buildSectionHeader(
+              'OWNER / ADMIN LOGINS', Icons.admin_panel_settings, accentColor),
+          if (_logs.isEmpty)
+            _buildEmptySection(
+                'No owner logins recorded.', subTextColor, borderColor)
+          else
+            ..._logs.map((log) {
+              final timeStr = log['login_time'] as String?;
+              final time =
+                  DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
+              final device = log['device_name'] ?? 'Unknown Device';
+              final os = log['os_version'] ?? 'Unknown OS';
+              return _buildLogCard(
+                icon: Icons.security,
+                iconColor: Colors.blueAccent,
+                title: 'Admin Session',
+                subtitle: 'Logged in at ${TimeUtils.formatTo12Hour(time)}',
+                details: 'Device: $device • OS: $os',
+                time: DateFormat('MMM dd').format(time),
+                cardBg: cardBg,
+                textColor: textColor,
+                subTextColor: subTextColor,
+                borderColor: borderColor,
+              );
+            }),
+          const SizedBox(height: 24),
+          _buildSectionHeader(
+              'EMPLOYEE LOGINS', Icons.people_outline, accentColor),
+          if (_employeeLogs.isEmpty)
+            _buildEmptySection(
+                'No employee logins recorded.', subTextColor, borderColor)
+          else
+            ..._employeeLogs.map((log) {
+              final timeStr = (log['login_time'] ?? '').toString();
+              final time =
+                  DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
+              final role = (log['role'] ?? 'worker').toString().toUpperCase();
+              final workerId = (log['worker_id'] ?? 'Unknown').toString();
+              final device = (log['device_name'] ?? 'Unknown').toString();
+              final os = (log['os_version'] ?? 'Unknown').toString();
+              final isSupervisor = role.contains('SUPERVISOR');
+
+              return _buildLogCard(
+                icon: isSupervisor ? Icons.verified_user : Icons.badge,
+                iconColor:
+                    isSupervisor ? Colors.greenAccent : Colors.orangeAccent,
+                title: '$role ($workerId)',
+                subtitle: 'Logged in at ${TimeUtils.formatTo12Hour(time)}',
+                details: 'Device: $device • OS: $os',
+                time: DateFormat('MMM dd').format(time),
+                cardBg: cardBg,
+                textColor: textColor,
+                subTextColor: subTextColor,
+                borderColor: borderColor,
+              );
+            }),
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, IconData icon, Color accentColor) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: accentColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                color: accentColor,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
               ),
-            );
-          }),
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-          child: Text(
-            'Employee Login History',
-            style: TextStyle(fontWeight: FontWeight.bold),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptySection(
+      String message, Color subTextColor, Color borderColor) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: subTextColor.withValues(alpha: 0.02),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: borderColor),
+      ),
+      child: Center(
+        child: Text(
+          message,
+          style: TextStyle(
+              color: subTextColor.withValues(alpha: 0.6), fontSize: 13),
         ),
-        if (_employeeLogs.isEmpty)
-          const Center(child: Text('No worker/supervisor logins found.'))
-        else
-          ..._employeeLogs.map((log) {
-            final timeStr = (log['login_time'] ?? '').toString();
-            final time =
-                DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
-            final role = (log['role'] ?? '').toString();
-            final workerId = (log['worker_id'] ?? '').toString();
-            final device = (log['device_name'] ?? 'Unknown').toString();
-            final os = (log['os_version'] ?? 'Unknown').toString();
-            return Card(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: ListTile(
-                leading: Icon(
-                  role == 'supervisor' ? Icons.verified_user : Icons.badge,
-                  color: role == 'supervisor' ? Colors.green : Colors.orange,
-                ),
-                title: Text(
-                  '$role logged in at ${DateFormat('yyyy-MM-dd hh:mm a').format(time)}',
-                ),
-                subtitle: Text('User: $workerId\nDevice: $device\nOS: $os'),
-                isThreeLine: true,
+      ),
+    );
+  }
+
+  Widget _buildLogCard({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required String details,
+    required String time,
+    required Color cardBg,
+    required Color textColor,
+    required Color subTextColor,
+    required Color borderColor,
+  }) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: borderColor),
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: iconColor.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: iconColor, size: 22),
+        ),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                    color: textColor,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold),
               ),
-            );
-          }),
-        const SizedBox(height: 16),
+            ),
+            Text(
+              time,
+              style: TextStyle(
+                  color: subTextColor.withValues(alpha: 0.6), fontSize: 11),
+            ),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              style: TextStyle(
+                  color: textColor.withValues(alpha: 0.7), fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              details,
+              style: TextStyle(
+                  color: subTextColor.withValues(alpha: 0.8), fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationsDialog extends StatefulWidget {
+  final String organizationCode;
+  final VoidCallback onRead;
+
+  const _NotificationsDialog({
+    required this.organizationCode,
+    required this.onRead,
+  });
+
+  @override
+  State<_NotificationsDialog> createState() => _NotificationsDialogState();
+}
+
+class _NotificationsDialogState extends State<_NotificationsDialog> {
+  final SupabaseClient _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _notifications = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchNotifications();
+  }
+
+  Future<void> _fetchNotifications() async {
+    try {
+      final response = await _supabase
+          .from('notifications')
+          .select('*')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      if (mounted) {
+        setState(() {
+          _notifications = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (e.toString().contains('PGRST205')) {
+        debugPrint('Notifications table not found, skipping fetch');
+      } else {
+        debugPrint('Error fetching notifications: $e');
+      }
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _markAsRead(String id) async {
+    try {
+      await _supabase.from('notifications').update({'read': true}).eq('id', id);
+      _fetchNotifications();
+      widget.onRead();
+    } catch (e) {
+      debugPrint('Error marking notification as read: $e');
+    }
+  }
+
+  Future<void> _markAllAsRead() async {
+    try {
+      await _supabase
+          .from('notifications')
+          .update({'read': true})
+          .eq('organization_code', widget.organizationCode)
+          .eq('read', false);
+      _fetchNotifications();
+      widget.onRead();
+    } catch (e) {
+      debugPrint('Error marking all as read: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          const Text('Recent Alerts'),
+          if (_notifications.any((n) => n['read'] == false))
+            TextButton(
+              onPressed: _markAllAsRead,
+              child: const Text('Mark all read'),
+            ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _notifications.isEmpty
+                ? const Center(child: Text('No recent alerts'))
+                : ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: _notifications.length,
+                    separatorBuilder: (context, index) => const Divider(),
+                    itemBuilder: (context, index) {
+                      final n = _notifications[index];
+                      final isRead = n['read'] == true;
+                      final createdAt = DateTime.parse(n['created_at']);
+
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: n['type'] == 'out_of_bounds'
+                              ? Colors.red.shade100
+                              : Colors.green.shade100,
+                          child: Icon(
+                            n['type'] == 'out_of_bounds'
+                                ? Icons.exit_to_app
+                                : Icons.login,
+                            color: n['type'] == 'out_of_bounds'
+                                ? Colors.red
+                                : Colors.green,
+                          ),
+                        ),
+                        title: Text(
+                          n['title'],
+                          style: TextStyle(
+                            fontWeight:
+                                isRead ? FontWeight.normal : FontWeight.bold,
+                          ),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(n['body']),
+                            const SizedBox(height: 4),
+                            Text(
+                              DateFormat('MMM d, h:mm a')
+                                  .format(createdAt.toLocal()),
+                              style: const TextStyle(fontSize: 10),
+                            ),
+                          ],
+                        ),
+                        trailing: !isRead
+                            ? IconButton(
+                                icon: const Icon(Icons.check_circle_outline),
+                                onPressed: () => _markAsRead(n['id']),
+                              )
+                            : null,
+                      );
+                    },
+                  ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
       ],
     );
   }

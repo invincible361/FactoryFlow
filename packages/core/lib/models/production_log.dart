@@ -16,6 +16,8 @@ class ProductionLog {
   final int performanceDiff;
   final String? organizationCode;
   final String? remarks;
+  final bool? createdBySupervisor;
+  final String? supervisorId;
 
   ProductionLog({
     required this.id,
@@ -33,6 +35,8 @@ class ProductionLog {
     this.performanceDiff = 0,
     this.organizationCode,
     this.remarks,
+    this.createdBySupervisor = false,
+    this.supervisorId,
   });
 
   Map<String, dynamic> toJson() {
@@ -52,6 +56,8 @@ class ProductionLog {
       'performanceDiff': performanceDiff,
       'organizationCode': organizationCode,
       'remarks': remarks,
+      'createdBySupervisor': createdBySupervisor,
+      'supervisorId': supervisorId,
     };
   }
 
@@ -76,6 +82,8 @@ class ProductionLog {
       performanceDiff: json['performanceDiff'] ?? 0,
       organizationCode: json['organizationCode'],
       remarks: json['remarks'],
+      createdBySupervisor: json['createdBySupervisor'] ?? false,
+      supervisorId: json['supervisorId'],
     );
   }
 }

@@ -6,11 +6,14 @@ class Machine {
   final String type;
   final List<Item> items;
 
+  final String? photoUrl;
+
   Machine({
     required this.id,
     required this.name,
     required this.type,
     required this.items,
+    this.photoUrl,
   });
 
   @override

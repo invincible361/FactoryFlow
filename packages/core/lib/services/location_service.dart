@@ -12,7 +12,7 @@ class LocationService {
     }
 
     permission = await Geolocator.checkPermission();
-    
+
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) {
@@ -31,18 +31,23 @@ class LocationService {
     if (requestAlways && permission == LocationPermission.whileInUse) {
       permission = await Geolocator.requestPermission();
       if (permission != LocationPermission.always) {
-        debugPrint('Always location permission not granted, background tasks may fail.');
+        debugPrint(
+          'Always location permission not granted, background tasks may fail.',
+        );
       }
     }
 
     try {
       // Try to get last known position first for faster response
-      final lastKnown = await Geolocator.getLastKnownPosition();
-      if (lastKnown != null) {
-        // If last known is fresh (less than 1 minute old), return it
-        final diff = DateTime.now().difference(lastKnown.timestamp);
-        if (diff.inMinutes < 1) {
-          return lastKnown;
+      // getLastKnownPosition is not supported on web
+      if (!kIsWeb) {
+        final lastKnown = await Geolocator.getLastKnownPosition();
+        if (lastKnown != null) {
+          // If last known is fresh (less than 1 minute old), return it
+          final diff = DateTime.now().difference(lastKnown.timestamp);
+          if (diff.inMinutes < 1) {
+            return lastKnown;
+          }
         }
       }
 
@@ -55,8 +60,10 @@ class LocationService {
       );
     } catch (e) {
       // Fallback to last known if current position fails
-      final lastKnown = await Geolocator.getLastKnownPosition();
-      if (lastKnown != null) return lastKnown;
+      if (!kIsWeb) {
+        final lastKnown = await Geolocator.getLastKnownPosition();
+        if (lastKnown != null) return lastKnown;
+      }
       rethrow;
     }
   }
@@ -65,14 +72,25 @@ class LocationService {
     Position position,
     double targetLat,
     double targetLng,
-    double radiusMeters,
-  ) {
+    double radiusMeters, {
+    double bufferMultiplier = 1.0,
+    bool useAccuracy = true,
+  }) {
     double distanceInMeters = Geolocator.distanceBetween(
       position.latitude,
       position.longitude,
       targetLat,
       targetLng,
     );
-    return distanceInMeters <= radiusMeters;
+
+    double effectiveRadius = radiusMeters * bufferMultiplier;
+
+    // If using accuracy, we add the position's accuracy to the effective radius.
+    // This helps in indoor environments (like factories) where GPS drift is common.
+    if (useAccuracy) {
+      effectiveRadius += position.accuracy;
+    }
+
+    return distanceInMeters <= effectiveRadius;
   }
 }

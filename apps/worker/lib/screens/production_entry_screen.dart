@@ -1,12 +1,16 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:uuid/uuid.dart';
+import 'package:uuid/uuid.dart' as uuid;
 import 'package:factoryflow_core/factoryflow_core.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import '../main.dart';
+import '../ui_components/navigation_home_screen.dart';
+import '../app_theme.dart';
 
 class ProductionEntryScreen extends StatefulWidget {
   final Employee employee;
@@ -20,19 +24,20 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     with WidgetsBindingObserver {
   final _formKey = GlobalKey<FormState>();
   final LocationService _locationService = LocationService();
+  final AttendanceService _attendanceService = AttendanceService();
 
   Machine? _selectedMachine;
   Item? _selectedItem;
   String? _selectedOperation;
   final List<Map<String, String?>> _extraEntries = [];
-  final TextEditingController _quantityController = TextEditingController();
-  final TextEditingController _remarksController = TextEditingController();
 
   bool _isSaving = false;
+  bool _showPdf = false;
 
   // Data State
   List<Machine> _machines = [];
   List<Item> _items = [];
+  List<Map<String, dynamic>> _assignments = [];
   bool _isLoadingData = true;
   List<Map<String, dynamic>> _shifts = [];
   String? _selectedShift;
@@ -44,14 +49,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   bool? _isInside; // Track inside/outside state more robustly
 
   // Timer State
-  Timer? _timer;
   DateTime? _startTime;
   Duration _elapsed = Duration.zero;
   bool _isTimerRunning = false;
-  String? _factoryName;
-  String? _logoUrl;
   String? _currentLogId;
-  String? _workerPhotoUrl;
+  String? _activeAssignmentId;
+  RealtimeChannel? _assignmentSubscription;
 
   // Notifiers for lag optimization
   final ValueNotifier<DateTime> _currentTimeNotifier = ValueNotifier<DateTime>(
@@ -61,21 +64,76 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     Duration.zero,
   );
   Timer? _uiUpdateTimer;
+
+  final List<Color> _lightColors = [
+    const Color(0xFFE3F2FD), // Light Blue
+    const Color(0xFFF1F8E9), // Light Green
+    const Color(0xFFFFF3E0), // Light Orange
+    const Color(0xFFF3E5F5), // Light Purple
+    const Color(0xFFE0F2F1), // Light Teal
+    const Color(0xFFFFFDE7), // Light Yellow
+    const Color(0xFFFFEBEE), // Light Red
+    const Color(0xFFE8EAF6), // Light Indigo
+  ];
+
+  final List<Color> _darkColors = [
+    const Color(0xFF1A237E), // Dark Indigo
+    const Color(0xFF1B5E20), // Dark Green
+    const Color(0xFFE65100), // Dark Orange
+    const Color(0xFF4A148C), // Dark Purple
+    const Color(0xFF004D40), // Dark Teal
+    const Color(0xFF33691E), // Dark Light Green
+    const Color(0xFFB71C1C), // Dark Red
+    const Color(0xFF01579B), // Dark Blue
+  ];
+
+  Color _getRandomColor(String seed, bool isDark) {
+    final random = math.Random(seed.hashCode);
+    final colors = isDark ? _darkColors : _lightColors;
+    return colors[random.nextInt(colors.length)];
+  }
+
   Widget _metricTile(String title, String value, Color color, IconData icon) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
         final isLandscape =
             MediaQuery.of(context).orientation == Orientation.landscape;
+        final bgColor = _getRandomColor(title, isDark);
+
+        // Adjust the icon/accent color for dark mode if it's too light
+        final accentColor = isDark ? _getContrastColor(color) : color;
+
         return Container(
           decoration: BoxDecoration(
-            color: color,
+            color: bgColor,
             borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: isDark
+                    ? Colors.black.withValues(alpha: 0.2)
+                    : AppTheme.grey.withValues(alpha: 0.05),
+                offset: const Offset(1.1, 1.1),
+                blurRadius: 10.0,
+              ),
+            ],
           ),
           padding: EdgeInsets.all(isLandscape ? 8 : 12),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Icon(icon, color: Colors.black87, size: isLandscape ? 20 : 24),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: accentColor.withValues(alpha: 0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  icon,
+                  color: accentColor,
+                  size: isLandscape ? 18 : 22,
+                ),
+              ),
               SizedBox(width: isLandscape ? 8 : 12),
               Expanded(
                 child: Column(
@@ -86,7 +144,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                       title,
                       style: TextStyle(
                         fontSize: isLandscape ? 10 : 11,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.bold,
+                        color: isDark
+                            ? Colors.white
+                            : AppTheme.grey.withValues(alpha: 0.8),
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -99,6 +160,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                       style: TextStyle(
                         fontSize: isLandscape ? 12 : 14,
                         fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white : AppTheme.darkText,
                         height: 1.15,
                       ),
                     ),
@@ -110,6 +172,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         );
       },
     );
+  }
+
+  Color _getContrastColor(Color color) {
+    // If color is too light, return a lighter version or white for dark mode
+    // If it's a shade100, we should probably use shade400 or just the base color
+    if (color.computeLuminance() < 0.5) {
+      return color; // Already dark enough
+    }
+    // Try to get a more vibrant version for dark mode
+    return HSVColor.fromColor(
+      color,
+    ).withValue(0.9).withSaturation(0.4).toColor();
   }
 
   int _extraUnitsToday = 0;
@@ -142,10 +216,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _requestNotificationPermissions();
     _loadPersistedState();
     _fetchData();
-    _checkLocation();
-    _fetchOrganizationName();
+    _fetchAssignments();
+    _subscribeToAssignments();
+    _setupLocationListeners();
     _fetchTodayExtraUnits();
-    _fetchWorkerPhoto();
     // Check for updates
     WidgetsBinding.instance.addPostFrameCallback((_) {
       UpdateService.checkForUpdates(context, 'worker');
@@ -165,104 +239,84 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
         _elapsedTimeNotifier.notifyListeners();
 
-        // Check location and shift end every 60 seconds while timer is running in foreground
-        if (timer.tick % 60 == 0) {
-          _checkLocation();
+        // Check shift end every 10 seconds while timer is running in foreground
+        if (timer.tick % 10 == 0) {
           _checkShiftEndForeground();
         }
       }
     });
   }
 
-  String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
-    for (var key in keys) {
-      final val = data[key]?.toString();
-      if (val != null && val.trim().isNotEmpty) {
-        return val;
-      }
-    }
-    return null;
-  }
-
-  Future<void> _fetchWorkerPhoto() async {
+  Future<void> _fetchAssignments() async {
     try {
-      final resp = await Supabase.instance.client
-          .from('workers')
+      final response = await Supabase.instance.client
+          .from('work_assignments')
           .select()
           .eq('worker_id', widget.employee.id)
-          .eq('organization_code', widget.employee.organizationCode ?? '')
-          .maybeSingle();
-      if (resp != null && mounted) {
+          .eq('organization_code', widget.employee.organizationCode!)
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+
+      if (mounted) {
         setState(() {
-          _workerPhotoUrl = _getFirstNotEmpty(resp, [
-            'photo_url',
-            'avatar_url',
-            'image_url',
-            'imageurl',
-            'photourl',
-            'picture_url',
-          ]);
+          _assignments = List<Map<String, dynamic>>.from(response);
         });
       }
-    } catch (_) {
-      // ignore
+    } catch (e) {
+      debugPrint('Error fetching assignments: $e');
     }
+  }
+
+  void _subscribeToAssignments() {
+    _assignmentSubscription = Supabase.instance.client
+        .channel('public:work_assignments:worker_id=${widget.employee.id}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'work_assignments',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'worker_id',
+            value: widget.employee.id,
+          ),
+          callback: (payload) {
+            debugPrint('New assignment received: ${payload.newRecord}');
+            _fetchAssignments();
+            _showLocalNotification(
+              "New Work Assigned",
+              "A supervisor has assigned new work to you. Check the 'Pending Assignments' section.",
+            );
+          },
+        )
+        .subscribe();
+  }
+
+  void _applyAssignment(Map<String, dynamic> assignment) {
+    setState(() {
+      try {
+        _selectedMachine = _machines.firstWhere(
+          (m) => m.id == assignment['machine_id'],
+        );
+        _selectedItem = _items.firstWhere((i) => i.id == assignment['item_id']);
+        _selectedOperation = assignment['operation'];
+        _activeAssignmentId = assignment['id'].toString();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Assignment applied')));
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Error applying assignment: Machine or Item not found',
+            ),
+          ),
+        );
+      }
+    });
   }
 
   Future<void> _requestNotificationPermissions() async {
     await NotificationService.requestPermissions();
-  }
-
-  Future<void> _initializeBackgroundTasks() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('worker_id', widget.employee.id);
-    await prefs.setString(
-      'worker_name',
-      widget.employee.name,
-    ); // Store name for background tasks
-    if (widget.employee.organizationCode != null) {
-      await prefs.setString('org_code', widget.employee.organizationCode!);
-    }
-
-    // Workmanager periodic tasks are only supported on Android.
-    // On iOS, we would need to use registerOneOffTask or a different background strategy.
-    if (!kIsWeb && Platform.isAndroid) {
-      debugPrint('ProductionEntry: Registering background tasks');
-      await Workmanager().registerPeriodicTask(
-        "1",
-        syncLocationTask,
-        frequency: const Duration(minutes: 15),
-        initialDelay: const Duration(seconds: 10),
-        constraints: Constraints(
-          networkType: NetworkType.connected,
-          requiresBatteryNotLow: false,
-          requiresCharging: false,
-          requiresDeviceIdle: false,
-          requiresStorageNotLow: false,
-        ),
-      );
-
-      await Workmanager().registerPeriodicTask(
-        "2",
-        shiftEndReminderTask,
-        frequency: const Duration(minutes: 15),
-        initialDelay: const Duration(minutes: 1),
-        constraints: Constraints(networkType: NetworkType.connected),
-      );
-
-      await Workmanager().registerPeriodicTask(
-        "3",
-        checkForUpdateTask,
-        frequency: const Duration(hours: 24),
-        initialDelay: const Duration(minutes: 5),
-        constraints: Constraints(networkType: NetworkType.connected),
-      );
-      debugPrint('ProductionEntry: Background tasks registered');
-    } else if (!kIsWeb && Platform.isIOS) {
-      // iOS specific background task registration if needed
-      // For now, we skip to avoid the "unhandledMethod" crash
-      debugPrint('Periodic tasks are not supported on iOS via Workmanager.');
-    }
   }
 
   Future<void> _loadPersistedState() async {
@@ -277,9 +331,25 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       final currentLogId = prefs.getString('persisted_current_log_id');
       final isTimerRunning =
           prefs.getBool('persisted_is_timer_running') ?? false;
+      final activeAssignmentId = prefs.getString(
+        'persisted_active_assignment_id',
+      );
+      final extraEntriesJson = prefs.getString('persisted_extra_entries');
 
       if (mounted) {
         setState(() {
+          _activeAssignmentId = activeAssignmentId;
+          if (extraEntriesJson != null) {
+            try {
+              final List<dynamic> decoded = jsonDecode(extraEntriesJson);
+              _extraEntries.clear();
+              _extraEntries.addAll(
+                decoded.map((e) => Map<String, String?>.from(e)),
+              );
+            } catch (e) {
+              debugPrint('Error decoding extra entries: $e');
+            }
+          }
           if (machineId != null && _machines.isNotEmpty) {
             try {
               _selectedMachine = _machines.firstWhere((m) => m.id == machineId);
@@ -306,15 +376,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                 startTimeMs,
               ).toLocal();
             } else {
-              try {
-                _startTime = DateTime.parse(startTimeStr!).toLocal();
-              } catch (_) {
-                _startTime = TimeUtils.parseToLocal(startTimeStr);
-              }
+              _startTime = TimeUtils.parseToLocal(startTimeStr);
             }
             _isTimerRunning = true;
             _resumeTimer();
-            _initializeBackgroundTasks();
           }
         });
       }
@@ -380,6 +445,25 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       } else {
         await prefs.remove('persisted_current_log_id');
       }
+
+      if (_activeAssignmentId != null) {
+        await prefs.setString(
+          'persisted_active_assignment_id',
+          _activeAssignmentId!,
+        );
+      } else {
+        await prefs.remove('persisted_active_assignment_id');
+      }
+
+      // Persist extra entries
+      if (_extraEntries.isNotEmpty) {
+        await prefs.setString(
+          'persisted_extra_entries',
+          jsonEncode(_extraEntries),
+        );
+      } else {
+        await prefs.remove('persisted_extra_entries');
+      }
     } catch (e) {
       debugPrint('Error persisting state: $e');
     }
@@ -395,28 +479,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       await prefs.remove('persisted_is_timer_running');
       await prefs.remove('persisted_start_time');
       await prefs.remove('persisted_start_time_ms');
+      await prefs.remove('persisted_active_assignment_id');
+      await prefs.remove('persisted_extra_entries');
     } catch (e) {
       debugPrint('Error clearing persisted state: $e');
-    }
-  }
-
-  Future<void> _fetchOrganizationName() async {
-    try {
-      final resp = await Supabase.instance.client
-          .from('organizations')
-          .select('organization_name, factory_name, logo_url')
-          .eq('organization_code', widget.employee.organizationCode ?? '')
-          .maybeSingle();
-      if (mounted && resp != null) {
-        setState(() {
-          final orgName = (resp['organization_name'] ?? '').toString();
-          final facName = (resp['factory_name'] ?? '').toString();
-          _factoryName = orgName.isNotEmpty ? orgName : facName;
-          _logoUrl = (resp['logo_url'] ?? '').toString();
-        });
-      }
-    } catch (e) {
-      debugPrint('Fetch org name error: $e');
     }
   }
 
@@ -496,15 +562,102 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     }
   }
 
+  void _setupLocationListeners() {
+    // Sync initial values
+    if (mounted) {
+      setState(() {
+        _isInside = NavigationHomeScreen.isInsideNotifier.value;
+        _currentPosition = NavigationHomeScreen.currentPositionNotifier.value;
+        _locationStatus = NavigationHomeScreen.locationStatusNotifier.value;
+        _isLocationLoading = false;
+      });
+    }
+
+    // Listen for changes
+    NavigationHomeScreen.isInsideNotifier.addListener(_onLocationChanged);
+    NavigationHomeScreen.currentPositionNotifier.addListener(
+      _onPositionChanged,
+    );
+    NavigationHomeScreen.locationStatusNotifier.addListener(
+      _onLocationStatusChanged,
+    );
+  }
+
+  void _onPositionChanged() {
+    if (mounted) {
+      setState(() {
+        _currentPosition = NavigationHomeScreen.currentPositionNotifier.value;
+      });
+    }
+  }
+
+  void _onLocationChanged() {
+    if (mounted) {
+      final isInside = NavigationHomeScreen.isInsideNotifier.value;
+      setState(() {
+        _isInside = isInside;
+      });
+
+      // Show warning if worker leaves factory while production is running
+      if (_isTimerRunning && isInside == false) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'WARNING: You have left the factory while production is active! This has been logged as a violation.',
+            ),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
+  void _onLocationStatusChanged() {
+    if (mounted) {
+      setState(() {
+        _locationStatus = NavigationHomeScreen.locationStatusNotifier.value;
+        _isLocationLoading = false;
+      });
+    }
+  }
+
+  Future<void> _manualRefreshLocation() async {
+    setState(() => _isLocationLoading = true);
+    final result = await handleBackgroundLocation();
+    final isInside = result['isInside'] as bool?;
+    final position = result['position'] as Position?;
+
+    if (mounted) {
+      setState(() {
+        _isInside = isInside;
+        _currentPosition = position;
+        if (isInside == null) {
+          _locationStatus = 'Location error or not set';
+        } else {
+          _locationStatus = isInside ? 'Inside Factory ✅' : 'Outside Factory ❌';
+        }
+        _isLocationLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _uiUpdateTimer?.cancel();
     _currentTimeNotifier.dispose();
     _elapsedTimeNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
-    _timer?.cancel();
-    _quantityController.dispose();
-    _remarksController.dispose();
+    if (_assignmentSubscription != null) {
+      Supabase.instance.client.removeChannel(_assignmentSubscription!);
+    }
+    NavigationHomeScreen.isInsideNotifier.removeListener(_onLocationChanged);
+    NavigationHomeScreen.currentPositionNotifier.removeListener(
+      _onPositionChanged,
+    );
+    NavigationHomeScreen.locationStatusNotifier.removeListener(
+      _onLocationStatusChanged,
+    );
     super.dispose();
   }
 
@@ -600,150 +753,66 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     }
   }
 
-  Future<void> _checkLocation() async {
-    setState(() {
-      _isLocationLoading = true;
-      _locationStatus = 'Fetching location...';
-    });
-
-    try {
-      final position = await _locationService.getCurrentLocation(
-        requestAlways: true,
-      );
-      bool isInside = false;
-      try {
-        final org = await Supabase.instance.client
-            .from('organizations')
-            .select()
-            .eq('organization_code', widget.employee.organizationCode!)
-            .maybeSingle();
-        if (org != null) {
-          final lat = (org['latitude'] ?? 0.0) * 1.0;
-          final lng = (org['longitude'] ?? 0.0) * 1.0;
-          final radius = (org['radius_meters'] ?? 500.0) * 1.0;
-
-          if (lat == 0.0 && lng == 0.0) {
-            debugPrint('Organization has no location set (0,0)');
-          }
-
-          isInside = _locationService.isInside(position, lat, lng, radius);
-        } else {
-          debugPrint(
-            'Organization not found for code: ${widget.employee.organizationCode}',
-          );
-          isInside = false;
-        }
-      } catch (e) {
-        debugPrint('Error fetching organization location: $e');
-        isInside = false;
-      }
-
-      if (mounted) {
-        final wasInside = _isInside;
-        setState(() {
-          _currentPosition = position;
-          _isInside = isInside;
-          _locationStatus = isInside ? 'Inside Factory ✅' : 'Outside Factory ❌';
-        });
-
-        // Log out-of-bounds event if production is running
-        if (_isTimerRunning) {
-          final prefs = await SharedPreferences.getInstance();
-          final now = DateTime.now();
-
-          // wasInside is null on first check, treat as true to avoid false exit log
-          // or we can use the persisted 'was_inside' if available
-          final effectiveWasInside =
-              wasInside ?? prefs.getBool('was_inside') ?? true;
-
-          if (effectiveWasInside && !isInside) {
-            // Just moved out
-            final eventId = const Uuid().v4();
-            await Supabase.instance.client
-                .from('production_outofbounds')
-                .insert({
-                  'id': eventId,
-                  'worker_id': widget.employee.id,
-                  'worker_name': widget.employee.name,
-                  'organization_code': widget.employee.organizationCode,
-                  'date': DateFormat('yyyy-MM-dd').format(now),
-                  'exit_time': now.toUtc().toIso8601String(),
-                  'exit_latitude': position.latitude,
-                  'exit_longitude': position.longitude,
-                });
-            await _updateAttendance(isCheckOut: true, eventTime: now);
-            await prefs.setString('active_boundary_event_id', eventId);
-            await prefs.setBool('was_inside', false);
-            await _showLocalNotification(
-              "Return to Factory!",
-              "You have left the factory area during production. Please return immediately.",
-            );
-          } else if (!effectiveWasInside && isInside) {
-            // Just came back
-            final eventId = prefs.getString('active_boundary_event_id');
-            if (eventId != null) {
-              final entryTime = DateTime.now();
-              // Fetch exit time to calculate duration
-              final event = await Supabase.instance.client
-                  .from('production_outofbounds')
-                  .select('exit_time')
-                  .eq('id', eventId)
-                  .maybeSingle();
-
-              String? durationStr;
-              if (event != null) {
-                final exitTime = TimeUtils.parseToLocal(event['exit_time']);
-                final diff = entryTime.difference(exitTime);
-                durationStr = "${diff.inMinutes} mins";
-              }
-
-              await Supabase.instance.client
-                  .from('production_outofbounds')
-                  .update({
-                    'entry_time': entryTime.toUtc().toIso8601String(),
-                    'entry_latitude': position.latitude,
-                    'entry_longitude': position.longitude,
-                    'duration_minutes': durationStr,
-                  })
-                  .eq('id', eventId);
-              await prefs.remove('active_boundary_event_id');
-              await prefs.setBool('was_inside', true);
-              await _showLocalNotification(
-                "Back in Bounds",
-                "You have returned to the factory premises.",
-              );
-            }
-          }
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _locationStatus = 'Error: $e';
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLocationLoading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _startTimer() async {
+  bool _areAllEntriesComplete() {
+    // ONLY base machine is strictly required to start
     if (_selectedMachine == null ||
         _selectedItem == null ||
         _selectedOperation == null) {
+      return false;
+    }
+
+    // Extra machines: only block if PARTIALLY filled
+    for (var entry in _extraEntries) {
+      final hasMachine = entry['machineId'] != null;
+      final hasItem = entry['itemId'] != null;
+      final hasOp = entry['operation'] != null;
+
+      // If they started filling a row, they must finish it
+      if ((hasMachine || hasItem || hasOp) &&
+          !(hasMachine && hasItem && hasOp)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  Future<void> _startTimer() async {
+    if (_isInside == false) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please select Machine, Item and Operation first.'),
+          content: Text(
+            'Cannot start production while outside factory boundaries!',
+          ),
+          backgroundColor: Colors.red,
         ),
       );
       return;
     }
 
-    final logId = const Uuid().v4();
+    // Automatically remove completely empty extra entries
+    setState(() {
+      _extraEntries.removeWhere(
+        (entry) =>
+            entry['machineId'] == null &&
+            entry['itemId'] == null &&
+            entry['operation'] == null,
+      );
+    });
+    _persistState();
+
+    if (!_areAllEntriesComplete()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Please complete or remove partial machine entries first.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final logId = const uuid.Uuid().v4();
 
     setState(() {
       _isTimerRunning = true;
@@ -766,12 +835,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       }
     }
 
-    // Start background tasks only when production starts
-    await _initializeBackgroundTasks();
-
-    // Check location immediately
-    _checkLocation();
-
     // Record attendance check-in
     await _updateAttendance(isCheckOut: false, eventTime: _startTime);
 
@@ -783,6 +846,17 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     // Save initial log for "In" time visibility
     try {
+      // Update assignment status if exists
+      if (_activeAssignmentId != null) {
+        await Supabase.instance.client
+            .from('work_assignments')
+            .update({
+              'status': 'started',
+              'updated_at': DateTime.now().toIso8601String(),
+            })
+            .eq('id', _activeAssignmentId!);
+      }
+
       final initialLog = ProductionLog(
         id: logId,
         employeeId: widget.employee.id,
@@ -884,139 +958,21 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   Future<void> _updateAttendance({
     bool isCheckOut = false,
     DateTime? eventTime,
+    String? overrideStatus,
   }) async {
     try {
-      final now = eventTime ?? DateTime.now();
-      // Use start time for date key if checking out to ensure we update the same record
-      final effectiveDate = (isCheckOut && _startTime != null)
-          ? _startTime!
-          : now;
-      final dateStr = DateFormat('yyyy-MM-dd').format(effectiveDate);
-      final supabase = Supabase.instance.client;
-
-      // Determine shift name strictly
-      String targetShiftName = _selectedShift ?? '';
-      Map<String, dynamic> shift = {};
-
-      if (targetShiftName.isNotEmpty) {
-        shift = _shifts.firstWhere(
-          (s) => s['name'] == targetShiftName,
-          orElse: () => <String, dynamic>{},
-        );
-      }
-
-      // If no valid shift selected/found, try to detect from time
-      if (shift.isEmpty) {
-        shift = _findShiftByTime(effectiveDate);
-        if (shift.isNotEmpty) {
-          targetShiftName = shift['name'];
-        } else {
-          targetShiftName = 'General'; // Fallback to avoid null
-        }
-      }
-
-      final payload = {
-        'worker_id': widget.employee.id,
-        'organization_code': widget.employee.organizationCode,
-        'date': dateStr,
-        'shift_name': targetShiftName,
-        'shift_start_time': shift['start_time'],
-        'shift_end_time': shift['end_time'],
-      };
-
-      if (!isCheckOut) {
-        // For Start Production, always record check_in if it's the first production of the shift
-        final existing = await supabase
-            .from('attendance')
-            .select()
-            .eq('worker_id', widget.employee.id)
-            .eq('date', dateStr)
-            .eq('organization_code', widget.employee.organizationCode!)
-            .maybeSingle();
-
-        if (existing == null) {
-          payload['check_in'] = now.toUtc().toIso8601String();
-          payload['status'] = 'On Time'; // Default status on check-in
-          await supabase.from('attendance').insert(payload);
-        } else if (existing['check_in'] == null) {
-          // If record exists (e.g. from previous shift overlap) but check_in is missing
-          await supabase
-              .from('attendance')
-              .update({
-                'check_in': now.toUtc().toIso8601String(),
-                'status': 'On Time',
-                'shift_name': targetShiftName,
-                'shift_start_time': shift['start_time'],
-                'shift_end_time': shift['end_time'],
-              })
-              .eq('worker_id', widget.employee.id)
-              .eq('date', dateStr)
-              .eq('organization_code', widget.employee.organizationCode!);
-        }
-      } else {
-        // For End Production, record/update check_out
-        payload['check_out'] = now.toUtc().toIso8601String();
-
-        if (shift.isNotEmpty) {
-          try {
-            final format = DateFormat('hh:mm a');
-            final shiftEndDt = format.parse(shift['end_time']);
-            final shiftStartDt = format.parse(shift['start_time']);
-
-            DateTime shiftEndToday = DateTime(
-              now.year,
-              now.month,
-              now.day,
-              shiftEndDt.hour,
-              shiftEndDt.minute,
-            );
-
-            if (shiftEndDt.isBefore(shiftStartDt)) {
-              // Night shift logic: if now is after start or before end
-              if (now.hour >= shiftStartDt.hour || now.hour < shiftEndDt.hour) {
-                if (now.hour >= shiftStartDt.hour) {
-                  shiftEndToday = shiftEndToday.add(const Duration(days: 1));
-                }
-              }
-            }
-
-            final diffMinutes = now.difference(shiftEndToday).inMinutes;
-            final isEarly = diffMinutes < -15;
-            final isOvertime = diffMinutes > 15;
-
-            payload['is_early_leave'] = isEarly;
-            payload['is_overtime'] = isOvertime;
-            payload['status'] = (isEarly && isOvertime)
-                ? 'Both'
-                : (isEarly
-                      ? 'Early Leave'
-                      : (isOvertime ? 'Overtime' : 'On Time'));
-          } catch (e) {
-            debugPrint('Error calculating shift end for attendance: $e');
-          }
-        }
-
-        final existing = await supabase
-            .from('attendance')
-            .select()
-            .eq('worker_id', widget.employee.id)
-            .eq('date', dateStr)
-            .eq('organization_code', widget.employee.organizationCode!)
-            .maybeSingle();
-
-        if (existing == null) {
-          await supabase.from('attendance').insert(payload);
-        } else {
-          await supabase
-              .from('attendance')
-              .update(payload)
-              .eq('worker_id', widget.employee.id)
-              .eq('date', dateStr)
-              .eq('organization_code', widget.employee.organizationCode!);
-        }
-      }
+      await _attendanceService.updateAttendance(
+        workerId: widget.employee.id,
+        organizationCode: widget.employee.organizationCode!,
+        shifts: _shifts,
+        selectedShiftName: _selectedShift,
+        isCheckOut: isCheckOut,
+        eventTime: eventTime,
+        startTimeRef: _startTime,
+        overrideStatus: overrideStatus,
+      );
     } catch (e) {
-      debugPrint('Error updating attendance: $e');
+      debugPrint('ATTENDANCE_DEBUG: ERROR updating attendance: $e');
     }
   }
 
@@ -1036,8 +992,122 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     return TimeUtils.formatTo12Hour(time, format: 'hh:mm:ss a');
   }
 
+  void _stopTimerAndMarkAbsent() async {
+    final endTime = DateTime.now();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm Departure'),
+        content: const Text(
+          'You are marking yourself absent because you have left the factory. This will stop your current work and mark your attendance as "Absent" with a remark. Continue?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes, I have left'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _isSaving = true);
+
+    try {
+      // 1. Stop Timer
+      _isTimerRunning = false;
+      _uiUpdateTimer?.cancel();
+
+      // 2. Add production log with remark
+      final logId = const uuid.Uuid().v4();
+      final remark = 'left factory after starting work';
+
+      final log = ProductionLog(
+        id: logId,
+        employeeId: widget.employee.id,
+        machineId: _selectedMachine?.id ?? 'Unknown',
+        itemId: _selectedItem?.id ?? 'Unknown',
+        operation: _selectedOperation ?? 'Unknown',
+        quantity: 0,
+        timestamp: endTime,
+        startTime: _startTime,
+        endTime: endTime,
+        latitude: _currentPosition?.latitude ?? 0.0,
+        longitude: _currentPosition?.longitude ?? 0.0,
+        shiftName: _selectedShift ?? 'Unknown',
+        performanceDiff: 0,
+        organizationCode: widget.employee.organizationCode,
+        remarks: remark,
+      );
+
+      await LogService().addLog(log);
+
+      // 3. Update Attendance to Absent
+      await AttendanceService().updateAttendance(
+        workerId: widget.employee.id,
+        organizationCode: widget.employee.organizationCode!,
+        shifts: _shifts,
+        selectedShiftName: _selectedShift,
+        isCheckOut: true,
+        eventTime: endTime,
+        startTimeRef: _startTime,
+        overrideStatus: 'Absent',
+      );
+
+      // 4. Reset state
+      _startTime = null;
+      _elapsed = Duration.zero;
+      _elapsedTimeNotifier.value = Duration.zero;
+      _extraEntries.clear();
+      _selectedMachine = null;
+      _selectedItem = null;
+      _selectedOperation = null;
+
+      await _clearPersistedState();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Shift ended and marked absent.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
   void _stopTimerAndFinish() {
-    _timer?.cancel();
+    // PREVENT SUBMISSION IF OUTSIDE
+    if (_isInside == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'CANNOT SUBMIT: You are outside the factory boundary. Please return to the factory to submit your production.',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 5),
+        ),
+      );
+      return;
+    }
+
     final endTime = DateTime.now();
 
     final qtyControllers = <TextEditingController>[];
@@ -1074,9 +1144,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                     controller: qtyControllers[0],
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    decoration: const InputDecoration(
-                      labelText: 'Base Machine Quantity',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText:
+                          'Quantity for ${_selectedMachine?.name ?? "Base Machine"}',
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -1098,6 +1169,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                         orElse: () => _selectedItem!,
                       );
                       final opName = data['operation'] ?? _selectedOperation!;
+                      final machine = _machines.firstWhere(
+                        (m) => m.id == data['machineId'],
+                        orElse: () => _selectedMachine!,
+                      );
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -1110,9 +1185,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                             inputFormatters: [
                               FilteringTextInputFormatter.digitsOnly,
                             ],
-                            decoration: const InputDecoration(
-                              labelText: 'Quantity',
-                              border: OutlineInputBorder(),
+                            decoration: InputDecoration(
+                              labelText: 'Quantity for ${machine.name}',
+                              border: const OutlineInputBorder(),
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -1152,36 +1227,35 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                   );
                   return;
                 }
-                // Validate extra entries (handle partial and complete states)
+                // Collect extra entries data - Simple: only include complete entries, skip others
+                final extraEntriesData = <Map<String, dynamic>>[];
                 for (int i = 0; i < _extraEntries.length; i++) {
                   final data = _extraEntries[i];
-                  final hasMachine = data['machineId'] != null;
-                  final hasItem = data['itemId'] != null;
-                  final hasOp = data['operation'] != null;
-                  final isComplete = hasMachine && hasItem && hasOp;
-                  final isPartial =
-                      (hasMachine || hasItem || hasOp) && !isComplete;
-                  if (isPartial) {
-                    ScaffoldMessenger.of(currentContext).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Please complete Extra Machine Entry ${i + 1} (select machine, item, and operation)',
-                        ),
-                      ),
-                    );
-                    return;
-                  }
-                  if (isComplete && qtyControllers[i + 1].text.trim().isEmpty) {
-                    ScaffoldMessenger.of(currentContext).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Please enter quantity for Extra Machine Entry ${i + 1}',
-                        ),
-                      ),
-                    );
-                    return;
+                  final isComplete =
+                      (data['machineId'] != null &&
+                      data['itemId'] != null &&
+                      data['operation'] != null);
+
+                  // Only collect if complete AND has a quantity
+                  if (isComplete) {
+                    final qtyStr = qtyControllers[i + 1].text.trim();
+                    if (qtyStr.isNotEmpty) {
+                      final qty = int.tryParse(qtyStr) ?? 0;
+                      final remark = remarksControllers[i + 1].text.isNotEmpty
+                          ? remarksControllers[i + 1].text
+                          : null;
+
+                      extraEntriesData.add({
+                        'machineId': data['machineId'],
+                        'itemId': data['itemId'],
+                        'operation': data['operation'],
+                        'quantity': qty,
+                        'remarks': remark,
+                      });
+                    }
                   }
                 }
+
                 final baseQty = int.tryParse(qtyControllers[0].text.trim());
                 if (baseQty == null) {
                   ScaffoldMessenger.of(currentContext).showSnackBar(
@@ -1205,6 +1279,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                     endTime,
                     detail,
                     diff,
+                    extraEntriesData,
                   );
                 } else {
                   Navigator.pop(currentContext);
@@ -1216,50 +1291,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                     endTime,
                     null,
                     0,
+                    extraEntriesData,
                   );
-                }
-                // Save extra entries logs
-                for (int i = 0; i < _extraEntries.length; i++) {
-                  final data = _extraEntries[i];
-                  final isComplete =
-                      (data['machineId'] != null &&
-                      data['itemId'] != null &&
-                      data['operation'] != null);
-                  if (!isComplete) continue;
-                  final qty =
-                      int.tryParse(qtyControllers[i + 1].text.trim()) ?? 0;
-                  final remark = remarksControllers[i + 1].text.isNotEmpty
-                      ? remarksControllers[i + 1].text
-                      : null;
-                  final machine = _machines.firstWhere(
-                    (m) => m.id == data['machineId'],
-                    orElse: () => _selectedMachine!,
-                  );
-                  final item = _items.firstWhere(
-                    (it) => it.id == data['itemId'],
-                    orElse: () => _selectedItem!,
-                  );
-                  final op = data['operation'] ?? _selectedOperation!;
-                  final log = ProductionLog(
-                    id: const Uuid().v4(),
-                    employeeId: widget.employee.id,
-                    machineId: machine.id,
-                    itemId: item.id,
-                    operation: op,
-                    quantity: qty,
-                    timestamp: DateTime.now(),
-                    startTime: _startTime,
-                    endTime: endTime,
-                    latitude: _currentPosition?.latitude ?? 0.0,
-                    longitude: _currentPosition?.longitude ?? 0.0,
-                    shiftName:
-                        _selectedShift ??
-                        _getShiftName(_startTime ?? DateTime.now()),
-                    performanceDiff: 0,
-                    organizationCode: widget.employee.organizationCode,
-                    remarks: remark,
-                  );
-                  LogService().addLog(log);
                 }
               },
               child: const Text('Submit'),
@@ -1277,13 +1310,21 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     DateTime endTime,
     OperationDetail? detail,
     int diff,
+    List<Map<String, dynamic>> extraEntriesData,
   ) {
+    final isDark = ThemeController.of(context)?.isDarkMode ?? false;
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) {
         return AlertDialog(
-          title: const Text('Confirm Production'),
+          title: Text(
+            'Confirm Production',
+            style: TextStyle(
+              color: isDark ? Colors.white : Colors.black,
+              fontWeight: isDark ? FontWeight.bold : FontWeight.bold,
+            ),
+          ),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1292,32 +1333,93 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                 _buildSummaryRow(
                   'In Time',
                   TimeUtils.formatTo12Hour(_startTime, format: 'hh:mm a'),
+                  isDark: isDark,
                 ),
                 _buildSummaryRow(
                   'Out Time',
                   TimeUtils.formatTo12Hour(endTime, format: 'hh:mm a'),
+                  isDark: isDark,
                 ),
-                _buildSummaryRow('Total Work Hours', _formatDuration(_elapsed)),
+                _buildSummaryRow(
+                  'Total Work Hours',
+                  _formatDuration(_elapsed),
+                  isDark: isDark,
+                ),
                 const Divider(),
-                _buildSummaryRow('Produced Quantity', quantity.toString()),
+                Text(
+                  'Base Machine (${_selectedMachine?.name})',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: isDark ? Colors.white70 : Colors.black54,
+                  ),
+                ),
+                _buildSummaryRow(
+                  'Produced Quantity',
+                  quantity.toString(),
+                  isDark: isDark,
+                ),
                 if (detail != null && detail.target > 0)
                   _buildSummaryRow(
                     'Target Status',
                     diff >= 0 ? 'Met (+$diff)' : 'Missed ($diff)',
                     color: diff >= 0 ? Colors.green : Colors.red,
+                    isDark: isDark,
                   ),
-                const Divider(),
                 _buildSummaryRow(
                   'Remarks',
                   remarks.isNotEmpty ? remarks : 'None',
+                  isDark: isDark,
                 ),
+                if (extraEntriesData.isNotEmpty) ...[
+                  const Divider(),
+                  Text(
+                    'Extra Machines',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: isDark ? Colors.white70 : Colors.black54,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...extraEntriesData.map((data) {
+                    final machine = _machines.firstWhere(
+                      (m) => m.id == data['machineId'],
+                      orElse: () => Machine(
+                        id: data['machineId'] ?? 'Unknown',
+                        name: 'Unknown',
+                        type: 'Unknown',
+                        items: [],
+                      ),
+                    );
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            machine.name,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          _buildSummaryRow(
+                            'Qty / Remarks',
+                            '${data['quantity']} / ${data['remarks'] ?? "None"}',
+                            isDark: isDark,
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+                const Divider(),
                 const SizedBox(height: 16),
-                const Text(
+                Text(
                   'Please confirm these details. You cannot edit them after saving.',
                   style: TextStyle(
                     fontStyle: FontStyle.italic,
                     fontSize: 12,
-                    color: Colors.grey,
+                    fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+                    color: isDark ? Colors.white : Colors.grey,
                   ),
                 ),
               ],
@@ -1327,23 +1429,26 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             TextButton(
               onPressed: () {
                 Navigator.pop(context);
-                // Re-open input dialog if they want to edit?
-                // For now just cancel back to running timer is safer or just stop?
-                // The user said "confirmation they can only see not edit".
-                // So if they want to change, they probably need to go back.
-                // But _stopTimerAndFinish has already stopped the timer visually (though _timer is active in background technically until cancel).
-                // Actually _stopTimerAndFinish calls _timer?.cancel().
-                // If they cancel here, we should probably resume.
                 _resumeTimer();
               },
-              child: const Text('Edit / Cancel'),
+              child: Text(
+                'Edit / Cancel',
+                style: TextStyle(
+                  fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
             ),
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                _saveLog(quantity, remarks, endTime, diff);
+                _saveLog(quantity, remarks, endTime, diff, extraEntriesData);
               },
-              child: const Text('Confirm & Save'),
+              child: Text(
+                'Confirm & Save',
+                style: TextStyle(
+                  fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
             ),
           ],
         );
@@ -1351,18 +1456,32 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     );
   }
 
-  Widget _buildSummaryRow(String label, String value, {Color? color}) {
+  Widget _buildSummaryRow(
+    String label,
+    String value, {
+    Color? color,
+    bool isDark = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text('$label:', style: const TextStyle(fontWeight: FontWeight.w500)),
+          Text(
+            '$label:',
+            style: TextStyle(
+              fontWeight: isDark ? FontWeight.bold : FontWeight.w500,
+              color: isDark ? Colors.white : Colors.black87,
+            ),
+          ),
           Flexible(
             child: Text(
               value,
               textAlign: TextAlign.right,
-              style: TextStyle(fontWeight: FontWeight.bold, color: color),
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: color ?? (isDark ? Colors.white : Colors.black),
+              ),
             ),
           ),
         ],
@@ -1383,6 +1502,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     String remarks,
     DateTime endTime,
     int performanceDiff,
+    List<Map<String, dynamic>> extraEntriesData,
   ) async {
     if (_isSaving) return;
     setState(() {
@@ -1403,10 +1523,79 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         }
       }
 
-      final log = ProductionLog(
+      // CHECK BOUNDARY BEFORE SAVING
+      if (_isInside == false) {
+        // Worker is outside, mark absent and cancel registration
+        final logId =
+            (_currentLogId != null && !_currentLogId!.startsWith('log_'))
+            ? _currentLogId!
+            : const uuid.Uuid().v4();
+
+        final remark = 'left factory after starting work';
+
+        final log = ProductionLog(
+          id: logId,
+          employeeId: widget.employee.id,
+          machineId: _selectedMachine!.id,
+          itemId: _selectedItem!.id,
+          operation: _selectedOperation!,
+          quantity: 0, // Don't register work
+          timestamp: DateTime.now(),
+          startTime: _startTime,
+          endTime: endTime,
+          latitude: position.latitude,
+          longitude: position.longitude,
+          shiftName:
+              _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
+          performanceDiff: 0,
+          organizationCode: widget.employee.organizationCode,
+          remarks: remark,
+        );
+
+        await LogService().addLog(log);
+
+        // Update Attendance to Absent
+        await _attendanceService.updateAttendance(
+          workerId: widget.employee.id,
+          organizationCode: widget.employee.organizationCode!,
+          shifts: _shifts,
+          selectedShiftName: _selectedShift,
+          isCheckOut: true,
+          eventTime: endTime,
+          startTimeRef: _startTime,
+          overrideStatus: 'Absent',
+        );
+
+        _isTimerRunning = false;
+        _uiUpdateTimer?.cancel();
+        _startTime = null;
+        _elapsed = Duration.zero;
+        _selectedMachine = null;
+        _selectedItem = null;
+        _selectedOperation = null;
+        await _clearPersistedState();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Outside factory boundary! Work not registered. Marked as Absent.',
+              ),
+              backgroundColor: Colors.red,
+            ),
+          );
+          Navigator.popUntil(context, (route) => route.isFirst);
+        }
+        return;
+      }
+
+      // 1. Prepare Logs
+      final List<ProductionLog> allLogs = [];
+
+      final baseLog = ProductionLog(
         id: (_currentLogId != null && !_currentLogId!.startsWith('log_'))
             ? _currentLogId!
-            : const Uuid().v4(),
+            : const uuid.Uuid().v4(),
         employeeId: widget.employee.id,
         machineId: _selectedMachine!.id,
         itemId: _selectedItem!.id,
@@ -1423,8 +1612,48 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         organizationCode: widget.employee.organizationCode,
         remarks: remarks.isNotEmpty ? remarks : null,
       );
+      allLogs.add(baseLog);
 
-      await LogService().addLog(log);
+      // 2. Prepare Extra Logs
+      for (final extraData in extraEntriesData) {
+        final extraLog = ProductionLog(
+          id: const uuid.Uuid().v4(),
+          employeeId: widget.employee.id,
+          machineId: extraData['machineId'],
+          itemId: extraData['itemId'],
+          operation: extraData['operation'],
+          quantity: extraData['quantity'],
+          timestamp: DateTime.now(),
+          startTime: _startTime,
+          endTime: endTime,
+          latitude: position.latitude,
+          longitude: position.longitude,
+          shiftName:
+              _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
+          performanceDiff: 0,
+          organizationCode: widget.employee.organizationCode,
+          remarks: extraData['remarks'],
+        );
+        allLogs.add(extraLog);
+      }
+
+      // 3. Save All Logs Bulk
+      await LogService().addLogs(allLogs);
+
+      // Update assignment status if exists
+      if (_activeAssignmentId != null) {
+        try {
+          await Supabase.instance.client
+              .from('work_assignments')
+              .update({
+                'status': 'completed',
+                'updated_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', _activeAssignmentId!);
+        } catch (e) {
+          debugPrint('Error updating assignment status: $e');
+        }
+      }
 
       // Record attendance check-out
       await _updateAttendance(isCheckOut: true, eventTime: endTime);
@@ -1435,6 +1664,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         );
         _resetForm();
         _fetchTodayExtraUnits();
+        _fetchAssignments();
       }
     } catch (e) {
       if (mounted) {
@@ -1452,42 +1682,43 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   }
 
   void _resetForm() {
-    _timer?.cancel();
-    // Cancel background tasks when production finishes
-    if (!kIsWeb) {
-      Workmanager().cancelAll();
-    }
+    // Keep background tasks running for attendance tracking
 
     setState(() {
       _isTimerRunning = false;
       _startTime = null;
       _elapsed = Duration.zero;
       _currentLogId = null;
-      _quantityController.clear();
-      _remarksController.clear();
       _selectedOperation = null;
       _selectedItem = null;
       _selectedMachine = null;
+      _activeAssignmentId = null;
+      _extraEntries.clear(); // Clear extra machines after successful log
     });
     _clearPersistedState();
   }
 
-  List<String> _getFilteredOperations() {
-    if (_selectedItem == null) return [];
-    List<String> ops = _selectedItem!.operations;
+  List<String> _getFilteredOpsForItem(Item? item, Machine? machine) {
+    if (item == null) return [];
+    List<String> ops = item.operations;
 
     // Logic for Gear 122 based on machine type
-    if (_selectedItem!.id == 'GR-122' && _selectedMachine != null) {
-      if (_selectedMachine!.type == 'CNC') {
+    if (item.id == 'GR-122' && machine != null) {
+      if (machine.type == 'CNC') {
         ops = ops.where((op) => op.contains('CNC')).toList();
-      } else if (_selectedMachine!.type == 'VMC') {
+      } else if (machine.type == 'VMC') {
         ops = ops.where((op) => op.contains('VMC')).toList();
       }
     }
     return ops;
   }
 
+  List<String> _getFilteredOperations() {
+    return _getFilteredOpsForItem(_selectedItem, _selectedMachine);
+  }
+
   Widget _buildOperationInfo(Item item, String opName) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final detail = item.operationDetails.firstWhere(
       (od) => od.name == opName,
       orElse: () => OperationDetail(name: opName, target: 0),
@@ -1502,12 +1733,19 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               'Item: ${item.name} (${item.id}) • Operation: $opName • Target: ${detail.target}',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+              style: TextStyle(
+                fontWeight: isDark ? FontWeight.bold : FontWeight.w600,
+                fontSize: 12,
+                color: isDark ? Colors.white : Colors.black87,
+              ),
             ),
           ),
           if ((detail.imageUrl ?? '').isNotEmpty)
             IconButton(
-              icon: const Icon(Icons.image, color: Colors.blue),
+              icon: Icon(
+                Icons.image,
+                color: isDark ? Colors.blue.shade300 : Colors.blue,
+              ),
               tooltip: 'View Operation Image',
               onPressed: () async {
                 final uri = Uri.parse(detail.imageUrl!);
@@ -1518,7 +1756,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             ),
           if ((detail.pdfUrl ?? '').isNotEmpty)
             IconButton(
-              icon: const Icon(Icons.picture_as_pdf, color: Colors.red),
+              icon: Icon(
+                Icons.picture_as_pdf,
+                color: isDark ? Colors.red.shade300 : Colors.red,
+              ),
               tooltip: 'Open Operation PDF',
               onPressed: () async {
                 final uri = Uri.parse(detail.pdfUrl!);
@@ -1526,22 +1767,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               },
             ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildErrorWidget() {
-    return Container(
-      height: 250,
-      color: Colors.grey[200],
-      child: const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.broken_image, size: 50, color: Colors.grey),
-            Text('Could not load image'),
-          ],
-        ),
       ),
     );
   }
@@ -1618,347 +1843,795 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                if (_logoUrl != null && _logoUrl!.isNotEmpty)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: Image.network(
-                      _logoUrl!,
-                      height: 28,
-                      width: 28,
-                      fit: BoxFit.cover,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const Icon(Icons.factory, size: 28),
-                    ),
-                  )
-                else
-                  Image.asset(
-                    'assets/images/logo.png',
-                    height: 28,
-                    errorBuilder: (context, error, stackTrace) =>
-                        const Icon(Icons.factory, size: 28),
-                  ),
-                const SizedBox(width: 10),
-                const Flexible(
-                  child: Text('Worker App', overflow: TextOverflow.ellipsis),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Padding(
-              padding: const EdgeInsets.only(top: 2.0),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 12,
-                    backgroundColor: Colors.grey[300],
-                    backgroundImage:
-                        ((_workerPhotoUrl ?? widget.employee.photoUrl) !=
-                                null &&
-                            ((_workerPhotoUrl ?? widget.employee.photoUrl)!)
-                                .isNotEmpty)
-                        ? NetworkImage(
-                            (_workerPhotoUrl ?? widget.employee.photoUrl)!,
-                          )
-                        : null,
-                    child:
-                        (((_workerPhotoUrl ?? widget.employee.photoUrl) ==
-                                null) ||
-                            ((_workerPhotoUrl ?? widget.employee.photoUrl)!)
-                                .isEmpty)
-                        ? const Icon(
-                            Icons.person,
-                            size: 14,
-                            color: Colors.black54,
-                          )
-                        : null,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Welcome, ${widget.employee.name}${_factoryName != null && _factoryName!.isNotEmpty ? ' — $_factoryName' : ''}',
-                      style: const TextStyle(fontSize: 12),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Data',
-            onPressed: () {
-              _fetchData();
-              _fetchTodayExtraUnits();
-              _fetchWorkerPhoto();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Refreshing data...')),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.bar_chart),
-            tooltip: 'Productivity',
-            onPressed: _openProductivity,
-          ),
-          IconButton(
-            icon: const Icon(Icons.system_update),
-            tooltip: 'Check for Updates',
-            onPressed: () => UpdateService.checkForUpdates(context, 'worker'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: () {
-              // Assuming navigating back to root handles logout or we push LoginScreen
-              Navigator.of(
-                context,
-              ).pushNamedAndRemoveUntil('/', (route) => false);
-            },
+  Widget _buildOperationGuide(Item item, String operationName) {
+    final isDark = ThemeController.of(context)?.isDarkMode ?? false;
+    final detail = item.operationDetails.firstWhere(
+      (d) => d.name == operationName,
+      orElse: () => OperationDetail(name: operationName, target: 0),
+    );
+
+    bool hasImage =
+        detail.imageUrl != null &&
+        detail.imageUrl!.isNotEmpty &&
+        detail.imageUrl != 'logo.png';
+    bool hasPdf = detail.pdfUrl != null && detail.pdfUrl!.isNotEmpty;
+    bool hasTarget = detail.target > 0;
+
+    if (!hasImage && !hasPdf && !hasTarget) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF253840) : AppTheme.white,
+        borderRadius: const BorderRadius.all(Radius.circular(12.0)),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: isDark
+                ? Colors.black.withValues(alpha: 0.3)
+                : AppTheme.grey.withValues(alpha: 0.2),
+            offset: const Offset(1.1, 1.1),
+            blurRadius: 10.0,
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: ListView(
-            children: [
-              GridView.count(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                crossAxisCount:
-                    MediaQuery.of(context).orientation == Orientation.landscape
-                    ? 4
-                    : 2,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-                childAspectRatio:
-                    MediaQuery.of(context).orientation == Orientation.landscape
-                    ? 2.5
-                    : 2.0,
-                children: [
-                  ValueListenableBuilder<DateTime>(
-                    valueListenable: _currentTimeNotifier,
-                    builder: (context, time, _) {
-                      return _metricTile(
-                        'Current Time',
-                        _formatTime(time),
-                        Colors.blue.shade100,
-                        Icons.access_time,
-                      );
-                    },
-                  ),
-                  ValueListenableBuilder<Duration>(
-                    valueListenable: _elapsedTimeNotifier,
-                    builder: (context, elapsed, _) {
-                      return _metricTile(
-                        'Shift Timer',
-                        _isTimerRunning
-                            ? _formatDuration(elapsed)
-                            : 'Not started',
-                        Colors.orange.shade100,
-                        Icons.timer,
-                      );
-                    },
-                  ),
-                  _metricTile(
-                    'Location',
-                    _locationStatus,
-                    _locationStatus.contains('Inside')
-                        ? Colors.green.shade100
-                        : Colors.red.shade100,
-                    Icons.place,
-                  ),
-                  _metricTile(
-                    'Machine',
-                    _selectedMachine != null ? _selectedMachine!.name : 'None',
-                    Colors.blueGrey.shade100,
-                    Icons.precision_manufacturing,
-                  ),
-                  _metricTile(
-                    'Item',
-                    _selectedItem != null ? _selectedItem!.name : 'None',
-                    Colors.teal.shade100,
-                    Icons.widgets,
-                  ),
-                  _metricTile(
-                    'Operation',
-                    _selectedOperation ?? 'None',
-                    Colors.purple.shade100,
-                    Icons.build,
-                  ),
-                  _metricTile(
-                    'Shift Name',
-                    _selectedShift ?? 'None',
-                    Colors.indigo.shade100,
-                    Icons.fact_check,
-                  ),
-                  _metricTile(
-                    'Extra Units (Today)',
-                    '$_extraUnitsToday',
-                    Colors.green.shade200,
-                    Icons.trending_up,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // Location Status Card
-              Card(
-                color: _locationStatus.contains('Inside')
-                    ? Colors.green.shade50
-                    : Colors.red.shade50,
-                child: Padding(
-                  padding: const EdgeInsets.all(12.0),
-                  child: Column(
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'Current Location:',
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          if (_isLocationLoading)
-                            const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          else
-                            IconButton(
-                              icon: const Icon(Icons.refresh),
-                              onPressed: _checkLocation,
-                              tooltip: 'Refresh Location',
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _currentPosition != null
-                            ? '${_currentPosition!.latitude.toStringAsFixed(6)}, ${_currentPosition!.longitude.toStringAsFixed(6)}'
-                            : 'Unknown',
-                        style: const TextStyle(fontFamily: 'Monospace'),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _locationStatus,
-                        style: TextStyle(
-                          color: _locationStatus.contains('Inside')
-                              ? Colors.green[800]
-                              : Colors.red[800],
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Operation Guide',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? Colors.white : const Color(0xFF6C5CE7),
                   ),
                 ),
-              ),
-              const SizedBox(height: 16),
-
-              if (_isLoadingData)
-                const Center(child: CircularProgressIndicator())
-              else ...[
-                DropdownButtonFormField<String>(
-                  decoration: const InputDecoration(
-                    labelText: 'Select Shift',
-                    prefixIcon: Icon(Icons.access_time),
+                if (hasTarget)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color:
+                          (isDark
+                                  ? const Color(0xFFA29BFE)
+                                  : const Color(0xFF6C5CE7))
+                              .withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      'Target: ${detail.target}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isDark
+                            ? const Color(0xFFA29BFE)
+                            : const Color(0xFF6C5CE7),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
-                  initialValue: _shifts.any((s) => s['name'] == _selectedShift)
-                      ? _selectedShift
-                      : null,
-                  items: _shifts.map((s) {
-                    final name = s['name']?.toString() ?? '';
-                    final startTime = s['start_time']?.toString() ?? '';
-                    final endTime = s['end_time']?.toString() ?? '';
-                    final isEnded = TimeUtils.hasShiftEnded(endTime, startTime);
-
-                    return DropdownMenuItem(
-                      value: name,
-                      enabled: !isEnded,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(name),
-                          if (isEnded)
-                            const Text(
-                              ' (Ended)',
-                              style: TextStyle(
-                                color: Colors.red,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
+              ],
+            ),
+            if (hasImage || hasPdf) ...[
+              const SizedBox(height: 12),
+              if (hasImage)
+                GestureDetector(
+                  onTap: () {
+                    showDialog(
+                      context: context,
+                      builder: (context) => Dialog.fullscreen(
+                        child: Stack(
+                          children: [
+                            InteractiveViewer(
+                              panEnabled: true,
+                              minScale: 0.5,
+                              maxScale: 5.0,
+                              boundaryMargin: const EdgeInsets.all(
+                                double.infinity,
+                              ),
+                              child: Center(
+                                child: detail.imageUrl!.startsWith('http')
+                                    ? Image.network(
+                                        detail.imageUrl!,
+                                        fit: BoxFit.contain,
+                                      )
+                                    : Image.asset(
+                                        'assets/images/${detail.imageUrl!}',
+                                        fit: BoxFit.contain,
+                                      ),
                               ),
                             ),
-                        ],
+                            Positioned(
+                              top: 40,
+                              left: 20,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.5),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
+                                  icon: const Icon(
+                                    Icons.close,
+                                    color: Colors.black,
+                                  ),
+                                  onPressed: () => Navigator.pop(context),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     );
-                  }).toList(),
-                  onChanged: _isTimerRunning
-                      ? null
-                      : (String? value) {
-                          setState(() {
-                            _selectedShift = value;
-                          });
-                          _persistState();
-                        },
+                  },
+                  child: Container(
+                    height: 150,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isDark ? Colors.white24 : Colors.grey[300]!,
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: detail.imageUrl!.startsWith('http')
+                          ? Image.network(detail.imageUrl!, fit: BoxFit.contain)
+                          : Image.asset(
+                              'assets/images/${detail.imageUrl!}',
+                              fit: BoxFit.contain,
+                            ),
+                    ),
+                  ),
                 ),
-                if (_selectedShift != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8, bottom: 16),
-                    child: Row(
+              if (hasImage && hasPdf) const SizedBox(height: 8),
+              if (hasPdf) ...[
+                ElevatedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _showPdf = !_showPdf;
+                    });
+                  },
+                  icon: Icon(
+                    _showPdf ? Icons.visibility_off : Icons.picture_as_pdf,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  label: Text(_showPdf ? 'Hide PDF' : 'Open PDF'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[700],
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(double.infinity, 40),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+                if (_showPdf) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    height: 300,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey[300]!),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SfPdfViewer.network(
+                        detail.pdfUrl!,
+                        enableDoubleTapZooming: true,
+                        interactionMode: PdfInteractionMode.pan,
+                        enableTextSelection: true,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMachineEntryCard({
+    required String title,
+    required bool isDark,
+    required Machine? selectedMachine,
+    required Item? selectedItem,
+    required String? selectedOperation,
+    required Function(Machine?) onMachineChanged,
+    required Function(Item?) onItemChanged,
+    required Function(String?) onOperationChanged,
+    required List<String> availableOperations,
+    VoidCallback? onRemove,
+    bool isBase = false,
+  }) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      elevation: isDark ? 4 : 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      color: isDark ? const Color(0xFF2C3E50) : Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? Colors.blue.shade300 : Colors.blue.shade800,
+                  ),
+                ),
+                if (!isBase && onRemove != null)
+                  IconButton(
+                    icon: const Icon(
+                      Icons.remove_circle_outline,
+                      color: Colors.red,
+                    ),
+                    onPressed: _isTimerRunning ? null : onRemove,
+                    tooltip: 'Remove Machine',
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+            if (selectedMachine?.photoUrl != null) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.asset(
+                  'assets/images/${selectedMachine!.photoUrl}',
+                  height: 120,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      height: 120,
+                      width: double.infinity,
+                      color: isDark ? Colors.black26 : Colors.grey[200],
+                      child: const Icon(
+                        Icons.precision_manufacturing,
+                        size: 40,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+            const Divider(),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<Machine>(
+              decoration: const InputDecoration(
+                labelText: 'Select Machine',
+                prefixIcon: Icon(Icons.settings),
+              ),
+              dropdownColor: isDark ? const Color(0xFF263238) : Colors.white,
+              style: TextStyle(
+                color: isDark ? Colors.white : Colors.black,
+                fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+              ),
+              initialValue: _machines.contains(selectedMachine)
+                  ? selectedMachine
+                  : null,
+              items: _machines.map((machine) {
+                return DropdownMenuItem(
+                  value: machine,
+                  child: Text('${machine.name} (${machine.id})'),
+                );
+              }).toList(),
+              onChanged: _isTimerRunning ? null : onMachineChanged,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<Item>(
+              decoration: const InputDecoration(
+                labelText: 'Select Item/Component',
+                prefixIcon: Icon(Icons.inventory_2),
+              ),
+              dropdownColor: isDark ? const Color(0xFF263238) : Colors.white,
+              style: TextStyle(
+                color: isDark ? Colors.white : Colors.black,
+                fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+              ),
+              initialValue: _items.contains(selectedItem) ? selectedItem : null,
+              items: _items.map((item) {
+                return DropdownMenuItem(
+                  value: item,
+                  child: Text('${item.name} (${item.id})'),
+                );
+              }).toList(),
+              onChanged: _isTimerRunning ? null : onItemChanged,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              decoration: const InputDecoration(
+                labelText: 'Select Operation',
+                prefixIcon: Icon(Icons.build),
+              ),
+              dropdownColor: isDark ? const Color(0xFF263238) : Colors.white,
+              style: TextStyle(
+                color: isDark ? Colors.white : Colors.black,
+                fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+              ),
+              initialValue: availableOperations.contains(selectedOperation)
+                  ? selectedOperation
+                  : null,
+              items: availableOperations.map((op) {
+                return DropdownMenuItem(value: op, child: Text(op));
+              }).toList(),
+              onChanged: _isTimerRunning ? null : onOperationChanged,
+            ),
+            if (selectedItem != null && selectedOperation != null) ...[
+              const SizedBox(height: 12),
+              _buildOperationGuide(selectedItem, selectedOperation),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShiftSelector(bool isDark) {
+    return DropdownButtonFormField<String>(
+      decoration: const InputDecoration(
+        labelText: 'Select Shift',
+        prefixIcon: Icon(Icons.access_time),
+      ),
+      dropdownColor: isDark ? const Color(0xFF263238) : Colors.white,
+      style: TextStyle(
+        color: isDark ? Colors.white : Colors.black,
+        fontWeight: isDark ? FontWeight.bold : FontWeight.normal,
+      ),
+      initialValue: _shifts.any((s) => s['name'] == _selectedShift)
+          ? _selectedShift
+          : null,
+      items: _shifts.map((s) {
+        final name = s['name']?.toString() ?? '';
+        final startTime = s['start_time']?.toString() ?? '';
+        final endTime = s['end_time']?.toString() ?? '';
+        final isEnded = TimeUtils.hasShiftEnded(endTime, startTime);
+
+        return DropdownMenuItem(
+          value: name,
+          enabled: !isEnded,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(name),
+              if (isEnded)
+                const Text(
+                  ' (Ended)',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+            ],
+          ),
+        );
+      }).toList(),
+      onChanged: _isTimerRunning
+          ? null
+          : (String? value) {
+              setState(() {
+                _selectedShift = value;
+              });
+              _persistState();
+            },
+    );
+  }
+
+  Widget _buildAssignmentsHeader() {
+    if (_assignments.isEmpty) return const SizedBox.shrink();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.assignment_outlined,
+                size: 18,
+                color: isDark ? Colors.blue.shade300 : Colors.blue,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Assigned Tasks',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.blue.shade200 : Colors.blue.shade700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 100,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: _assignments.length,
+              itemBuilder: (context, index) {
+                final a = _assignments[index];
+                return GestureDetector(
+                  onTap: () => _applyAssignment(a),
+                  child: Container(
+                    width: 200,
+                    margin: const EdgeInsets.only(right: 12),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? Colors.blue.shade900.withValues(alpha: 0.3)
+                          : Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: isDark
+                            ? Colors.blue.shade700
+                            : Colors.blue.shade200,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(
-                          Icons.timer_outlined,
-                          size: 16,
-                          color: Colors.blue,
+                        Text(
+                          '${a['operation']} - ${a['item_id']}',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: isDark ? Colors.white : Colors.black,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(width: 8),
-                        ValueListenableBuilder<DateTime>(
-                          valueListenable: _currentTimeNotifier,
-                          builder: (context, _, child) {
-                            return Text(
-                              _getShiftTimeLeft(),
-                              style: const TextStyle(
-                                color: Colors.blue,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+                        const SizedBox(height: 4),
+                        Text(
+                          'Machine: ${a['machine_id']}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: isDark
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            color: isDark ? Colors.white : Colors.grey.shade700,
+                          ),
+                        ),
+                        const Spacer(),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'By: ${a['assigned_by']}',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontStyle: FontStyle.italic,
+                                fontWeight: isDark
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isDark ? Colors.white : Colors.black54,
+                              ),
+                            ),
+                            Icon(
+                              Icons.touch_app,
+                              size: 14,
+                              color: isDark
+                                  ? Colors.blue.shade300
+                                  : Colors.blue,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isOutside = _isInside == false;
+
+    return Container(
+      color: isDark ? const Color(0xFF17262A) : Colors.white,
+      child: Stack(
+        children: [
+          AbsorbPointer(
+            absorbing: isOutside,
+            child: Opacity(
+              opacity: isOutside ? 0.6 : 1.0,
+              child: Form(
+                key: _formKey,
+                child: ListView(
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.of(context).padding.top + 24,
+                    left: 16,
+                    right: 16,
+                    bottom: 16,
+                  ),
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const SizedBox(width: 40), // Space for menu icon
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Welcome,',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: isDark
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: isDark
+                                      ? Colors.white
+                                      : Colors.grey[600],
+                                ),
+                              ),
+                              Text(
+                                widget.employee.name,
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.bold,
+                                  color: isDark
+                                      ? Colors.white
+                                      : const Color(0xFF17262A),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.refresh, color: Colors.blue),
+                          onPressed: () {
+                            _fetchData();
+                            _fetchAssignments();
+                            _fetchTodayExtraUnits();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Refreshing data...'),
                               ),
                             );
                           },
                         ),
                       ],
                     ),
-                  )
-                else
-                  const SizedBox(height: 16),
-                DropdownButtonFormField<Machine>(
-                  decoration: const InputDecoration(
-                    labelText: 'Select Machine',
-                    prefixIcon: Icon(Icons.settings),
-                  ),
-                  initialValue: _machines.contains(_selectedMachine)
-                      ? _selectedMachine
-                      : null,
-                  items: _machines.map((machine) {
-                    return DropdownMenuItem(
-                      value: machine,
-                      child: Text('${machine.name} (${machine.id})'),
-                    );
-                  }).toList(),
-                  onChanged: _isTimerRunning
-                      ? null
-                      : (Machine? newValue) {
+                    const SizedBox(height: 20),
+                    _buildAssignmentsHeader(),
+                    const SizedBox(height: 10),
+                    GridView.count(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisCount:
+                          MediaQuery.of(context).orientation ==
+                              Orientation.landscape
+                          ? 4
+                          : 2,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                      childAspectRatio:
+                          MediaQuery.of(context).orientation ==
+                              Orientation.landscape
+                          ? 2.5
+                          : 2.0,
+                      children: [
+                        ValueListenableBuilder<DateTime>(
+                          valueListenable: _currentTimeNotifier,
+                          builder: (context, time, _) {
+                            return _metricTile(
+                              'Current Time',
+                              _formatTime(time),
+                              Colors.blue,
+                              Icons.access_time,
+                            );
+                          },
+                        ),
+                        ValueListenableBuilder<Duration>(
+                          valueListenable: _elapsedTimeNotifier,
+                          builder: (context, elapsed, _) {
+                            return _metricTile(
+                              'Shift Timer',
+                              _isTimerRunning
+                                  ? _formatDuration(elapsed)
+                                  : 'Not started',
+                              Colors.orange,
+                              Icons.timer,
+                            );
+                          },
+                        ),
+                        _metricTile(
+                          'Location',
+                          _locationStatus,
+                          _locationStatus.contains('Inside')
+                              ? Colors.green
+                              : Colors.red,
+                          Icons.place,
+                        ),
+                        _metricTile(
+                          'Machines',
+                          () {
+                            int count = 1 + _extraEntries.length;
+                            if (count == 1) {
+                              return _selectedMachine?.name ?? 'None';
+                            }
+                            return '$count Machines Active';
+                          }(),
+                          Colors.blueGrey,
+                          Icons.precision_manufacturing,
+                        ),
+                        _metricTile(
+                          'Item',
+                          () {
+                            if (_extraEntries.isEmpty) {
+                              return _selectedItem?.name ?? 'None';
+                            }
+                            return 'Multiple Items';
+                          }(),
+                          Colors.teal,
+                          Icons.widgets,
+                        ),
+                        _metricTile(
+                          'Operation',
+                          () {
+                            if (_extraEntries.isEmpty) {
+                              return _selectedOperation ?? 'None';
+                            }
+                            return 'Multiple Ops';
+                          }(),
+                          Colors.purple,
+                          Icons.build,
+                        ),
+                        _metricTile(
+                          'Shift Name',
+                          _selectedShift ?? 'None',
+                          Colors.indigo,
+                          Icons.fact_check,
+                        ),
+                        _metricTile(
+                          'Extra Units (Today)',
+                          '$_extraUnitsToday',
+                          Colors.green,
+                          Icons.trending_up,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Location Status Card
+                    Card(
+                      color: isDark
+                          ? (_locationStatus.contains('Inside')
+                                ? Colors.green.shade900.withValues(alpha: 0.3)
+                                : Colors.red.shade900.withValues(alpha: 0.3))
+                          : (_locationStatus.contains('Inside')
+                                ? Colors.green.shade50
+                                : Colors.red.shade50),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Current Location:',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: isDark ? Colors.white : Colors.black,
+                                  ),
+                                ),
+                                if (_isLocationLoading)
+                                  const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                else
+                                  IconButton(
+                                    icon: Icon(
+                                      Icons.refresh,
+                                      color: isDark
+                                          ? Colors.white
+                                          : Colors.black54,
+                                    ),
+                                    onPressed: _manualRefreshLocation,
+                                    tooltip: 'Refresh Location',
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            if (_currentPosition != null)
+                              Text(
+                                '${_currentPosition!.latitude.toStringAsFixed(6)}, ${_currentPosition!.longitude.toStringAsFixed(6)}',
+                                style: TextStyle(
+                                  fontFamily: 'Monospace',
+                                  fontWeight: isDark
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: isDark ? Colors.white : Colors.black87,
+                                ),
+                              ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _locationStatus,
+                              style: TextStyle(
+                                color: isDark
+                                    ? (_locationStatus.contains('Inside')
+                                          ? Colors.green.shade300
+                                          : Colors.red.shade300)
+                                    : (_locationStatus.contains('Inside')
+                                          ? Colors.green[800]
+                                          : Colors.red[800]),
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    if (_isLoadingData)
+                      const Center(child: CircularProgressIndicator())
+                    else ...[
+                      _buildShiftSelector(isDark),
+                      if (_selectedShift != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8, bottom: 16),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.timer_outlined,
+                                size: 16,
+                                color: Colors.blue,
+                              ),
+                              const SizedBox(width: 8),
+                              ValueListenableBuilder<DateTime>(
+                                valueListenable: _currentTimeNotifier,
+                                builder: (context, _, child) {
+                                  return Text(
+                                    _getShiftTimeLeft(),
+                                    style: const TextStyle(
+                                      color: Colors.blue,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        )
+                      else
+                        const SizedBox(height: 16),
+
+                      _buildMachineEntryCard(
+                        title: 'Base Machine',
+                        isDark: isDark,
+                        selectedMachine: _selectedMachine,
+                        selectedItem: _selectedItem,
+                        selectedOperation: _selectedOperation,
+                        onMachineChanged: (newValue) {
                           setState(() {
                             _selectedMachine = newValue;
                             _selectedItem = null;
@@ -1966,849 +2639,503 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                           });
                           _persistState();
                         },
-                ),
-                if (_extraEntries.isNotEmpty)
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: _extraEntries.asMap().entries.map((entry) {
-                      final idx = entry.key;
-                      final data = entry.value;
-                      final selMachine = _machines
-                          .where((m) => m.id == data['machineId'])
-                          .cast<Machine?>()
-                          .firstOrNull;
-                      final selItem = _items
-                          .where((i) => i.id == data['itemId'])
-                          .cast<Item?>()
-                          .firstOrNull;
-                      final ops = () {
-                        if (selItem == null) return <String>[];
-                        List<String> o = selItem.operations;
-                        if (selItem.id == 'GR-122' && selMachine != null) {
-                          if (selMachine.type == 'CNC') {
-                            o = o.where((op) => op.contains('CNC')).toList();
-                          } else if (selMachine.type == 'VMC') {
-                            o = o.where((op) => op.contains('VMC')).toList();
-                          }
-                        }
-                        return o;
-                      }();
-                      return Card(
-                        margin: const EdgeInsets.symmetric(vertical: 6),
-                        child: Padding(
-                          padding: const EdgeInsets.all(8.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Extra Machine Entry ${idx + 1}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              DropdownButtonFormField<Machine>(
-                                decoration: InputDecoration(
-                                  labelText: 'Machine ${idx + 2}',
-                                  prefixIcon: const Icon(Icons.settings),
-                                ),
-                                initialValue: selMachine,
-                                items: _machines.map((m) {
-                                  return DropdownMenuItem(
-                                    value: m,
-                                    child: Text('${m.name} (${m.id})'),
-                                  );
-                                }).toList(),
-                                onChanged: _isTimerRunning
-                                    ? null
-                                    : (Machine? v) {
-                                        setState(() {
-                                          data['machineId'] = v?.id;
-                                          data['itemId'] = null;
-                                          data['operation'] = null;
-                                        });
-                                      },
-                              ),
-                              const SizedBox(height: 8),
-                              DropdownButtonFormField<Item>(
-                                decoration: const InputDecoration(
-                                  labelText: 'Select Item/Component',
-                                  prefixIcon: Icon(Icons.inventory_2),
-                                ),
-                                initialValue: selItem,
-                                items: _items.map((item) {
-                                  return DropdownMenuItem(
-                                    value: item,
-                                    child: Text('${item.name} (${item.id})'),
-                                  );
-                                }).toList(),
-                                onChanged: _isTimerRunning
-                                    ? null
-                                    : (Item? v) {
-                                        setState(() {
-                                          data['itemId'] = v?.id;
-                                          data['operation'] = null;
-                                        });
-                                      },
-                              ),
-                              const SizedBox(height: 8),
-                              DropdownButtonFormField<String>(
-                                decoration: const InputDecoration(
-                                  labelText: 'Select Operation',
-                                ),
-                                initialValue: ops.contains(data['operation'])
-                                    ? data['operation']
-                                    : null,
-                                items: ops
-                                    .map(
-                                      (op) => DropdownMenuItem(
-                                        value: op,
-                                        child: Text(op),
-                                      ),
-                                    )
-                                    .toList(),
-                                onChanged: _isTimerRunning
-                                    ? null
-                                    : (v) {
-                                        setState(() {
-                                          data['operation'] = v;
-                                        });
-                                      },
-                              ),
-                              if (selItem != null && data['operation'] != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 6.0),
-                                  child: _buildOperationInfo(
-                                    selItem,
-                                    data['operation'] as String,
-                                  ),
-                                ),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: IconButton(
-                                  icon: const Icon(
-                                    Icons.delete,
-                                    color: Colors.red,
-                                  ),
-                                  tooltip: 'Remove',
-                                  onPressed: _isTimerRunning
-                                      ? null
-                                      : () {
-                                          setState(() {
-                                            _extraEntries.removeAt(idx);
-                                          });
-                                        },
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<Item>(
-                  decoration: const InputDecoration(
-                    labelText: 'Select Item/Component',
-                    prefixIcon: Icon(Icons.inventory_2),
-                  ),
-                  initialValue: _items.contains(_selectedItem)
-                      ? _selectedItem
-                      : null,
-                  items: _items.map((item) {
-                    return DropdownMenuItem(
-                      value: item,
-                      child: Text('${item.name} (${item.id})'),
-                    );
-                  }).toList(),
-                  onChanged: _isTimerRunning
-                      ? null
-                      : (Item? newValue) {
+                        onItemChanged: (newValue) {
                           setState(() {
                             _selectedItem = newValue;
                             _selectedOperation = null;
                           });
                           _persistState();
                         },
-                ),
-              ],
-              const SizedBox(height: 10),
+                        onOperationChanged: (newValue) {
+                          setState(() {
+                            _selectedOperation = newValue;
+                          });
+                          _persistState();
+                        },
+                        availableOperations: _getFilteredOperations(),
+                        isBase: true,
+                      ),
 
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(
-                  labelText: 'Select Operation',
-                ),
-                initialValue:
-                    _getFilteredOperations().contains(_selectedOperation)
-                    ? _selectedOperation
-                    : null,
-                items: _getFilteredOperations().map((op) {
-                  return DropdownMenuItem(value: op, child: Text(op));
-                }).toList(),
-                onChanged: _isTimerRunning
-                    ? null
-                    : (value) {
-                        setState(() {
-                          _selectedOperation = value;
-                        });
-                        _persistState();
-                      },
-              ),
-              if (!_isTimerRunning)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8.0),
-                  child: OutlinedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _extraEntries.add({
-                          'machineId': null,
-                          'itemId': null,
-                          'operation': null,
-                        });
-                      });
-                    },
-                    icon: const Icon(Icons.add_circle_outline),
-                    label: const Text('Add Another Machine'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.blue,
-                      side: const BorderSide(color: Colors.blue),
-                    ),
-                  ),
-                ),
-              if (_selectedOperation != null) ...[
-                const SizedBox(height: 16),
-                Builder(
-                  builder: (context) {
-                    final detail = _getCurrentOperationDetail();
-                    if (detail != null &&
-                        detail.imageUrl != null &&
-                        detail.imageUrl!.isNotEmpty &&
-                        detail.imageUrl != 'logo.png') {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Operation Image:',
-                            style: TextStyle(fontWeight: FontWeight.bold),
+                      ..._extraEntries.asMap().entries.map((entry) {
+                        final idx = entry.key;
+                        final data = entry.value;
+                        final selMachine = _machines
+                            .where((m) => m.id == data['machineId'])
+                            .cast<Machine?>()
+                            .firstOrNull;
+                        final selItem = _items
+                            .where((i) => i.id == data['itemId'])
+                            .cast<Item?>()
+                            .firstOrNull;
+                        final selOp = data['operation'];
+
+                        return _buildMachineEntryCard(
+                          title: 'Extra Machine Entry ${idx + 1}',
+                          isDark: isDark,
+                          selectedMachine: selMachine,
+                          selectedItem: selItem,
+                          selectedOperation: selOp,
+                          onMachineChanged: (newValue) {
+                            setState(() {
+                              _extraEntries[idx]['machineId'] = newValue?.id;
+                              _extraEntries[idx]['itemId'] = null;
+                              _extraEntries[idx]['operation'] = null;
+                            });
+                            _persistState();
+                          },
+                          onItemChanged: (newValue) {
+                            setState(() {
+                              _extraEntries[idx]['itemId'] = newValue?.id;
+                              _extraEntries[idx]['operation'] = null;
+                            });
+                            _persistState();
+                          },
+                          onOperationChanged: (newValue) {
+                            setState(() {
+                              _extraEntries[idx]['operation'] = newValue;
+                            });
+                            _persistState();
+                          },
+                          availableOperations: _getFilteredOpsForItem(
+                            selItem,
+                            selMachine,
                           ),
-                          const SizedBox(height: 8),
-                          detail.imageUrl!.startsWith('http')
-                              ? GestureDetector(
-                                  onTap: () async {
-                                    final uri = Uri.parse(detail.imageUrl!);
-                                    if (await canLaunchUrl(uri)) {
-                                      await launchUrl(
-                                        uri,
-                                        mode: LaunchMode.externalApplication,
-                                      );
-                                    }
-                                  },
-                                  child: Image.network(
-                                    detail.imageUrl!,
-                                    height:
-                                        MediaQuery.of(context).orientation ==
-                                            Orientation.landscape
-                                        ? 150
-                                        : 250,
-                                    width: double.infinity,
-                                    fit: BoxFit.contain,
-                                    loadingBuilder: (context, child, loadingProgress) {
-                                      if (loadingProgress == null) {
-                                        return child;
-                                      }
-                                      return SizedBox(
-                                        height:
-                                            MediaQuery.of(
-                                                  context,
-                                                ).orientation ==
-                                                Orientation.landscape
-                                            ? 150
-                                            : 250,
-                                        child: Center(
-                                          child: CircularProgressIndicator(
-                                            value:
-                                                loadingProgress
-                                                        .expectedTotalBytes !=
-                                                    null
-                                                ? loadingProgress
-                                                          .cumulativeBytesLoaded /
-                                                      loadingProgress
-                                                          .expectedTotalBytes!
-                                                : null,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                    errorBuilder: (context, error, stackTrace) {
-                                      return _buildErrorWidget();
-                                    },
-                                  ),
-                                )
-                              : Image.asset(
-                                  'assets/images/${detail.imageUrl!}',
-                                  height:
-                                      MediaQuery.of(context).orientation ==
-                                          Orientation.landscape
-                                      ? 150
-                                      : 250,
-                                  width: double.infinity,
-                                  fit: BoxFit.contain,
-                                  errorBuilder: (context, error, stackTrace) {
-                                    return _buildErrorWidget();
-                                  },
-                                ),
-                          if (detail.pdfUrl != null &&
-                              detail.pdfUrl!.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 16.0),
-                              child: Center(
-                                child: ElevatedButton.icon(
-                                  onPressed: () async {
-                                    final url = Uri.parse(detail.pdfUrl!);
-                                    if (await canLaunchUrl(url)) {
-                                      await launchUrl(
-                                        url,
-                                        mode: LaunchMode.externalApplication,
-                                      );
-                                    } else {
-                                      if (!context.mounted) return;
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        const SnackBar(
-                                          content: Text(
-                                            'Could not open document URL',
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                  },
-                                  icon: const Icon(Icons.picture_as_pdf),
-                                  label: const Text('View Operation Document'),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.red[700],
-                                    foregroundColor: Colors.white,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          if (detail.target > 0)
-                            Center(
-                              child: Container(
-                                margin: const EdgeInsets.only(top: 16),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 24,
-                                  vertical: 12,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.blue[50],
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: Colors.blue[200]!),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      Icons.track_changes,
-                                      color: Colors.blue,
-                                      size: 28,
+                          onRemove: () {
+                            setState(() {
+                              _extraEntries.removeAt(idx);
+                            });
+                            _persistState();
+                          },
+                        );
+                      }),
+                      if (!_isTimerRunning && _extraEntries.length < 3)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8.0),
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              if (_extraEntries.length >= 3) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Maximum 4 machines allowed simultaneously',
                                     ),
-                                    const SizedBox(width: 12),
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
+                                  ),
+                                );
+                                return;
+                              }
+                              setState(() {
+                                _extraEntries.add({
+                                  'machineId': null,
+                                  'itemId': null,
+                                  'operation': null,
+                                });
+                              });
+                              _persistState();
+                            },
+                            icon: const Icon(Icons.add_circle_outline),
+                            label: Text(
+                              'Add Machine (${_extraEntries.length + 2}/4)',
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.blue,
+                              side: const BorderSide(color: Colors.blue),
+                            ),
+                          ),
+                        ),
+                    ],
+                    const SizedBox(height: 30),
+
+                    if (!_isTimerRunning)
+                      SizedBox(
+                        height: 50,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                          ),
+                          onPressed: _areAllEntriesComplete()
+                              ? _startTimer
+                              : null,
+                          child: const Text(
+                            'Start Production Timer',
+                            style: TextStyle(color: Colors.white, fontSize: 18),
+                          ),
+                        ),
+                      )
+                    else
+                      Column(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(24),
+                            decoration: BoxDecoration(
+                              color: isDark
+                                  ? const Color(0xFF253840)
+                                  : AppTheme.white,
+                              borderRadius: const BorderRadius.all(
+                                Radius.circular(24.0),
+                              ),
+                              boxShadow: <BoxShadow>[
+                                BoxShadow(
+                                  color: isDark
+                                      ? Colors.black.withValues(alpha: 0.3)
+                                      : AppTheme.grey.withValues(alpha: 0.2),
+                                  offset: const Offset(1.1, 1.1),
+                                  blurRadius: 10.0,
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              children: [
+                                Text(
+                                  'Production In Progress',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: isDark
+                                        ? Colors.white
+                                        : const Color(0xFF6C5CE7),
+                                  ),
+                                ),
+                                const SizedBox(height: 24),
+                                ValueListenableBuilder<Duration>(
+                                  valueListenable: _elapsedTimeNotifier,
+                                  builder: (context, elapsed, _) {
+                                    final detail = _getCurrentOperationDetail();
+                                    return Column(
                                       children: [
-                                        Text(
-                                          'TARGET',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.blue[700],
-                                            letterSpacing: 1.2,
-                                          ),
+                                        Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            SizedBox(
+                                              height: 180,
+                                              width: 180,
+                                              child: Builder(
+                                                builder: (context) {
+                                                  final now = DateTime.now();
+                                                  final shift =
+                                                      _findShiftByTime(now);
+                                                  double progress = 0.0;
+                                                  if (shift.isNotEmpty) {
+                                                    try {
+                                                      final format = DateFormat(
+                                                        'hh:mm a',
+                                                      );
+                                                      final startDt = format
+                                                          .parse(
+                                                            shift['start_time'],
+                                                          );
+                                                      final endDt = format
+                                                          .parse(
+                                                            shift['end_time'],
+                                                          );
+
+                                                      final startMinutes =
+                                                          startDt.hour * 60 +
+                                                          startDt.minute;
+                                                      var endMinutes =
+                                                          endDt.hour * 60 +
+                                                          endDt.minute;
+                                                      final nowMinutes =
+                                                          now.hour * 60 +
+                                                          now.minute;
+
+                                                      if (endMinutes <
+                                                          startMinutes) {
+                                                        // Crosses midnight
+                                                        endMinutes += 24 * 60;
+                                                      }
+
+                                                      var currentMinutes =
+                                                          nowMinutes;
+                                                      if (currentMinutes <
+                                                              startMinutes &&
+                                                          endMinutes >
+                                                              24 * 60) {
+                                                        currentMinutes +=
+                                                            24 * 60;
+                                                      }
+
+                                                      progress =
+                                                          (currentMinutes -
+                                                              startMinutes) /
+                                                          (endMinutes -
+                                                              startMinutes);
+                                                      progress = progress.clamp(
+                                                        0.0,
+                                                        1.0,
+                                                      );
+                                                    } catch (e) {
+                                                      progress = 0.5;
+                                                    }
+                                                  }
+                                                  return CircularProgressIndicator(
+                                                    value: progress,
+                                                    strokeWidth: 12,
+                                                    backgroundColor: isDark
+                                                        ? Colors.white
+                                                              .withValues(
+                                                                alpha: 0.1,
+                                                              )
+                                                        : AppTheme.grey
+                                                              .withValues(
+                                                                alpha: 0.1,
+                                                              ),
+                                                    valueColor:
+                                                        AlwaysStoppedAnimation<
+                                                          Color
+                                                        >(
+                                                          isDark
+                                                              ? const Color(
+                                                                  0xFFA29BFE,
+                                                                )
+                                                              : const Color(
+                                                                  0xFF6C5CE7,
+                                                                ),
+                                                        ),
+                                                  );
+                                                },
+                                              ),
+                                            ),
+                                            Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  _formatDuration(elapsed),
+                                                  style: TextStyle(
+                                                    fontSize: 32,
+                                                    fontWeight: FontWeight.bold,
+                                                    color: isDark
+                                                        ? Colors.white
+                                                        : AppTheme.darkText,
+                                                    fontFamily: 'Monospace',
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'ELAPSED TIME',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.bold,
+                                                    color: isDark
+                                                        ? Colors.white
+                                                        : AppTheme.grey,
+                                                    letterSpacing: 1.2,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
                                         ),
-                                        Text(
-                                          '${detail.target} Units',
-                                          style: const TextStyle(
-                                            fontSize: 24,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.blue,
+                                        const SizedBox(height: 24),
+                                        if (detail != null && detail.target > 0)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 8,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color:
+                                                  (isDark
+                                                          ? const Color(
+                                                              0xFFA29BFE,
+                                                            )
+                                                          : const Color(
+                                                              0xFF6C5CE7,
+                                                            ))
+                                                      .withValues(alpha: 0.1),
+                                              borderRadius:
+                                                  BorderRadius.circular(20),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  Icons.track_changes,
+                                                  size: 16,
+                                                  color: isDark
+                                                      ? const Color(0xFFA29BFE)
+                                                      : const Color(0xFF6C5CE7),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Builder(
+                                                  builder: (context) {
+                                                    final now = DateTime.now();
+                                                    final shift =
+                                                        _findShiftByTime(now);
+                                                    String progressText =
+                                                        'Target Progress: 70%';
+                                                    if (shift.isNotEmpty) {
+                                                      try {
+                                                        final format =
+                                                            DateFormat(
+                                                              'hh:mm a',
+                                                            );
+                                                        final startDt = format
+                                                            .parse(
+                                                              shift['start_time'],
+                                                            );
+                                                        final endDt = format
+                                                            .parse(
+                                                              shift['end_time'],
+                                                            );
+
+                                                        final startMinutes =
+                                                            startDt.hour * 60 +
+                                                            startDt.minute;
+                                                        var endMinutes =
+                                                            endDt.hour * 60 +
+                                                            endDt.minute;
+                                                        final nowMinutes =
+                                                            now.hour * 60 +
+                                                            now.minute;
+
+                                                        if (endMinutes <
+                                                            startMinutes) {
+                                                          endMinutes += 24 * 60;
+                                                        }
+
+                                                        var currentMinutes =
+                                                            nowMinutes;
+                                                        if (currentMinutes <
+                                                                startMinutes &&
+                                                            endMinutes >
+                                                                24 * 60) {
+                                                          currentMinutes +=
+                                                              24 * 60;
+                                                        }
+
+                                                        final progress =
+                                                            (currentMinutes -
+                                                                startMinutes) /
+                                                            (endMinutes -
+                                                                startMinutes);
+                                                        progressText =
+                                                            'Shift Progress: ${(progress.clamp(0.0, 1.0) * 100).toInt()}%';
+                                                      } catch (_) {}
+                                                    }
+                                                    return Text(
+                                                      progressText,
+                                                      style: TextStyle(
+                                                        color: isDark
+                                                            ? const Color(
+                                                                0xFFA29BFE,
+                                                              )
+                                                            : const Color(
+                                                                0xFF6C5CE7,
+                                                              ),
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                      ),
+                                                    );
+                                                  },
+                                                ),
+                                              ],
+                                            ),
                                           ),
-                                        ),
                                       ],
-                                    ),
-                                  ],
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          SizedBox(
+                            height: 50,
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.red,
+                              ),
+                              onPressed: _stopTimerAndFinish,
+                              child: const Text(
+                                'Stop & Enter Quantity',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
                                 ),
                               ),
                             ),
+                          ),
                         ],
-                      );
-                    } else if (detail != null && detail.target > 0) {
-                      return Center(
-                        child: Container(
-                          margin: const EdgeInsets.only(top: 16),
+                      ),
+
+                    if (_isSaving)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 20),
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (isOutside)
+            Center(
+              child: Container(
+                margin: const EdgeInsets.all(24),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.red.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 10,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.location_off,
+                      color: Colors.white,
+                      size: 64,
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'OUTSIDE FACTORY',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'You are outside the factory premises. Work registration is disabled.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white, fontSize: 16),
+                    ),
+                    if (_isTimerRunning) ...[
+                      const SizedBox(height: 24),
+                      ElevatedButton.icon(
+                        onPressed: () => _stopTimerAndMarkAbsent(),
+                        icon: const Icon(Icons.exit_to_app),
+                        label: const Text('End Shift (Mark Absent)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.red,
                           padding: const EdgeInsets.symmetric(
                             horizontal: 24,
                             vertical: 12,
                           ),
-                          decoration: BoxDecoration(
-                            color: Colors.blue[50],
+                          shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.blue[200]!),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.track_changes,
-                                color: Colors.blue,
-                                size: 28,
-                              ),
-                              const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'TARGET',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.blue[700],
-                                      letterSpacing: 1.2,
-                                    ),
-                                  ),
-                                  Text(
-                                    '${detail.target} Units',
-                                    style: const TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.blue,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
                           ),
                         ),
-                      );
-                    }
-                    return const SizedBox.shrink();
-                  },
-                ),
-              ],
-              const SizedBox(height: 30),
-
-              if (!_isTimerRunning)
-                SizedBox(
-                  height: 50,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
-                    ),
-                    onPressed:
-                        (_selectedMachine != null &&
-                            _selectedItem != null &&
-                            _selectedOperation != null)
-                        ? _startTimer
-                        : null,
-                    child: const Text(
-                      'Start Production Timer',
-                      style: TextStyle(color: Colors.white, fontSize: 18),
-                    ),
-                  ),
-                )
-              else
-                Column(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        color: Colors.blue[50],
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.blue),
                       ),
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Production In Progress',
-                            style: TextStyle(fontSize: 16, color: Colors.blue),
-                          ),
-                          const SizedBox(height: 10),
-                          ValueListenableBuilder<Duration>(
-                            valueListenable: _elapsedTimeNotifier,
-                            builder: (context, elapsed, _) {
-                              return Text(
-                                _formatDuration(elapsed),
-                                style: const TextStyle(
-                                  fontSize: 48,
-                                  fontWeight: FontWeight.bold,
-                                  fontFamily: 'Monospace',
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    SizedBox(
-                      height: 50,
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red,
-                        ),
-                        onPressed: _stopTimerAndFinish,
-                        child: const Text(
-                          'Stop & Enter Quantity',
-                          style: TextStyle(color: Colors.white, fontSize: 18),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-              if (_isSaving)
-                const Padding(
-                  padding: EdgeInsets.only(top: 20),
-                  child: Center(child: CircularProgressIndicator()),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<List<Map<String, dynamic>>> _fetchEmployeeLogs(DateTime from) async {
-    final supabase = Supabase.instance.client;
-    final response = await supabase
-        .from('production_logs')
-        .select()
-        .eq('worker_id', widget.employee.id)
-        .eq('organization_code', widget.employee.organizationCode ?? '')
-        .gte('created_at', from.toIso8601String())
-        .order('created_at', ascending: true);
-    return List<Map<String, dynamic>>.from(response);
-  }
-
-  Future<List<Map<String, dynamic>>> _fetchEmployeeAttendance(
-    DateTime from,
-  ) async {
-    final supabase = Supabase.instance.client;
-    final response = await supabase
-        .from('attendance')
-        .select()
-        .eq('worker_id', widget.employee.id)
-        .eq('organization_code', widget.employee.organizationCode ?? '')
-        .gte('date', DateFormat('yyyy-MM-dd').format(from))
-        .order('date', ascending: false);
-    return List<Map<String, dynamic>>.from(response);
-  }
-
-  void _openProductivity() async {
-    final now = DateTime.now();
-    final dayFrom = DateTime(now.year, now.month, now.day);
-    final weekFrom = now.subtract(const Duration(days: 6));
-    final monthFrom = now.subtract(const Duration(days: 29));
-
-    // Fetch logs
-    final dayLogs = await _fetchEmployeeLogs(dayFrom);
-    final weekLogs = await _fetchEmployeeLogs(weekFrom);
-    final monthLogs = await _fetchEmployeeLogs(monthFrom);
-
-    // Fetch attendance
-    final dayAtt = await _fetchEmployeeAttendance(dayFrom);
-    final weekAtt = await _fetchEmployeeAttendance(weekFrom);
-    final monthAtt = await _fetchEmployeeAttendance(monthFrom);
-
-    if (!mounted) return;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        String period = 'Week';
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            List<Map<String, dynamic>> logs;
-            List<Map<String, dynamic>> att;
-            if (period == 'Day') {
-              logs = dayLogs;
-              att = dayAtt;
-            } else if (period == 'Month') {
-              logs = monthLogs;
-              att = monthAtt;
-            } else {
-              logs = weekLogs;
-              att = weekAtt;
-            }
-
-            // Aggregate data by date
-            final Map<String, Map<String, dynamic>> dailyData = {};
-
-            // Initialize dailyData with attendance
-            for (var a in att) {
-              final dateStr = a['date']?.toString() ?? '';
-              if (dateStr.isEmpty) continue;
-
-              double hoursWorked = 0;
-              if (a['check_in'] != null && a['check_out'] != null) {
-                final cin = DateTime.tryParse(a['check_in'].toString());
-                final cout = DateTime.tryParse(a['check_out'].toString());
-                if (cin != null && cout != null) {
-                  hoursWorked = cout.difference(cin).inMinutes / 60.0;
-                }
-              }
-
-              dailyData[dateStr] = {
-                'date': dateStr,
-                'check_in': a['check_in'],
-                'check_out': a['check_out'],
-                'hours_worked': hoursWorked,
-                'prod_time': 0.0,
-                'surplus': 0,
-                'deficit': 0,
-                'total_qty': 0,
-              };
-            }
-
-            // Add logs data
-            for (var l in logs) {
-              final createdAt = DateTime.tryParse(
-                l['created_at']?.toString() ?? '',
-              );
-              if (createdAt == null) continue;
-              final dateStr = DateFormat('yyyy-MM-dd').format(createdAt);
-
-              dailyData.putIfAbsent(
-                dateStr,
-                () => {
-                  'date': dateStr,
-                  'check_in': null,
-                  'check_out': null,
-                  'hours_worked': 0.0,
-                  'prod_time': 0.0,
-                  'surplus': 0,
-                  'deficit': 0,
-                  'total_qty': 0,
-                },
-              );
-
-              final data = dailyData[dateStr]!;
-
-              // Production time
-              if (l['startTime'] != null && l['endTime'] != null) {
-                final start = DateTime.tryParse(l['startTime'].toString());
-                final end = DateTime.tryParse(l['endTime'].toString());
-                if (start != null && end != null) {
-                  data['prod_time'] += end.difference(start).inMinutes / 60.0;
-                }
-              }
-
-              // Surplus/Deficit
-              final diff = (l['performance_diff'] ?? 0) as int;
-              if (diff > 0) {
-                data['surplus'] += diff;
-              } else if (diff < 0) {
-                data['deficit'] += diff.abs();
-              }
-
-              data['total_qty'] += (l['quantity'] ?? 0) as int;
-            }
-
-            final sortedDates = dailyData.keys.toList()
-              ..sort((a, b) => b.compareTo(a));
-
-            return Container(
-              height: MediaQuery.of(context).size.height * 0.8,
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
+                      const SizedBox(height: 8),
                       const Text(
-                        'Worker Report',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const Spacer(),
-                      DropdownButton<String>(
-                        value: period,
-                        items: const [
-                          DropdownMenuItem(value: 'Day', child: Text('Day')),
-                          DropdownMenuItem(value: 'Week', child: Text('Week')),
-                          DropdownMenuItem(
-                            value: 'Month',
-                            child: Text('Month'),
-                          ),
-                        ],
-                        onChanged: (v) {
-                          if (v != null && context.mounted) {
-                            setModalState(() => period = v);
-                          }
-                        },
+                        'Use this if you have left the factory without finishing work.',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                        textAlign: TextAlign.center,
                       ),
                     ],
-                  ),
-                  const Divider(),
-                  Expanded(
-                    child: sortedDates.isEmpty
-                        ? const Center(
-                            child: Text('No records found for this period.'),
-                          )
-                        : ListView.builder(
-                            itemCount: sortedDates.length,
-                            itemBuilder: (context, index) {
-                              final date = sortedDates[index];
-                              final data = dailyData[date]!;
-                              final hoursWorked =
-                                  data['hours_worked'] as double;
-                              final prodTime = data['prod_time'] as double;
-                              final surplus = data['surplus'] as int;
-                              final deficit = data['deficit'] as int;
-
-                              return Card(
-                                margin: const EdgeInsets.symmetric(vertical: 8),
-                                child: Padding(
-                                  padding: const EdgeInsets.all(12),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Text(
-                                            TimeUtils.formatTo12Hour(
-                                              date,
-                                              format: 'EEE, MMM d, yyyy',
-                                            ),
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                            ),
-                                          ),
-                                          if (data['check_in'] != null)
-                                            const Chip(
-                                              label: Text(
-                                                'Present',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                              backgroundColor: Colors.green,
-                                              padding: EdgeInsets.zero,
-                                              visualDensity:
-                                                  VisualDensity.compact,
-                                            )
-                                          else
-                                            const Chip(
-                                              label: Text(
-                                                'Absent',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                              backgroundColor: Colors.red,
-                                              padding: EdgeInsets.zero,
-                                              visualDensity:
-                                                  VisualDensity.compact,
-                                            ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Row(
-                                        children: [
-                                          _reportInfoTile(
-                                            'Hours Worked',
-                                            '${hoursWorked.toStringAsFixed(1)}h',
-                                            Icons.work_outline,
-                                          ),
-                                          _reportInfoTile(
-                                            'Prod. Time',
-                                            '${prodTime.toStringAsFixed(1)}h',
-                                            Icons.timer_outlined,
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Row(
-                                        children: [
-                                          _reportInfoTile(
-                                            'Surplus',
-                                            '+$surplus',
-                                            Icons.trending_up,
-                                            color: Colors.green,
-                                          ),
-                                          _reportInfoTile(
-                                            'Deficit',
-                                            '-$deficit',
-                                            Icons.trending_down,
-                                            color: Colors.red,
-                                          ),
-                                        ],
-                                      ),
-                                      if (data['check_in'] != null) ...[
-                                        const SizedBox(height: 8),
-                                        Text(
-                                          'Attendance: ${TimeUtils.formatTo12Hour(data['check_in'], format: 'hh:mm a')} - '
-                                          '${data['check_out'] != null ? TimeUtils.formatTo12Hour(data['check_out'], format: 'hh:mm a') : "Active"}',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey[600],
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _reportInfoTile(
-    String label,
-    String value,
-    IconData icon, {
-    Color? color,
-  }) {
-    return Expanded(
-      child: Row(
-        children: [
-          Icon(icon, size: 16, color: color ?? Colors.blueGrey),
-          const SizedBox(width: 4),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: const TextStyle(fontSize: 10, color: Colors.grey),
-              ),
-              Text(
-                value,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: color,
+                  ],
                 ),
               ),
-            ],
-          ),
+            ),
         ],
       ),
     );

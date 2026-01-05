@@ -11,47 +11,63 @@ class LogService {
 
   List<ProductionLog> get logs => List.unmodifiable(_logs);
 
-  Future<void> addLog(ProductionLog log) async {
-    _logs.insert(0, log); // Keep local copy for immediate UI update if needed
+  Future<void> addLogs(List<ProductionLog> logs) async {
+    if (logs.isEmpty) return;
+    
+    // Add to local list
+    for (var log in logs) {
+      _logs.insert(0, log);
+    }
 
     try {
-      // Ensure organization_code is set; fallback fetch from workers if missing
-      String? org = log.organizationCode;
-      if (org == null || org.isEmpty) {
-        try {
-          final w = await Supabase.instance.client
-              .from('workers')
-              .select('organization_code')
-              .eq('worker_id', log.employeeId)
-              .maybeSingle();
-          if (w != null) {
-            org = (w['organization_code'] ?? '').toString();
-          }
-        } catch (_) {}
+      final List<Map<String, dynamic>> payloads = [];
+      
+      for (var log in logs) {
+        String? org = log.organizationCode;
+        if (org == null || org.isEmpty) {
+          // Fallback fetch if missing for any log (though ideally it should be provided)
+          try {
+            final w = await Supabase.instance.client
+                .from('workers')
+                .select('organization_code')
+                .eq('worker_id', log.employeeId)
+                .maybeSingle();
+            if (w != null) {
+              org = (w['organization_code'] ?? '').toString();
+            }
+          } catch (_) {}
+        }
+
+        payloads.add({
+          'id': log.id,
+          'worker_id': log.employeeId,
+          'machine_id': log.machineId,
+          'item_id': log.itemId,
+          'operation': log.operation,
+          'quantity': log.quantity,
+          'start_time': log.startTime?.toUtc().toIso8601String(),
+          'end_time': log.endTime?.toUtc().toIso8601String(),
+          'latitude': log.latitude,
+          'longitude': log.longitude,
+          'shift_name': log.shiftName,
+          'performance_diff': log.performanceDiff,
+          'organization_code': org,
+          'remarks': log.remarks,
+          'is_verified': log.createdBySupervisor == true,
+          'created_by_supervisor': log.createdBySupervisor,
+          'supervisor_id': log.supervisorId,
+        });
       }
 
-      await Supabase.instance.client.from('production_logs').upsert({
-        'id': log.id,
-        'worker_id': log.employeeId,
-        'machine_id': log.machineId,
-        'item_id': log.itemId,
-        'operation': log.operation,
-        'quantity': log.quantity,
-        'start_time': log.startTime?.toUtc().toIso8601String(),
-        'end_time': log.endTime?.toUtc().toIso8601String(),
-        'latitude': log.latitude,
-        'longitude': log.longitude,
-        'shift_name': log.shiftName,
-        'performance_diff': log.performanceDiff,
-        'organization_code': org,
-        'remarks': log.remarks,
-        'is_verified': false,
-        // 'created_at' is handled by default in Postgres
-      });
+      await Supabase.instance.client.from('production_logs').upsert(payloads);
     } catch (e) {
-      debugPrint('Error saving log to Supabase: $e');
+      debugPrint('Error saving bulk logs to Supabase: $e');
       rethrow;
     }
+  }
+
+  Future<void> addLog(ProductionLog log) async {
+    await addLogs([log]);
   }
 
   Future<List<Map<String, dynamic>>> fetchLogsForOrganization({
