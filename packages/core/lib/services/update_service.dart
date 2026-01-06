@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -78,6 +79,12 @@ class UpdateService {
     BuildContext context,
     String appType,
   ) async {
+    // Don't check for updates on web
+    if (kIsWeb) {
+      debugPrint('UpdateService: Skipping update check on web.');
+      return;
+    }
+
     debugPrint('UpdateService: Checking for updates for $appType...');
     final data = await fetchVersionData(appType);
     if (data != null) {
