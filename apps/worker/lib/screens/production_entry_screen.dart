@@ -1031,16 +1031,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       final log = ProductionLog(
         id: logId,
         employeeId: widget.employee.id,
-        machineId: _selectedMachine?.id ?? 'Unknown',
-        itemId: _selectedItem?.id ?? 'Unknown',
-        operation: _selectedOperation ?? 'Unknown',
+        machineId: _selectedMachine?.id ?? 'N/A',
+        itemId: _selectedItem?.id ?? 'N/A',
+        operation: _selectedOperation ?? 'N/A',
         quantity: 0,
         timestamp: endTime,
         startTime: _startTime,
         endTime: endTime,
         latitude: _currentPosition?.latitude ?? 0.0,
         longitude: _currentPosition?.longitude ?? 0.0,
-        shiftName: _selectedShift ?? 'Unknown',
+        shiftName: _selectedShift ?? 'N/A',
         performanceDiff: 0,
         organizationCode: widget.employee.organizationCode,
         remarks: remark,
@@ -1386,9 +1386,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                     final machine = _machines.firstWhere(
                       (m) => m.id == data['machineId'],
                       orElse: () => Machine(
-                        id: data['machineId'] ?? 'Unknown',
-                        name: 'Unknown',
-                        type: 'Unknown',
+                        id: data['machineId'] ?? 'N/A',
+                        name: 'N/A',
+                        type: 'N/A',
                         items: [],
                       ),
                     );

@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: flutter_application_1
+        working-directory: apps/admin
     steps:
       - name: Checkout
         uses: actions/checkout@v4

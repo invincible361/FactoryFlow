@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:local_auth/local_auth.dart';
 import '../utils/app_colors.dart';
 import '../services/biometric_service.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -37,6 +38,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   bool _obscurePassword = true;
   bool _canBiometric = false;
   bool _isBiometricEnabled = false;
+  IconData _biometricIcon = Icons.fingerprint_rounded;
 
   @override
   void initState() {
@@ -49,11 +51,22 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
 
     final canAuthenticate = await _biometricService.isBiometricAvailable();
     final isEnabled = await _biometricService.isBiometricsEnabled();
+    final availableBiometrics = await _biometricService
+        .getAvailableBiometrics();
 
     if (mounted) {
       setState(() {
         _canBiometric = canAuthenticate;
         _isBiometricEnabled = isEnabled;
+
+        // Determine the best icon to show
+        if (availableBiometrics.contains(BiometricType.face)) {
+          _biometricIcon = Icons.face_retouching_natural_rounded;
+        } else if (availableBiometrics.contains(BiometricType.iris)) {
+          _biometricIcon = Icons.visibility_rounded;
+        } else {
+          _biometricIcon = Icons.fingerprint_rounded;
+        }
       });
 
       // Auto-trigger biometric login if enabled
@@ -349,7 +362,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                                       child: IconButton(
                                         onPressed: _handleBiometricLogin,
                                         icon: Icon(
-                                          Icons.fingerprint_rounded,
+                                          _biometricIcon,
                                           color: accentColor,
                                           size: 32,
                                         ),

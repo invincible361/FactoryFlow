@@ -74,13 +74,26 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
     try {
       final response = await _supabase
           .from('production_outofbounds')
-          .select('*, workers:worker_id(name)')
+          .select('*, workers:worker_id(name, role)')
           .eq('organization_code', widget.organizationCode)
           .order('exit_time', ascending: false);
 
       if (mounted) {
+        final List<Map<String, dynamic>> allEvents =
+            List<Map<String, dynamic>>.from(response);
+
+        // Filter out events where the worker's role is not 'worker'
+        // This ensures admins and supervisors don't appear in the Out of Bounds list
+        final filteredEvents = allEvents.where((event) {
+          final worker = event['workers'] as Map<String, dynamic>?;
+          if (worker != null && worker.containsKey('role')) {
+            return worker['role'] == 'worker';
+          }
+          return true; // Keep if role is unknown for safety, though it should be defined
+        }).toList();
+
         setState(() {
-          _events = List<Map<String, dynamic>>.from(response);
+          _events = filteredEvents;
           _isLoading = false;
         });
       }

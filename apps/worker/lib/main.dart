@@ -118,7 +118,7 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
         bufferMultiplier: 1.0,
       );
 
-      final workerName = prefs.getString('worker_name') ?? 'Unknown Worker';
+      final workerName = prefs.getString('worker_name') ?? 'Worker';
       bool? wasInside = prefs.containsKey('was_inside')
           ? prefs.getBool('was_inside')
           : null;

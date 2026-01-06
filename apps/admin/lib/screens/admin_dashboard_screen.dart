@@ -14,6 +14,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:async';
 import 'help_screen.dart';
+import 'comparison_tab.dart';
 // Removed local AdminHomeDrawer import as we now use core AppSidebar
 
 // Removed local TimeUtils.formatTo12Hour as we now use TimeUtils.formatTo12Hour
@@ -39,7 +40,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 13, vsync: this);
+    _tabController = TabController(length: 14, vsync: this);
     _fetchOrganization();
     _fetchUnreadCount();
     _setupNotificationListener();
@@ -361,6 +362,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
           labelStyle: const TextStyle(fontWeight: FontWeight.bold),
           tabs: const [
             Tab(text: 'Reports'),
+            Tab(text: 'Comparison'),
             Tab(text: 'Visualisation'),
             Tab(text: 'Geofence'),
             Tab(text: 'Employees'),
@@ -380,6 +382,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         controller: _tabController,
         children: [
           ReportsTab(
+              organizationCode: widget.organizationCode,
+              isDarkMode: isDarkMode),
+          ComparisonTab(
               organizationCode: widget.organizationCode,
               isDarkMode: isDarkMode),
           VisualisationTab(

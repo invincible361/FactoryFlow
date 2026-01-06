@@ -22,6 +22,16 @@ class BiometricService {
     }
   }
 
+  Future<List<BiometricType>> getAvailableBiometrics() async {
+    if (kIsWeb) return [];
+    try {
+      return await _auth.getAvailableBiometrics();
+    } catch (e) {
+      debugPrint('Error getting biometric types: $e');
+      return [];
+    }
+  }
+
   Future<bool> authenticate() async {
     if (kIsWeb) return false;
     try {

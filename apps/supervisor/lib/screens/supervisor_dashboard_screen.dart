@@ -33,10 +33,13 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   List<Map<String, dynamic>> _machines = [];
   List<Map<String, dynamic>> _items = [];
   List<Map<String, dynamic>> _notifications = [];
+  Map<String, bool> _workerLocationStatus = {};
+  String _workerLocationFilter = 'All';
   bool _loading = true;
   bool _isExporting = false;
   String? _selectedWorkerId;
   DateTimeRange? _dateRange;
+  String _reportType = 'Day';
   String? _photoUrl;
   String _currentShift = 'Detecting...';
   String _currentShiftTime = '';
@@ -54,9 +57,10 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     _fetchLogs();
     _fetchAssignmentData();
     _fetchNotifications();
-    _statusTimer = Timer.periodic(const Duration(minutes: 2), (t) {
+    _statusTimer = Timer.periodic(const Duration(seconds: 30), (t) {
       _updateStatus();
       _fetchNotifications();
+      _updateWorkerLocations();
     });
   }
 
@@ -267,6 +271,33 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     }
   }
 
+  Future<void> _updateWorkerLocations() async {
+    try {
+      final boundaryEvents = await _supabase
+          .from('worker_boundary_events')
+          .select('worker_id, type')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(200);
+
+      final Map<String, bool> locations = {};
+      for (var event in (boundaryEvents as List)) {
+        final id = event['worker_id'].toString();
+        if (!locations.containsKey(id)) {
+          locations[id] = event['type'] != 'exit';
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _workerLocationStatus = locations;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error updating worker locations: $e');
+    }
+  }
+
   Future<void> _fetchAssignmentData() async {
     try {
       final workers = await _supabase
@@ -288,6 +319,8 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .eq('organization_code', widget.organizationCode)
           .order('name');
 
+      await _updateWorkerLocations();
+
       if (mounted) {
         setState(() {
           _workers = List<Map<String, dynamic>>.from(workers);
@@ -305,34 +338,42 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     String date,
   ) async {
     try {
+      // Filter by date in database for better performance and accuracy
+      // We use start of day and end of day in ISO format
       final response = await _supabase
           .from('production_logs')
           .select('*, machines(name), items(name)')
           .eq('worker_id', workerId)
           .eq('organization_code', widget.organizationCode)
+          .gte('start_time', '${date}T00:00:00Z')
+          .lte('start_time', '${date}T23:59:59Z')
           .order('start_time', ascending: true);
 
       final rawLogs = List<Map<String, dynamic>>.from(response);
 
-      // Filter by date in memory for accuracy
-      final filtered = rawLogs
-          .where((log) {
-            final startTime = TimeUtils.parseToLocal(log['start_time']);
-            final logDate = DateFormat('yyyy-MM-dd').format(startTime);
-            return logDate == date;
-          })
-          .map((log) {
-            // Flatten machine and item names
-            final machine = log['machines'] as Map<String, dynamic>?;
-            final item = log['items'] as Map<String, dynamic>?;
-            return {
-              ...log,
-              ...log,
-              'machine_name': machine?['name'],
-              'item_name': item?['name'],
-            };
-          })
-          .toList();
+      // Also try without 'Z' just in case
+      if (rawLogs.isEmpty) {
+        final altResponse = await _supabase
+            .from('production_logs')
+            .select('*, machines(name), items(name)')
+            .eq('worker_id', workerId)
+            .eq('organization_code', widget.organizationCode)
+            .gte('start_time', '${date}T00:00:00')
+            .lte('start_time', '${date}T23:59:59')
+            .order('start_time', ascending: true);
+        rawLogs.addAll(List<Map<String, dynamic>>.from(altResponse));
+      }
+
+      final filtered = rawLogs.map((log) {
+        // Flatten machine and item names
+        final machine = log['machines'] as Map<String, dynamic>?;
+        final item = log['items'] as Map<String, dynamic>?;
+        return {
+          ...log,
+          'machine_name': machine?['name'],
+          'item_name': item?['name'],
+        };
+      }).toList();
 
       return filtered;
     } catch (e) {
@@ -356,12 +397,29 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
         TextCellValue('Operator Name'),
         TextCellValue('In Time'),
         TextCellValue('Out Time'),
+        TextCellValue('Machine'),
         TextCellValue('Item'),
         TextCellValue('Operation'),
-        TextCellValue('Production Qty'),
+        TextCellValue('Worker Qty'),
+        TextCellValue('Verified Qty'),
         TextCellValue('Performance Diff'),
         TextCellValue('Remarks'),
       ]);
+
+      // Handle Date Range based on report type if not manually set
+      DateTime start = _dateRange?.start ?? DateTime.now();
+      DateTime end = _dateRange?.end ?? DateTime.now();
+
+      if (_dateRange == null) {
+        if (_reportType == 'Week') {
+          start = DateTime.now().subtract(const Duration(days: 7));
+        } else if (_reportType == 'Month') {
+          start = DateTime.now().subtract(const Duration(days: 30));
+        } else {
+          start = DateTime.now();
+        }
+        end = DateTime.now();
+      }
 
       // Fetch attendance records for the selected date range or today
       var query = _supabase
@@ -369,16 +427,9 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .select('*, workers(name)')
           .eq('organization_code', widget.organizationCode);
 
-      if (_dateRange != null) {
-        query = query
-            .gte('date', DateFormat('yyyy-MM-dd').format(_dateRange!.start))
-            .lte('date', DateFormat('yyyy-MM-dd').format(_dateRange!.end));
-      } else {
-        query = query.eq(
-          'date',
-          DateFormat('yyyy-MM-dd').format(DateTime.now()),
-        );
-      }
+      query = query
+          .gte('date', DateFormat('yyyy-MM-dd').format(start))
+          .lte('date', DateFormat('yyyy-MM-dd').format(end));
 
       final attendanceResponse = await query.order('date', ascending: false);
       final attendanceList = List<Map<String, dynamic>>.from(
@@ -404,6 +455,8 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
             TextCellValue('N/A'),
             TextCellValue('N/A'),
+            TextCellValue('N/A'),
+            const IntCellValue(0),
             const IntCellValue(0),
             const IntCellValue(0),
             TextCellValue(record['remarks'] ?? ''),
@@ -417,9 +470,11 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
               TextCellValue(workerName),
               TextCellValue(TimeUtils.formatTo12Hour(record['check_in'])),
               TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
-              TextCellValue(log['item_name'] ?? 'N/A'),
+              TextCellValue(log['machine_name'] ?? log['machine_id'] ?? 'N/A'),
+              TextCellValue(log['item_name'] ?? log['item_id'] ?? 'N/A'),
               TextCellValue(log['operation'] ?? 'N/A'),
               IntCellValue(log['quantity'] ?? 0),
+              IntCellValue(log['supervisor_quantity'] ?? 0),
               IntCellValue(log['performance_diff'] ?? 0),
               TextCellValue(log['remarks'] ?? ''),
             ]);
@@ -1299,11 +1354,29 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Worker: ${(log['workers']?['name'] ?? log['worker_id']).toString()}',
-                  style: TextStyle(
-                    color: isDark ? Colors.white70 : Colors.black87,
-                  ),
+                Builder(
+                  builder: (context) {
+                    final worker = log['workers'] as Map<String, dynamic>?;
+                    String workerName = worker?['name']?.toString() ?? '';
+                    if (workerName.isEmpty) {
+                      final localWorker = _workers.firstWhere(
+                        (w) =>
+                            w['worker_id'].toString() ==
+                            log['worker_id'].toString(),
+                        orElse: () => {},
+                      );
+                      workerName =
+                          localWorker['name']?.toString() ??
+                          log['worker_id']?.toString() ??
+                          'Unknown';
+                    }
+                    return Text(
+                      'Worker: $workerName',
+                      style: TextStyle(
+                        color: isDark ? Colors.white70 : Colors.black87,
+                      ),
+                    );
+                  },
                 ),
                 Text(
                   'Machine: ${log['machine_id']}',
@@ -1504,140 +1577,314 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
 
   Widget _buildWorkerStatusTab() {
     final isDark = widget.isDarkMode;
-    return RefreshIndicator(
-      onRefresh: () async {
-        await _fetchAssignmentData();
-        await _updateStatus();
-      },
-      child: ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: _workers.length,
-        itemBuilder: (context, index) {
-          final worker = _workers[index];
-          return FutureBuilder<Map<String, dynamic>?>(
-            future: _getWorkerStatus(worker['worker_id'].toString()),
-            builder: (context, snapshot) {
-              final status = snapshot.data;
-              final isInside = status?['is_inside'] ?? false;
-              final currentTask = status?['current_task'];
-              final pendingTask = status?['pending_task'];
-              final awaitingVerification = status?['awaiting_verification'];
 
-              final lastVerified = status?['last_verified'];
+    // Filter workers based on selected location filter
+    final filteredWorkers = _workers.where((worker) {
+      if (_workerLocationFilter == 'All') return true;
+      final isInside =
+          _workerLocationStatus[worker['worker_id'].toString()] ?? false;
+      return _workerLocationFilter == 'Inside' ? isInside : !isInside;
+    }).toList();
 
-              return Card(
-                color: isDark ? Colors.grey[850] : Colors.white,
-                margin: const EdgeInsets.only(bottom: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(
-                    color: isInside
-                        ? (isDark ? Colors.green[700]! : Colors.green.shade200)
-                        : (isDark ? Colors.red[700]! : Colors.red.shade200),
-                    width: 1,
+    return Column(
+      children: [
+        // Filter UI
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          color: isDark ? Colors.grey[900] : Colors.white,
+          child: Row(
+            children: [
+              Text(
+                'Filter:',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white70 : Colors.black54,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: ['All', 'Inside', 'Outside'].map((filter) {
+                      final isSelected = _workerLocationFilter == filter;
+                      final count = filter == 'All'
+                          ? _workers.length
+                          : _workers.where((w) {
+                              final inside =
+                                  _workerLocationStatus[w['worker_id']
+                                      .toString()] ??
+                                  false;
+                              return filter == 'Inside' ? inside : !inside;
+                            }).length;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: FilterChip(
+                          selected: isSelected,
+                          label: Text('$filter ($count)'),
+                          labelStyle: TextStyle(
+                            color: isSelected
+                                ? Colors.white
+                                : (isDark ? Colors.white70 : Colors.black87),
+                            fontSize: 12,
+                          ),
+                          selectedColor: Colors.blue,
+                          checkmarkColor: Colors.white,
+                          backgroundColor: isDark
+                              ? Colors.grey[800]
+                              : Colors.grey[200],
+                          onSelected: (selected) {
+                            if (selected) {
+                              setState(() => _workerLocationFilter = filter);
+                            }
+                          },
+                        ),
+                      );
+                    }).toList(),
                   ),
                 ),
-                child: ListTile(
-                  onTap: () => _showWorkerDetailsDialog(worker, status),
-                  leading: CircleAvatar(
-                    backgroundColor: isInside
-                        ? (isDark ? Colors.green[900] : Colors.green.shade100)
-                        : (isDark ? Colors.red[900] : Colors.red.shade100),
-                    child: Icon(
-                      isInside ? Icons.location_on : Icons.location_off,
-                      color: isInside
-                          ? (isDark ? Colors.green[300] : Colors.green)
-                          : (isDark ? Colors.red[300] : Colors.red),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: () async {
+              await _fetchAssignmentData();
+              await _updateStatus();
+            },
+            child: filteredWorkers.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.people_outline,
+                          size: 48,
+                          color: isDark ? Colors.grey[700] : Colors.grey[400],
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No workers found for this filter',
+                          style: TextStyle(
+                            color: isDark ? Colors.white70 : Colors.black54,
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  title: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          worker['name']?.toString() ?? 'Unknown Worker',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: isDark ? Colors.white : Colors.black87,
-                          ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: filteredWorkers.length,
+                    itemBuilder: (context, index) {
+                      final worker = filteredWorkers[index];
+                      return FutureBuilder<Map<String, dynamic>?>(
+                        future: _getWorkerStatus(
+                          worker['worker_id'].toString(),
                         ),
-                      ),
-                    ],
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        isInside ? 'Inside Factory' : 'Outside Factory',
-                        style: TextStyle(
-                          color: isInside
-                              ? (isDark ? Colors.green[300] : Colors.green)
-                              : (isDark ? Colors.red[300] : Colors.red),
-                          fontSize: 12,
-                        ),
-                      ),
-                      if (awaitingVerification != null)
-                        Text(
-                          'Awaiting Verification: $awaitingVerification',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark ? Colors.purple[300] : Colors.purple,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        )
-                      else if (currentTask != null)
-                        Text(
-                          'Working on: $currentTask',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark ? Colors.blue[300] : Colors.blue,
-                          ),
-                        )
-                      else if (pendingTask != null)
-                        Text(
-                          'Assigned: $pendingTask',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark ? Colors.orange[300] : Colors.orange,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        )
-                      else if (lastVerified != null)
-                        Text(
-                          'Work Completed: $lastVerified',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark ? Colors.teal[300] : Colors.teal,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        )
-                      else
-                        Text(
-                          'No active/assigned task',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontStyle: FontStyle.italic,
-                            color: isDark ? Colors.grey[400] : Colors.black54,
-                          ),
-                        ),
-                    ],
-                  ),
-                  trailing: IconButton(
-                    icon: Icon(
-                      Icons.assignment_add,
-                      color: isDark ? Colors.blue[300] : Colors.blue,
-                    ),
-                    onPressed: () {
-                      _showAssignWorkDialog(
-                        preSelectedWorkerId: worker['worker_id'].toString(),
+                        builder: (context, snapshot) {
+                          final isLoading =
+                              snapshot.connectionState ==
+                              ConnectionState.waiting;
+                          final status = snapshot.data;
+                          // Use pre-fetched status if snapshot hasn't resolved yet
+                          final isInside = status != null
+                              ? (status['is_inside'] ?? false)
+                              : (_workerLocationStatus[worker['worker_id']
+                                        .toString()] ??
+                                    false);
+
+                          final currentTask = status?['current_task'];
+                          final pendingTask = status?['pending_task'];
+                          final awaitingVerification =
+                              status?['awaiting_verification'];
+
+                          return Card(
+                            color: isDark ? Colors.grey[850] : Colors.white,
+                            margin: const EdgeInsets.only(bottom: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              side: BorderSide(
+                                color: isInside
+                                    ? (isDark
+                                          ? Colors.green[700]!
+                                          : Colors.green.shade200)
+                                    : (isDark
+                                          ? Colors.red[700]!
+                                          : Colors.red.shade200),
+                                width: 1,
+                              ),
+                            ),
+                            child: ListTile(
+                              onTap: () =>
+                                  _showWorkerDetailsDialog(worker, status),
+                              leading: CircleAvatar(
+                                backgroundColor: isInside
+                                    ? (isDark
+                                          ? Colors.green[900]
+                                          : Colors.green.shade100)
+                                    : (isDark
+                                          ? Colors.red[900]
+                                          : Colors.red.shade100),
+                                child: Icon(
+                                  isInside
+                                      ? Icons.location_on
+                                      : Icons.location_off,
+                                  color: isInside
+                                      ? (isDark
+                                            ? Colors.green[300]
+                                            : Colors.green)
+                                      : (isDark ? Colors.red[300] : Colors.red),
+                                ),
+                              ),
+                              title: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      worker['name']?.toString() ??
+                                          'Unknown Worker',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: isDark
+                                            ? Colors.white
+                                            : Colors.black87,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    isInside
+                                        ? 'Inside Factory'
+                                        : 'Outside Factory',
+                                    style: TextStyle(
+                                      color: isInside
+                                          ? (isDark
+                                                ? Colors.green[300]
+                                                : Colors.green)
+                                          : (isDark
+                                                ? Colors.red[300]
+                                                : Colors.red),
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                  if (isLoading)
+                                    SizedBox(
+                                      height: 14,
+                                      width: 100,
+                                      child: LinearProgressIndicator(
+                                        backgroundColor: isDark
+                                            ? Colors.grey[800]
+                                            : Colors.grey[200],
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
+                                              isDark
+                                                  ? Colors.blue[300]!
+                                                  : Colors.blue[400]!,
+                                            ),
+                                      ),
+                                    )
+                                  else if (awaitingVerification != null)
+                                    Text(
+                                      'Awaiting Verification: $awaitingVerification',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isDark
+                                            ? Colors.purple[300]
+                                            : Colors.purple,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    )
+                                  else if (currentTask != null)
+                                    Text(
+                                      'Working on: $currentTask',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isDark
+                                            ? Colors.blue[300]
+                                            : Colors.blue,
+                                      ),
+                                    )
+                                  else if (pendingTask != null)
+                                    Text(
+                                      'Assigned: $pendingTask',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: isDark
+                                            ? Colors.orange[300]
+                                            : Colors.orange,
+                                        fontStyle: FontStyle.italic,
+                                      ),
+                                    )
+                                  else
+                                    Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.withValues(
+                                              alpha: 0.2,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              4,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            'IDLE',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: isDark
+                                                  ? Colors.grey[400]
+                                                  : Colors.grey[600],
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          'No active/assigned task',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontStyle: FontStyle.italic,
+                                            color: isDark
+                                                ? Colors.grey[400]
+                                                : Colors.black54,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                              trailing: IconButton(
+                                icon: Icon(
+                                  Icons.assignment_add,
+                                  color: isDark
+                                      ? Colors.blue[300]
+                                      : Colors.blue,
+                                ),
+                                onPressed: () {
+                                  _showAssignWorkDialog(
+                                    preSelectedWorkerId: worker['worker_id']
+                                        .toString(),
+                                  );
+                                },
+                              ),
+                            ),
+                          );
+                        },
                       );
                     },
                   ),
-                ),
-              );
-            },
-          );
-        },
-      ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1655,6 +1902,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .from('production_logs')
           .select()
           .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
           .filter('end_time', 'is', null)
           .order('start_time', ascending: false)
           .limit(1)
@@ -1665,6 +1913,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .select()
           .eq('worker_id', workerId)
           .eq('status', 'pending')
+          .eq('organization_code', widget.organizationCode)
           .order('created_at', ascending: false)
           .limit(1)
           .maybeSingle();
@@ -1673,58 +1922,53 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .from('production_logs')
           .select()
           .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
           .or('is_verified.is.false,is_verified.is.null')
           .not('end_time', 'is', null)
+          .gt('quantity', 0)
           .order('end_time', ascending: false)
           .limit(1)
           .maybeSingle();
 
-      final latestVerified = await _supabase
-          .from('production_logs')
-          .select()
-          .eq('worker_id', workerId)
-          .eq('is_verified', true)
-          .order('end_time', ascending: false)
-          .limit(1)
-          .maybeSingle();
-
-      // Compare end_times to decide which one to show as the most recent activity
-      String? lastVerifiedStatus;
       String? awaitingVerificationStatus;
 
-      if (pendingVerification != null && latestVerified != null) {
-        final pendingTime = DateTime.parse(pendingVerification['end_time']);
-        final verifiedTime = DateTime.parse(latestVerified['end_time']);
-
-        if (verifiedTime.isAfter(pendingTime)) {
-          // Latest activity was verified, so prioritize showing that
-          lastVerifiedStatus =
-              "${latestVerified['operation']} (${latestVerified['item_id']})";
-          // Clear awaiting status so UI shows the verified one as the primary status
-          awaitingVerificationStatus = null;
-        } else {
-          // Most recent activity is pending verification
-          awaitingVerificationStatus =
-              "${pendingVerification['operation']} (${pendingVerification['item_id']})";
-        }
-      } else if (pendingVerification != null) {
+      if (pendingVerification != null) {
         awaitingVerificationStatus =
             "${pendingVerification['operation']} (${pendingVerification['item_id']})";
-      } else if (latestVerified != null) {
-        lastVerifiedStatus =
-            "${latestVerified['operation']} (${latestVerified['item_id']})";
+      }
+
+      String? currentTaskWithDuration;
+      final isInside = boundaryEvent == null || boundaryEvent['type'] != 'exit';
+
+      if (activeLog != null && isInside) {
+        final startTimeStr = activeLog['start_time'] ?? activeLog['created_at'];
+        if (startTimeStr != null) {
+          final startTime = DateTime.parse(startTimeStr);
+          // If a task has been running for more than 12 hours without update,
+          // it's likely a stale log from a previous day/shift
+          if (DateTime.now().difference(startTime).inHours < 12) {
+            final duration = DateTime.now().difference(startTime);
+            final hours = duration.inHours;
+            final minutes = duration.inMinutes.remainder(60);
+            final durationStr = hours > 0
+                ? '${hours}h ${minutes}m'
+                : '${minutes}m';
+            currentTaskWithDuration =
+                "${activeLog['operation']} (${activeLog['item_id']}) — $durationStr";
+          }
+        } else {
+          currentTaskWithDuration =
+              "${activeLog['operation']} (${activeLog['item_id']})";
+        }
       }
 
       return {
-        'is_inside': boundaryEvent == null || boundaryEvent['type'] != 'exit',
-        'current_task': activeLog != null
-            ? "${activeLog['operation']} (${activeLog['item_id']})"
-            : null,
+        'is_inside': isInside,
+        'current_task': currentTaskWithDuration,
         'pending_task': pendingAssignment != null
             ? "${pendingAssignment['operation']} (${pendingAssignment['item_id']})"
             : null,
         'awaiting_verification': awaitingVerificationStatus,
-        'last_verified': lastVerifiedStatus,
       };
     } catch (e) {
       debugPrint('Error getting worker status: $e');
@@ -1857,12 +2101,36 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                   ),
                 ),
               )
-            else
+            else ...[
+              DropdownButton<String>(
+                value: _reportType,
+                underline: const SizedBox(),
+                dropdownColor: isDark ? Colors.grey[900] : Colors.white,
+                style: TextStyle(
+                  color: isDark ? Colors.blue[300] : Colors.blue,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+                items: ['Day', 'Week', 'Month'].map((String value) {
+                  return DropdownMenuItem<String>(
+                    value: value,
+                    child: Text(value),
+                  );
+                }).toList(),
+                onChanged: (String? newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      _reportType = newValue;
+                    });
+                  }
+                },
+              ),
               IconButton(
                 icon: const Icon(Icons.file_download_outlined),
                 tooltip: 'Export Efficiency Report',
                 onPressed: _exportToExcel,
               ),
+            ],
             IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: () {
@@ -1931,94 +2199,105 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
         ),
         body: TabBarView(
           children: [
-            Column(
-              children: [
-                _buildStatusHeader(),
-                Expanded(
-                  child: _loading
-                      ? const Center(child: CircularProgressIndicator())
-                      : _logs.isEmpty
-                      ? Center(
-                          child: Text(
-                            'All production logs verified!',
-                            style: TextStyle(
-                              color: isDark ? Colors.white70 : Colors.black54,
-                            ),
-                          ),
-                        )
-                      : RefreshIndicator(
-                          onRefresh: _fetchLogs,
-                          child: ListView.builder(
-                            padding: const EdgeInsets.all(8),
-                            itemCount: _logs.length,
-                            itemBuilder: (ctx, idx) {
-                              final log = _logs[idx];
-                              final worker =
-                                  log['workers'] as Map<String, dynamic>?;
-                              final workerName =
-                                  worker?['name'] ??
-                                  log['worker_id']?.toString() ??
-                                  'Unknown';
-                              return Card(
-                                color: isDark ? Colors.grey[850] : Colors.white,
-                                margin: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 6,
-                                ),
-                                child: ListTile(
-                                  title: Text(
-                                    '$workerName — ${log['operation']}',
-                                    style: TextStyle(
-                                      color: isDark
-                                          ? Colors.white
-                                          : Colors.black87,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  subtitle: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        'Machine: ${log['machine_id']} | Item: ${log['item_id']}\nQty: ${log['quantity']}',
-                                        style: TextStyle(
-                                          color: isDark
-                                              ? Colors.white70
-                                              : Colors.black54,
-                                        ),
-                                      ),
-                                      if (log['remarks'] != null &&
-                                          log['remarks'].toString().isNotEmpty)
-                                        Padding(
-                                          padding: const EdgeInsets.only(
-                                            top: 4,
-                                          ),
-                                          child: Text(
-                                            'Remark: ${log['remarks']}',
-                                            style: const TextStyle(
-                                              color: Colors.orangeAccent,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                  trailing: ElevatedButton(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.blue,
-                                      foregroundColor: Colors.white,
-                                    ),
-                                    onPressed: () => _verifyLog(log),
-                                    child: const Text('Verify'),
-                                  ),
-                                ),
-                              );
-                            },
+            RefreshIndicator(
+              onRefresh: _fetchLogs,
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(child: _buildStatusHeader()),
+                  if (_loading)
+                    const SliverFillRemaining(
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (_logs.isEmpty)
+                    SliverFillRemaining(
+                      child: Center(
+                        child: Text(
+                          'All production logs verified!',
+                          style: TextStyle(
+                            color: isDark ? Colors.white70 : Colors.black54,
                           ),
                         ),
-                ),
-              ],
+                      ),
+                    )
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.all(8),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate((ctx, idx) {
+                          final log = _logs[idx];
+                          final worker =
+                              log['workers'] as Map<String, dynamic>?;
+
+                          // Try to get name from join first, then from local _workers list, then fallback to ID
+                          String workerName = worker?['name']?.toString() ?? '';
+                          if (workerName.isEmpty) {
+                            final localWorker = _workers.firstWhere(
+                              (w) =>
+                                  w['worker_id'].toString() ==
+                                  log['worker_id'].toString(),
+                              orElse: () => {},
+                            );
+                            workerName =
+                                localWorker['name']?.toString() ??
+                                log['worker_id']?.toString() ??
+                                'Unknown';
+                          }
+
+                          return Card(
+                            color: isDark ? Colors.grey[850] : Colors.white,
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            child: ListTile(
+                              title: Text(
+                                '$workerName — ${log['operation']}',
+                                style: TextStyle(
+                                  color: isDark ? Colors.white : Colors.black87,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Machine: ${log['machine_id']} | Item: ${log['item_id']}\nQty: ${log['quantity']}',
+                                    style: TextStyle(
+                                      color: isDark
+                                          ? Colors.white70
+                                          : Colors.black54,
+                                    ),
+                                  ),
+                                  if (log['remarks'] != null &&
+                                      log['remarks'].toString().isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        'Remark: ${log['remarks']}',
+                                        style: const TextStyle(
+                                          color: Colors.orangeAccent,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              trailing: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.blue,
+                                  foregroundColor: Colors.white,
+                                ),
+                                onPressed: () => _verifyLog(log),
+                                child: const Text('Verify'),
+                              ),
+                            ),
+                          );
+                        }, childCount: _logs.length),
+                      ),
+                    ),
+                ],
+              ),
             ),
             _buildWorkerStatusTab(),
             GeofenceTab(
