@@ -64,6 +64,7 @@ class _ComparisonTabState extends State<ComparisonTab> {
   Future<void> _fetchLogs() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
+    debugPrint('Fetching logs for org: ${widget.organizationCode}');
     try {
       var query = _supabase
           .from('production_logs')
@@ -83,15 +84,118 @@ class _ComparisonTabState extends State<ComparisonTab> {
       }
 
       final response = await query.order('created_at', ascending: false);
+      final rawLogs = List<Map<String, dynamic>>.from(response);
+      debugPrint('Fetched ${rawLogs.length} logs');
+      final enriched = await _enrichLogsWithNames(rawLogs);
+
       if (mounted) {
         setState(() {
-          _logs = List<Map<String, dynamic>>.from(response);
+          _logs = enriched;
           _isLoading = false;
         });
       }
     } catch (e) {
+      debugPrint('Error fetching logs (direct join): $e');
+      // Fallback if relationship fails (PGRST200)
+      if (e.toString().contains('relationship') ||
+          e.toString().contains('foreign') ||
+          e.toString().contains('PGRST200')) {
+        try {
+          var fallbackQuery = _supabase
+              .from('production_logs')
+              .select()
+              .eq('organization_code', widget.organizationCode);
+
+          if (_selectedWorkerId != null) {
+            fallbackQuery = fallbackQuery.eq('worker_id', _selectedWorkerId!);
+          }
+
+          if (_dateRange != null) {
+            fallbackQuery = fallbackQuery
+                .gte('created_at', _dateRange!.start.toIso8601String())
+                .lte(
+                    'created_at',
+                    _dateRange!.end
+                        .add(const Duration(days: 1))
+                        .toIso8601String());
+          }
+
+          final fallbackResponse =
+              await fallbackQuery.order('created_at', ascending: false);
+          final enriched = await _enrichLogsWithNames(
+            List<Map<String, dynamic>>.from(fallbackResponse),
+          );
+          if (mounted) {
+            setState(() {
+              _logs = enriched;
+              _isLoading = false;
+            });
+          }
+          return;
+        } catch (_) {}
+      }
+
       debugPrint('Error fetching logs: $e');
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _enrichLogsWithNames(
+    List<Map<String, dynamic>> rawLogs,
+  ) async {
+    try {
+      final employeesResp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final itemsResp = await _supabase
+          .from('items')
+          .select('item_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final machinesResp = await _supabase
+          .from('machines')
+          .select('machine_id, name')
+          .eq('organization_code', widget.organizationCode);
+
+      final employeeMap = <String, String>{};
+      final itemMap = <String, String>{};
+      final machineMap = <String, String>{};
+
+      for (final w in List<Map<String, dynamic>>.from(employeesResp)) {
+        final id = w['worker_id']?.toString() ?? '';
+        final name = w['name']?.toString() ?? '';
+        if (id.isNotEmpty) employeeMap[id] = name;
+      }
+      for (final it in List<Map<String, dynamic>>.from(itemsResp)) {
+        final id = it['item_id']?.toString() ?? '';
+        final name = it['name']?.toString() ?? '';
+        if (id.isNotEmpty) itemMap[id] = name;
+      }
+      for (final m in List<Map<String, dynamic>>.from(machinesResp)) {
+        final id = m['machine_id']?.toString() ?? '';
+        final name = m['name']?.toString() ?? '';
+        if (id.isNotEmpty) machineMap[id] = name;
+      }
+
+      return rawLogs.map((log) {
+        final wid = log['worker_id']?.toString() ?? '';
+        final iid = log['item_id']?.toString() ?? '';
+        final mid = log['machine_id']?.toString() ?? '';
+
+        // Handle both joined and non-joined (fallback) cases
+        final workerData = log['workers'] as Map<String, dynamic>?;
+        final itemData = log['items'] as Map<String, dynamic>?;
+        final machineData = log['machines'] as Map<String, dynamic>?;
+
+        return {
+          ...log,
+          'workers': workerData ?? {'name': employeeMap[wid] ?? 'Unknown'},
+          'items': itemData ?? {'name': itemMap[iid] ?? 'Unknown Item'},
+          'machines': machineData ?? {'name': machineMap[mid] ?? 'N/A'},
+        };
+      }).toList();
+    } catch (_) {
+      return rawLogs;
     }
   }
 

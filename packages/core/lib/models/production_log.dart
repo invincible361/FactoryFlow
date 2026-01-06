@@ -7,7 +7,7 @@ class ProductionLog {
   final String itemId;
   final String operation;
   final int quantity;
-  final DateTime timestamp;
+  final DateTime? timestamp;
   final DateTime? startTime;
   final DateTime? endTime;
   final double latitude;
@@ -26,7 +26,7 @@ class ProductionLog {
     required this.itemId,
     required this.operation,
     required this.quantity,
-    required this.timestamp,
+    this.timestamp,
     this.startTime,
     this.endTime,
     required this.latitude,
@@ -40,25 +40,34 @@ class ProductionLog {
   });
 
   Map<String, dynamic> toJson() {
-    return {
+    final Map<String, dynamic> data = {
       'id': id,
-      'employeeId': employeeId,
-      'machineId': machineId,
-      'itemId': itemId,
+      'worker_id': employeeId, // Database uses worker_id
+      'machine_id': machineId, // Database uses machine_id
+      'item_id': itemId, // Database uses item_id
       'operation': operation,
       'quantity': quantity,
-      'timestamp': timestamp.toUtc().toIso8601String(),
-      'startTime': startTime?.toUtc().toIso8601String(),
-      'endTime': endTime?.toUtc().toIso8601String(),
       'latitude': latitude,
       'longitude': longitude,
-      'shiftName': shiftName,
-      'performanceDiff': performanceDiff,
-      'organizationCode': organizationCode,
+      'shift_name': shiftName,
+      'performance_diff': performanceDiff, // Database uses performance_diff
+      'organization_code': organizationCode,
       'remarks': remarks,
-      'createdBySupervisor': createdBySupervisor,
-      'supervisorId': supervisorId,
+      'created_by_supervisor': createdBySupervisor,
+      'supervisor_id': supervisorId,
     };
+
+    if (timestamp != null) {
+      data['timestamp'] = timestamp?.toUtc().toIso8601String();
+    }
+    if (startTime != null) {
+      data['start_time'] = startTime?.toUtc().toIso8601String();
+    }
+    if (endTime != null) {
+      data['end_time'] = endTime?.toUtc().toIso8601String();
+    }
+
+    return data;
   }
 
   factory ProductionLog.fromJson(Map<String, dynamic> json) {

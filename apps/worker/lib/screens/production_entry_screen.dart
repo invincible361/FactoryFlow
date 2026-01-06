@@ -852,29 +852,47 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             .from('work_assignments')
             .update({
               'status': 'started',
-              'updated_at': DateTime.now().toIso8601String(),
+              'updated_at': DateTime.now().toUtc().toIso8601String(),
             })
             .eq('id', _activeAssignmentId!);
       }
 
-      final initialLog = ProductionLog(
-        id: logId,
-        employeeId: widget.employee.id,
-        machineId: _selectedMachine!.id,
-        itemId: _selectedItem!.id,
-        operation: _selectedOperation!,
-        quantity: 0,
-        timestamp: _startTime!,
-        startTime: _startTime,
-        endTime: null,
-        latitude: _currentPosition?.latitude ?? 0.0,
-        longitude: _currentPosition?.longitude ?? 0.0,
-        shiftName: _selectedShift ?? _getShiftName(_startTime!),
-        performanceDiff: 0,
-        organizationCode: widget.employee.organizationCode,
-        remarks: null,
-      );
-      await LogService().addLog(initialLog);
+      // Use RPC to let backend handle start_time and timestamp
+      try {
+        await Supabase.instance.client.rpc(
+          'log_production_start',
+          params: {
+            'p_id': logId,
+            'p_worker_id': widget.employee.id,
+            'p_machine_id': _selectedMachine!.id,
+            'p_item_id': _selectedItem!.id,
+            'p_operation': _selectedOperation!,
+            'p_lat': _currentPosition?.latitude ?? 0.0,
+            'p_lng': _currentPosition?.longitude ?? 0.0,
+            'p_org_code': widget.employee.organizationCode,
+            'p_shift_name': _selectedShift ?? _getShiftName(_startTime!),
+          },
+        );
+      } catch (e) {
+        debugPrint('Error saving initial log via RPC: $e');
+        // Fallback to LogService if RPC fails
+        final initialLog = ProductionLog(
+          id: logId,
+          employeeId: widget.employee.id,
+          machineId: _selectedMachine!.id,
+          itemId: _selectedItem!.id,
+          operation: _selectedOperation!,
+          quantity: 0,
+          // Omit timestamp and startTime to let backend handle it
+          latitude: _currentPosition?.latitude ?? 0.0,
+          longitude: _currentPosition?.longitude ?? 0.0,
+          shiftName: _selectedShift ?? _getShiftName(_startTime!),
+          performanceDiff: 0,
+          organizationCode: widget.employee.organizationCode,
+          remarks: null,
+        );
+        await LogService().addLog(initialLog);
+      }
     } catch (e) {
       debugPrint('Error saving initial log: $e');
     }
@@ -1035,9 +1053,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         itemId: _selectedItem?.id ?? 'N/A',
         operation: _selectedOperation ?? 'N/A',
         quantity: 0,
-        timestamp: endTime,
-        startTime: _startTime,
-        endTime: endTime,
+        // Omit timestamp, startTime, endTime to let backend handle it
         latitude: _currentPosition?.latitude ?? 0.0,
         longitude: _currentPosition?.longitude ?? 0.0,
         shiftName: _selectedShift ?? 'N/A',
@@ -1540,9 +1556,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           itemId: _selectedItem!.id,
           operation: _selectedOperation!,
           quantity: 0, // Don't register work
-          timestamp: DateTime.now(),
-          startTime: _startTime,
-          endTime: endTime,
+          // Omit timestamp, startTime, endTime to let backend handle it
           latitude: position.latitude,
           longitude: position.longitude,
           shiftName:
@@ -1601,9 +1615,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         itemId: _selectedItem!.id,
         operation: _selectedOperation!,
         quantity: quantity,
-        timestamp: DateTime.now(),
-        startTime: _startTime,
-        endTime: endTime,
+        // Omit timestamp, startTime, endTime to let backend handle it
         latitude: position.latitude,
         longitude: position.longitude,
         shiftName:
@@ -1623,9 +1635,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           itemId: extraData['itemId'],
           operation: extraData['operation'],
           quantity: extraData['quantity'],
-          timestamp: DateTime.now(),
-          startTime: _startTime,
-          endTime: endTime,
+          // Omit timestamp, startTime, endTime to let backend handle it
           latitude: position.latitude,
           longitude: position.longitude,
           shiftName:
@@ -1638,7 +1648,27 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       }
 
       // 3. Save All Logs Bulk
-      await LogService().addLogs(allLogs);
+      // For the base log, use RPC to let backend handle end_time
+      try {
+        await Supabase.instance.client.rpc(
+          'log_production_end',
+          params: {
+            'p_id': baseLog.id,
+            'p_quantity': baseLog.quantity,
+            'p_remarks': baseLog.remarks,
+            'p_performance_diff': baseLog.performanceDiff,
+          },
+        );
+
+        // Save extra logs normally (they don't have start/end times usually, just a timestamp)
+        if (allLogs.length > 1) {
+          await LogService().addLogs(allLogs.sublist(1));
+        }
+      } catch (e) {
+        debugPrint('Error saving final log via RPC: $e');
+        // Fallback to LogService
+        await LogService().addLogs(allLogs);
+      }
 
       // Update assignment status if exists
       if (_activeAssignmentId != null) {
@@ -1647,7 +1677,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               .from('work_assignments')
               .update({
                 'status': 'completed',
-                'updated_at': DateTime.now().toIso8601String(),
+                'updated_at': DateTime.now().toUtc().toIso8601String(),
               })
               .eq('id', _activeAssignmentId!);
         } catch (e) {

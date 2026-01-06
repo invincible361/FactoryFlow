@@ -67,7 +67,6 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final payload = {
-        'login_time': DateTime.now().toIso8601String(),
         'device_name': deviceName,
         'os_version': osVersion,
         'organization_code': organizationCode,

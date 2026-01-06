@@ -138,6 +138,7 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
           'worker_id': workerId,
           'organization_code': orgCode,
           'type': eventType,
+          'is_inside': isInside,
           'latitude': position.latitude,
           'longitude': position.longitude,
           'remarks': isViolation
@@ -153,7 +154,6 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
             'entry_longitude': position.longitude
           else
             'exit_longitude': position.longitude,
-          'created_at': DateTime.now().toUtc().toIso8601String(),
         });
 
         if (shouldLogPeriodic) {
@@ -170,8 +170,7 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
                   'worker_id': workerId,
                   'worker_name': workerName,
                   'organization_code': orgCode,
-                  'date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                  'exit_time': DateTime.now().toUtc().toIso8601String(),
+                  // date and exit_time handled by DEFAULT in DB
                   'exit_latitude': position.latitude,
                   'exit_longitude': position.longitude,
                 });
@@ -196,6 +195,7 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
               'type': 'out_of_bounds',
               'worker_id': workerId,
               'worker_name': workerName,
+              // created_at handled by DB
             });
           } catch (e) {
             debugPrint('Background notification error: $e');
@@ -206,32 +206,31 @@ Future<Map<String, dynamic>> handleBackgroundLocation() async {
         if (isInside && isTimerRunning) {
           final activeEventId = prefs.getString('active_boundary_event_id');
           if (activeEventId != null) {
-            final entryTime = DateTime.now();
             try {
-              final event = await Supabase.instance.client
-                  .from('production_outofbounds')
-                  .select('exit_time')
-                  .eq('id', activeEventId)
-                  .maybeSingle();
-
-              String? durationStr;
-              if (event != null) {
-                final exitTime = TimeUtils.parseToLocal(event['exit_time']);
-                final diff = entryTime.difference(exitTime);
-                durationStr = "${diff.inMinutes} mins";
-              }
-
-              await Supabase.instance.client
-                  .from('production_outofbounds')
-                  .update({
-                    'entry_time': entryTime.toUtc().toIso8601String(),
-                    'entry_latitude': position.latitude,
-                    'entry_longitude': position.longitude,
-                    'duration_minutes': durationStr,
-                  })
-                  .eq('id', activeEventId);
+              // Use RPC to let backend handle entry_time and duration calculation
+              await Supabase.instance.client.rpc(
+                'handle_worker_return',
+                params: {
+                  'event_id': activeEventId,
+                  'entry_lat': position.latitude,
+                  'entry_lng': position.longitude,
+                },
+              );
             } catch (e) {
-              debugPrint('Background update error (outofbounds): $e');
+              debugPrint('Background update error (outofbounds via RPC): $e');
+              // Fallback to manual update if RPC fails (e.g. function not yet deployed)
+              try {
+                await Supabase.instance.client
+                    .from('production_outofbounds')
+                    .update({
+                      'entry_time': DateTime.now().toUtc().toIso8601String(),
+                      'entry_latitude': position.latitude,
+                      'entry_longitude': position.longitude,
+                    })
+                    .eq('id', activeEventId);
+              } catch (e2) {
+                debugPrint('Background update fallback error: $e2');
+              }
             }
 
             await prefs.remove('active_boundary_event_id');

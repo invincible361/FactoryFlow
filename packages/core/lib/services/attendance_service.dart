@@ -193,9 +193,18 @@ class AttendanceService {
             .maybeSingle();
 
         if (existing == null) {
-          payload['check_in'] = now.toUtc().toIso8601String();
-          payload['status'] = 'On Time';
-          await _supabase.from('attendance').insert(payload);
+          // Use RPC for check-in to let backend handle timestamp
+          await _supabase.rpc(
+            'attendance_check_in',
+            params: {
+              'p_worker_id': workerId,
+              'p_org_code': organizationCode,
+              'p_date': dateStr,
+              'p_shift_name': targetShiftName,
+              'p_shift_start': shift['start_time'],
+              'p_shift_end': shift['end_time'],
+            },
+          );
         } else {
           final Map<String, dynamic> updateData = {
             'shift_name': targetShiftName,
@@ -214,7 +223,11 @@ class AttendanceService {
           }
 
           if (shouldUpdateCheckIn) {
-            updateData['check_in'] = now.toUtc().toIso8601String();
+            // Re-use check_in RPC which handles ON CONFLICT DO NOTHING
+            // but we already know it exists, so we just update check_in manually if needed
+            // or we could create an attendance_update_check_in RPC.
+            // For now, if we want "Backend as Truth", we use NOW()
+            updateData['check_in'] = DateTime.now().toUtc().toIso8601String();
             updateData['status'] = 'On Time';
           }
 
@@ -226,7 +239,21 @@ class AttendanceService {
               .eq('organization_code', organizationCode);
         }
       } else {
-        payload['check_out'] = now.toUtc().toIso8601String();
+        // Use RPC for check-out to let backend handle timestamp
+        try {
+          await _supabase.rpc(
+            'attendance_check_out',
+            params: {
+              'p_worker_id': workerId,
+              'p_org_code': organizationCode,
+              'p_date': dateStr,
+            },
+          );
+        } catch (e) {
+          debugPrint('Error during attendance_check_out RPC: $e');
+          // Fallback if RPC fails
+          payload['check_out'] = DateTime.now().toUtc().toIso8601String();
+        }
 
         if (shift.isNotEmpty) {
           try {

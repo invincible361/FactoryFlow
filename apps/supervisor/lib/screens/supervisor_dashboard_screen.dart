@@ -980,9 +980,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                               itemId: selectedItemId!,
                               operation: selectedOperation!,
                               quantity: qty,
-                              timestamp: DateTime.now(),
-                              startTime: DateTime.now(),
-                              endTime: DateTime.now(),
+                              // Omit timestamp, startTime, endTime to let backend handle it
                               latitude: _orgLat ?? 0.0,
                               longitude: _orgLng ?? 0.0,
                               organizationCode: widget.organizationCode,
@@ -1566,7 +1564,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           ),
           _metricTile(
             'Current Time',
-            DateFormat('hh:mm a').format(DateTime.now()),
+            DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now()),
             Colors.teal.shade50,
             Icons.access_time,
           ),
@@ -1898,76 +1896,151 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           .limit(1)
           .maybeSingle();
 
-      final activeLog = await _supabase
-          .from('production_logs')
-          .select()
-          .eq('worker_id', workerId)
-          .eq('organization_code', widget.organizationCode)
-          .filter('end_time', 'is', null)
-          .order('start_time', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      // Use is_inside column if available, fallback to type check
+      final isInside =
+          boundaryEvent == null ||
+          (boundaryEvent['is_inside'] ?? (boundaryEvent['type'] != 'exit'));
 
-      final pendingAssignment = await _supabase
-          .from('work_assignments')
-          .select()
-          .eq('worker_id', workerId)
-          .eq('status', 'pending')
-          .eq('organization_code', widget.organizationCode)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      Map<String, dynamic>? activeLog;
+      Map<String, dynamic>? pendingAssignment;
+      Map<String, dynamic>? pendingVerification;
 
-      final pendingVerification = await _supabase
-          .from('production_logs')
-          .select()
-          .eq('worker_id', workerId)
-          .eq('organization_code', widget.organizationCode)
-          .or('is_verified.is.false,is_verified.is.null')
-          .not('end_time', 'is', null)
-          .gt('quantity', 0)
-          .order('end_time', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      try {
+        activeLog = await _supabase
+            .from('production_logs')
+            .select('*, items(name), machines(name)')
+            .eq('worker_id', workerId)
+            .eq('organization_code', widget.organizationCode)
+            .filter('end_time', 'is', null)
+            .order('start_time', ascending: false)
+            .limit(1)
+            .maybeSingle();
+
+        pendingAssignment = await _supabase
+            .from('work_assignments')
+            .select('*, items(name), machines(name)')
+            .eq('worker_id', workerId)
+            .eq('status', 'pending')
+            .eq('organization_code', widget.organizationCode)
+            .order('created_at', ascending: false)
+            .limit(1)
+            .maybeSingle();
+
+        pendingVerification = await _supabase
+            .from('production_logs')
+            .select('*, items(name), machines(name)')
+            .eq('worker_id', workerId)
+            .eq('organization_code', widget.organizationCode)
+            .or('is_verified.is.false,is_verified.is.null')
+            .not('end_time', 'is', null)
+            .gt('quantity', 0)
+            .order('end_time', ascending: false)
+            .limit(1)
+            .maybeSingle();
+      } catch (e) {
+        debugPrint('Error fetching joined status, falling back to basic: $e');
+        // Fallback to basic select without joins if schema cache is not yet updated
+        activeLog = await _supabase
+            .from('production_logs')
+            .select()
+            .eq('worker_id', workerId)
+            .eq('organization_code', widget.organizationCode)
+            .filter('end_time', 'is', null)
+            .order('start_time', ascending: false)
+            .limit(1)
+            .maybeSingle();
+
+        pendingAssignment = await _supabase
+            .from('work_assignments')
+            .select()
+            .eq('worker_id', workerId)
+            .eq('status', 'pending')
+            .eq('organization_code', widget.organizationCode)
+            .order('created_at', ascending: false)
+            .limit(1)
+            .maybeSingle();
+
+        pendingVerification = await _supabase
+            .from('production_logs')
+            .select()
+            .eq('worker_id', workerId)
+            .eq('organization_code', widget.organizationCode)
+            .or('is_verified.is.false,is_verified.is.null')
+            .not('end_time', 'is', null)
+            .gt('quantity', 0)
+            .order('end_time', ascending: false)
+            .limit(1)
+            .maybeSingle();
+      }
 
       String? awaitingVerificationStatus;
 
       if (pendingVerification != null) {
+        final itemName =
+            pendingVerification['items']?['name'] ??
+            pendingVerification['item_id'];
         awaitingVerificationStatus =
-            "${pendingVerification['operation']} (${pendingVerification['item_id']})";
+            "${pendingVerification['operation']} ($itemName)";
       }
 
       String? currentTaskWithDuration;
-      final isInside = boundaryEvent == null || boundaryEvent['type'] != 'exit';
 
-      if (activeLog != null && isInside) {
+      if (activeLog != null) {
         final startTimeStr = activeLog['start_time'] ?? activeLog['created_at'];
-        if (startTimeStr != null) {
-          final startTime = DateTime.parse(startTimeStr);
-          // If a task has been running for more than 12 hours without update,
-          // it's likely a stale log from a previous day/shift
-          if (DateTime.now().difference(startTime).inHours < 12) {
-            final duration = DateTime.now().difference(startTime);
-            final hours = duration.inHours;
-            final minutes = duration.inMinutes.remainder(60);
-            final durationStr = hours > 0
-                ? '${hours}h ${minutes}m'
-                : '${minutes}m';
-            currentTaskWithDuration =
-                "${activeLog['operation']} (${activeLog['item_id']}) — $durationStr";
+        final itemName = activeLog['items']?['name'] ?? activeLog['item_id'];
+        final machineName = activeLog['machines']?['name'];
+
+        String taskDisplay =
+            "${activeLog['operation']} ($itemName)${machineName != null ? ' @ $machineName' : ''}";
+
+        if (!isInside) {
+          // If worker is outside, we consider them idle even if a log is "active"
+          // unless the log was started very recently (e.g. within 5 mins - maybe they just stepped out)
+          final startTime = startTimeStr != null
+              ? DateTime.parse(startTimeStr)
+              : null;
+          final isRecent =
+              startTime != null &&
+              DateTime.now().difference(startTime).inMinutes < 5;
+
+          if (!isRecent) {
+            currentTaskWithDuration = null; // Mark as idle
+          } else {
+            currentTaskWithDuration = "$taskDisplay (OUTSIDE)";
           }
         } else {
-          currentTaskWithDuration =
-              "${activeLog['operation']} (${activeLog['item_id']})";
+          if (startTimeStr != null) {
+            final startTime = DateTime.parse(startTimeStr);
+            final duration = DateTime.now().difference(startTime);
+
+            // If log is older than 12 hours, consider it stale/idle
+            if (duration.inHours < 12) {
+              final hours = duration.inHours;
+              final minutes = duration.inMinutes.remainder(60);
+              final durationStr = hours > 0
+                  ? '${hours}h ${minutes}m'
+                  : '${minutes}m';
+              currentTaskWithDuration = "$taskDisplay — $durationStr";
+            } else {
+              currentTaskWithDuration = null; // Mark as idle (stale log)
+            }
+          } else {
+            currentTaskWithDuration = taskDisplay;
+          }
         }
+      }
+
+      String? pendingTaskStatus;
+      if (pendingAssignment != null) {
+        final itemName =
+            pendingAssignment['items']?['name'] ?? pendingAssignment['item_id'];
+        pendingTaskStatus = "${pendingAssignment['operation']} ($itemName)";
       }
 
       return {
         'is_inside': isInside,
         'current_task': currentTaskWithDuration,
-        'pending_task': pendingAssignment != null
-            ? "${pendingAssignment['operation']} (${pendingAssignment['item_id']})"
-            : null,
+        'pending_task': pendingTaskStatus,
         'awaiting_verification': awaitingVerificationStatus,
       };
     } catch (e) {
@@ -2266,6 +2339,17 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                                       color: isDark
                                           ? Colors.white70
                                           : Colors.black54,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Time: ${DateFormat('dd MMM yyyy, hh:mm a').format(TimeUtils.parseToLocal(log['start_time']))}',
+                                    style: TextStyle(
+                                      color: isDark
+                                          ? Colors.blue[200]
+                                          : Colors.blue[800],
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
                                     ),
                                   ),
                                   if (log['remarks'] != null &&

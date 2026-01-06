@@ -277,7 +277,7 @@ class _GeofenceTabState extends State<GeofenceTab> {
                                 ],
                               ),
                               subtitle: Text(
-                                DateFormat('hh:mm:ss a').format(time),
+                                DateFormat('dd MMM yyyy, hh:mm a').format(time),
                                 style: TextStyle(
                                   color: widget.isDarkMode
                                       ? Colors.white70

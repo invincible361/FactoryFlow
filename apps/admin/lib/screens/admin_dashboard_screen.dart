@@ -92,7 +92,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
               'worker_id': null, // Admin doesn't have a worker_id
               'worker_name': 'Admin: $_ownerUsername',
               'organization_code': widget.organizationCode,
-              'date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+              'date': DateFormat('yyyy-MM-dd').format(DateTime.now().toUtc()),
               'exit_time': DateTime.now().toUtc().toIso8601String(),
               'exit_latitude': pos.latitude,
               'exit_longitude': pos.longitude,
@@ -3049,11 +3049,11 @@ class _ReportsTabState extends State<ReportsTab> {
           } catch (_) {}
         }
         String createdAtFormatted = DateFormat(
-          'yyyy-MM-dd hh:mm a',
+          'dd MMM yyyy, hh:mm a',
         ).format(createdAtLocal);
         String verifiedAtFormatted = verifiedAtStr.isNotEmpty
             ? DateFormat(
-                'yyyy-MM-dd hh:mm a',
+                'dd MMM yyyy, hh:mm a',
               ).format(TimeUtils.parseToLocal(verifiedAtStr))
             : '-';
 
@@ -3327,6 +3327,15 @@ class _ReportsTabState extends State<ReportsTab> {
         ? Colors.white.withValues(alpha: 0.15)
         : Colors.black.withValues(alpha: 0.12);
 
+    int totalWorkerQty = 0;
+    int totalSupervisorQty = 0;
+    for (var log in _logs) {
+      totalWorkerQty += (log['quantity'] as num? ?? 0).toInt();
+      if (log['is_verified'] == true) {
+        totalSupervisorQty += (log['supervisor_quantity'] as num? ?? 0).toInt();
+      }
+    }
+
     return RefreshIndicator(
       onRefresh: () async {
         await Future.wait([
@@ -3433,7 +3442,7 @@ class _ReportsTabState extends State<ReportsTab> {
               physics: const NeverScrollableScrollPhysics(),
               crossAxisCount:
                   MediaQuery.of(context).orientation == Orientation.landscape
-                      ? 3
+                      ? 4
                       : 2,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
@@ -3443,9 +3452,21 @@ class _ReportsTabState extends State<ReportsTab> {
                       : 1.3,
               children: [
                 _metricTile(
+                  'Worker Qty',
+                  '$totalWorkerQty',
+                  Colors.blue.shade200,
+                  Icons.person_outline,
+                ),
+                _metricTile(
+                  'Supervisor Qty',
+                  '$totalSupervisorQty',
+                  Colors.green.shade200,
+                  Icons.verified_user_outlined,
+                ),
+                _metricTile(
                   'Extra Units (24h)',
                   '$_extraUnitsToday',
-                  Colors.green.shade200,
+                  const Color(0xFFA9DFD8),
                   Icons.trending_up,
                 ),
                 _metricTile(
@@ -8402,7 +8423,7 @@ class _ItemsTabState extends State<ItemsTab> {
             : null,
         createdAt: _editingOperationIndex != null
             ? _operations[_editingOperationIndex!].createdAt
-            : DateTime.now().toIso8601String(),
+            : DateTime.now().toUtc().toIso8601String(),
       );
 
       if (_editingOperationIndex != null) {
@@ -9980,7 +10001,7 @@ class _OperationsTabState extends State<OperationsTab> {
                     if (op['created_at'] != null)
                       _detailItem(
                         'Created At',
-                        DateFormat('yyyy-MM-dd hh:mm a').format(
+                        DateFormat('dd MMM yyyy, hh:mm a').format(
                             DateTime.parse(op['created_at'].toString())),
                         textColor,
                         subTextColor,
@@ -10005,7 +10026,7 @@ class _OperationsTabState extends State<OperationsTab> {
                     if (op['last_produced'] != null)
                       _detailItem(
                         'Last Produced',
-                        DateFormat('yyyy-MM-dd hh:mm a').format(
+                        DateFormat('dd MMM yyyy, hh:mm a').format(
                           DateTime.parse(op['last_produced'].toString()),
                         ),
                         textColor,
@@ -10747,18 +10768,17 @@ class _SecurityTabState extends State<SecurityTab> {
                 'No owner logins recorded.', subTextColor, borderColor)
           else
             ..._logs.map((log) {
-              final timeStr = log['login_time'] as String?;
-              final time =
-                  DateTime.tryParse(timeStr ?? '')?.toLocal() ?? DateTime.now();
+              final timeStr = log['login_time'];
+              final time = TimeUtils.parseToLocal(timeStr);
               final device = log['device_name'] ?? 'Unknown Device';
               final os = log['os_version'] ?? 'Unknown OS';
               return _buildLogCard(
                 icon: Icons.security,
                 iconColor: Colors.blueAccent,
                 title: 'Admin Session',
-                subtitle: 'Logged in at ${TimeUtils.formatTo12Hour(time)}',
-                details: 'Device: $device • OS: $os',
-                time: DateFormat('MMM dd').format(time),
+                subtitle: 'Device: $device • OS: $os',
+                details: '',
+                time: DateFormat('dd MMM yyyy, hh:mm a').format(time),
                 cardBg: cardBg,
                 textColor: textColor,
                 subTextColor: subTextColor,
@@ -10773,9 +10793,8 @@ class _SecurityTabState extends State<SecurityTab> {
                 'No employee logins recorded.', subTextColor, borderColor)
           else
             ..._employeeLogs.map((log) {
-              final timeStr = (log['login_time'] ?? '').toString();
-              final time =
-                  DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
+              final timeStr = log['login_time'];
+              final time = TimeUtils.parseToLocal(timeStr);
               final role = (log['role'] ?? 'worker').toString().toUpperCase();
               final workerId = (log['worker_id'] ?? 'Unknown').toString();
               final device = (log['device_name'] ?? 'Unknown').toString();
@@ -10787,9 +10806,9 @@ class _SecurityTabState extends State<SecurityTab> {
                 iconColor:
                     isSupervisor ? Colors.greenAccent : Colors.orangeAccent,
                 title: '$role ($workerId)',
-                subtitle: 'Logged in at ${TimeUtils.formatTo12Hour(time)}',
-                details: 'Device: $device • OS: $os',
-                time: DateFormat('MMM dd').format(time),
+                subtitle: 'Device: $device • OS: $os',
+                details: '',
+                time: DateFormat('dd MMM yyyy, hh:mm a').format(time),
                 cardBg: cardBg,
                 textColor: textColor,
                 subTextColor: subTextColor,

@@ -303,7 +303,7 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
                                           ),
                                           const SizedBox(width: 4),
                                           Text(
-                                            'Time Out: ${DateFormat('hh:mm a').format(exitTime)}',
+                                            'Time Out: ${DateFormat('dd MMM yyyy, hh:mm a').format(exitTime)}',
                                             style: TextStyle(
                                               color: subTextColor,
                                               fontSize: 12,
@@ -330,7 +330,7 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
                                             ),
                                             const SizedBox(width: 4),
                                             Text(
-                                              'Time In: ${DateFormat('hh:mm a').format(entryTime)}',
+                                              'Time In: ${DateFormat('dd MMM yyyy, hh:mm a').format(entryTime)}',
                                               style: TextStyle(
                                                 color: subTextColor,
                                                 fontSize: 12,

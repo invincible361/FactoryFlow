@@ -57,6 +57,13 @@ class TimeUtils {
     return DateFormat(format).format(dt);
   }
 
+  /// Formats to the standard full display format: "dd MMM yyyy, hh:mm a"
+  static String formatFull(dynamic value) {
+    if (value == null) return '--';
+    DateTime dt = parseToLocal(value);
+    return DateFormat('dd MMM yyyy, hh:mm a').format(dt);
+  }
+
   /// Returns the current system time in 12-hour format.
   static String currentSystemTime12h() {
     return DateFormat('hh:mm:ss a').format(DateTime.now());

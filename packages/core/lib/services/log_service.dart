@@ -13,7 +13,7 @@ class LogService {
 
   Future<void> addLogs(List<ProductionLog> logs) async {
     if (logs.isEmpty) return;
-    
+
     // Add to local list
     for (var log in logs) {
       _logs.insert(0, log);
@@ -21,7 +21,7 @@ class LogService {
 
     try {
       final List<Map<String, dynamic>> payloads = [];
-      
+
       for (var log in logs) {
         String? org = log.organizationCode;
         if (org == null || org.isEmpty) {
@@ -38,15 +38,17 @@ class LogService {
           } catch (_) {}
         }
 
-        payloads.add({
+        final payload = {
           'id': log.id,
           'worker_id': log.employeeId,
           'machine_id': log.machineId,
           'item_id': log.itemId,
           'operation': log.operation,
           'quantity': log.quantity,
-          'start_time': log.startTime?.toUtc().toIso8601String(),
-          'end_time': log.endTime?.toUtc().toIso8601String(),
+          // Let backend handle timestamp and created_at via DEFAULT NOW()
+          // Only send start_time/end_time if they are explicitly provided and not for real-time events
+          // But per user instruction: "Flutter should NOT send timestamps for arrival time, production start, production end."
+          // We'll omit them here to let backend be the truth.
           'latitude': log.latitude,
           'longitude': log.longitude,
           'shift_name': log.shiftName,
@@ -56,7 +58,8 @@ class LogService {
           'is_verified': log.createdBySupervisor == true,
           'created_by_supervisor': log.createdBySupervisor,
           'supervisor_id': log.supervisorId,
-        });
+        };
+        payloads.add(payload);
       }
 
       await Supabase.instance.client.from('production_logs').upsert(payloads);
@@ -97,7 +100,6 @@ class LogService {
       final updatePayload = {
         'is_verified': true,
         'verified_by': supervisorName,
-        'verified_at': DateTime.now().toUtc().toIso8601String(),
         'verified_note': note,
       };
       if (supervisorQuantity != null) {
@@ -114,7 +116,6 @@ class LogService {
           final fallbackPayload = {
             'is_verified': true,
             'verified_by': supervisorName,
-            'verified_at': DateTime.now().toUtc().toIso8601String(),
             'verified_note': note,
           };
           await Supabase.instance.client
