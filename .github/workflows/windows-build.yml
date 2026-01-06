@@ -23,29 +23,29 @@ jobs:
 
       - name: Install dependencies 
         run: |
-          cd flutter_application_1
+          cd apps/admin
           flutter pub get 
 
       - name: Build Windows EXE 
         run: |
-          cd flutter_application_1
+          cd apps/admin
           flutter build windows --release 
 
       - name: Build MSIX Installer 
         run: |
-          cd flutter_application_1
-          flutter pub run msix:create --install-certificate false
+          cd apps/admin
+          dart run msix:create --install-certificate false
 
       - name: List files for debugging
         shell: cmd
         run: |
-          dir flutter_application_1\build\windows\ /s
+          dir apps/admin\build\windows\ /s
 
-      - name: Upload EXE 
+      - name: Upload MSIX 
         uses: actions/upload-artifact@v4 
         with: 
-          name: FactoryFlow-Windows-EXE 
-          path: flutter_application_1/build/windows/x64/runner/Release/
+          name: FactoryFlow-Admin-Windows-MSIX 
+          path: apps/admin/build/windows/x64/runner/Release/*.msix
           if-no-files-found: error
 
       - name: Upload MSIX 

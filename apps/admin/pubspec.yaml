@@ -40,6 +40,16 @@ dev_dependencies:
 
 flutter_launcher_icons:
 
+msix:
+  display_name: FactoryFlow Admin
+  publisher_display_name: FactoryFlow
+  identity_name: com.factoryflow.admin
+  publisher: CN=FactoryFlow
+  install_certificate: true
+  logo_path: assets/images/logo.png
+  capabilities: internetClient, location, filePicker
+  protocol_activation: factoryflow-admin
+
 flutter:
   uses-material-design: true
   assets:

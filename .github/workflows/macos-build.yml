@@ -1,0 +1,50 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: |
+          cd apps/admin
+          flutter pub get
+
+      - name: Build macOS App
+        run: |
+          cd apps/admin
+          flutter build macos --release
+
+      - name: Create DMG (Optional but recommended)
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "FactoryFlow Admin" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "admin_app.app" 200 190 \
+            --hide-extension "admin_app.app" \
+            --app-drop-link 600 185 \
+            "FactoryFlow-Admin-macOS.dmg" \
+            "apps/admin/build/macos/Build/Products/Release/admin_app.app"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FactoryFlow-Admin-macOS-DMG
+          path: FactoryFlow-Admin-macOS.dmg
+          if-no-files-found: error

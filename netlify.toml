@@ -1,6 +1,6 @@
 [build]
-  publish = "flutter_application_1/build/web"
-  command = "bash build_web.sh"
+  publish = "apps/admin/build/web"
+  command = "cd apps/admin && flutter build web --release"
 
 [[redirects]]
   from = "/*"
