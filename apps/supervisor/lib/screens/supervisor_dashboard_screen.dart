@@ -45,6 +45,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   String _currentShiftTime = '';
   bool? _isInside;
   Timer? _statusTimer;
+  RealtimeChannel? _realtimeChannel;
   double? _orgLat;
   double? _orgLng;
   double? _orgRadius;
@@ -57,6 +58,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     _fetchLogs();
     _fetchAssignmentData();
     _fetchNotifications();
+    _setupRealtime();
     _statusTimer = Timer.periodic(const Duration(seconds: 30), (t) {
       _updateStatus();
       _fetchNotifications();
@@ -67,7 +69,44 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _realtimeChannel?.unsubscribe();
     super.dispose();
+  }
+
+  void _setupRealtime() {
+    _realtimeChannel = _supabase
+        .channel('supervisor_dashboard')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'production_logs',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'organization_code',
+            value: widget.organizationCode,
+          ),
+          callback: (payload) {
+            debugPrint('Realtime: production_logs change received');
+            _fetchLogs();
+            _updateStatus();
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'worker_boundary_events',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'organization_code',
+            value: widget.organizationCode,
+          ),
+          callback: (payload) {
+            debugPrint('Realtime: worker_boundary_events change received');
+            _updateWorkerLocations();
+            _updateStatus();
+          },
+        )
+        .subscribe();
   }
 
   Future<void> _fetchOrgConfig() async {

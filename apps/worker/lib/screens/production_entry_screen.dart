@@ -282,9 +282,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           callback: (payload) {
             debugPrint('New assignment received: ${payload.newRecord}');
             _fetchAssignments();
-            _showLocalNotification(
-              "New Work Assigned",
-              "A supervisor has assigned new work to you. Check the 'Pending Assignments' section.",
+            NotificationService.showNotification(
+              id: DateTime.now().millisecond,
+              title: "New Work Assigned",
+              body:
+                  "A supervisor has assigned new work to you. Check the 'Pending Assignments' section.",
             );
           },
         )
@@ -675,38 +677,12 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     final isTimerRunning = prefs.getBool('persisted_is_timer_running') ?? false;
 
     if (isTimerRunning) {
-      await _showLocalNotification(
-        "Production Still Running",
-        "Your production timer is still active. Please remember to update or close your production when finished.",
+      await NotificationService.showNotification(
+        id: DateTime.now().millisecond,
+        title: "Production Still Running",
+        body:
+            "Your production timer is still active. Please remember to update or close your production when finished.",
       );
-    }
-  }
-
-  Future<void> _showLocalNotification(String title, String body) async {
-    if (kIsWeb) return;
-
-    try {
-      final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-      const androidDetails = AndroidNotificationDetails(
-        'factory_flow_reminder',
-        'Worker App Reminders',
-        importance: Importance.max,
-        priority: Priority.high,
-      );
-      const iosDetails = DarwinNotificationDetails();
-      const notificationDetails = NotificationDetails(
-        android: androidDetails,
-        iOS: iosDetails,
-      );
-
-      await flutterLocalNotificationsPlugin.show(
-        DateTime.now().millisecond,
-        title,
-        body,
-        notificationDetails,
-      );
-    } catch (e) {
-      debugPrint('Error showing local notification: $e');
     }
   }
 
@@ -738,14 +714,18 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       final diff = shiftEndToday.difference(now);
 
       if (diff.inMinutes > 0 && diff.inMinutes <= 15) {
-        await _showLocalNotification(
-          "Shift Ending Soon",
-          "Your shift ($_selectedShift) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
+        await NotificationService.showNotification(
+          id: DateTime.now().millisecond,
+          title: "Shift Ending Soon",
+          body:
+              "Your shift ($_selectedShift) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
         );
       } else if (diff.isNegative) {
-        await _showLocalNotification(
-          "Shift Ended",
-          "Your shift ($_selectedShift) has ended, but production is still running. Please close your production tasks.",
+        await NotificationService.showNotification(
+          id: DateTime.now().millisecond,
+          title: "Shift Ended",
+          body:
+              "Your shift ($_selectedShift) has ended, but production is still running. Please close your production tasks.",
         );
       }
     } catch (e) {
@@ -839,9 +819,11 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     await _updateAttendance(isCheckOut: false, eventTime: _startTime);
 
     // Trigger notification for production start
-    await _showLocalNotification(
-      "Production Started",
-      "You have started production on ${_selectedMachine!.name} for ${_selectedItem!.name} (${_selectedOperation!}).",
+    await NotificationService.showNotification(
+      id: DateTime.now().millisecond,
+      title: "Production Started",
+      body:
+          "You have started production on ${_selectedMachine!.name} for ${_selectedItem!.name} (${_selectedOperation!}).",
     );
 
     // Save initial log for "In" time visibility
