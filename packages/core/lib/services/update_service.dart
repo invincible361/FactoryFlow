@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:ota_update/ota_update.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shorebird_code_push/shorebird_code_push.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 class UpdateService {
   // Actual GitHub username and repository name
@@ -259,24 +260,57 @@ class UpdateService {
   static void _startOtaUpdate(BuildContext context, String url) async {
     // 1. Check permissions first
     if (!kIsWeb && Platform.isAndroid) {
-      final status = await Permission.requestInstallPackages.request();
-      final storageStatus = await Permission.storage.request();
+      debugPrint('UpdateService: Requesting permissions for OTA update...');
 
-      if (!status.isGranted || !storageStatus.isGranted) {
-        debugPrint(
-          'UpdateService: Missing required permissions for OTA update',
-        );
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Please grant storage and install permissions to update.',
-              ),
-            ),
+      final deviceInfo = DeviceInfoPlugin();
+      final androidInfo = await deviceInfo.androidInfo;
+      final sdkInt = androidInfo.version.sdkInt;
+
+      debugPrint('UpdateService: Android SDK version: $sdkInt');
+
+      // Request Install Packages permission (Android 8.0+)
+      if (sdkInt >= 26) {
+        final installStatus = await Permission.requestInstallPackages.status;
+        if (!installStatus.isGranted) {
+          debugPrint(
+            'UpdateService: Requesting install packages permission...',
           );
+          await Permission.requestInstallPackages.request();
         }
-        _isDialogShowing = false;
-        return;
+      }
+
+      // For storage:
+      // - Below Android 11 (SDK 30): Need WRITE_EXTERNAL_STORAGE
+      // - Android 11+: ota_update usually handles internal download without extra storage permission
+      if (sdkInt < 30) {
+        final storageStatus = await Permission.storage.status;
+        if (!storageStatus.isGranted) {
+          debugPrint(
+            'UpdateService: Requesting storage permission (SDK < 30)...',
+          );
+          await Permission.storage.request();
+        }
+      }
+
+      // Re-check install permission after requests (most critical)
+      if (sdkInt >= 26) {
+        final finalInstallStatus =
+            await Permission.requestInstallPackages.status;
+        if (!finalInstallStatus.isGranted) {
+          debugPrint('UpdateService: Install permission denied.');
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Please allow "Install unknown apps" permission to update.',
+                ),
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
+          _isDialogShowing = false;
+          return;
+        }
       }
     }
 

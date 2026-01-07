@@ -104,6 +104,18 @@
       "languageVersion": "2.17"
     },
     {
+      "name": "device_info_plus",
+      "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/device_info_plus-12.3.0",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    },
+    {
+      "name": "device_info_plus_platform_interface",
+      "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/device_info_plus_platform_interface-7.0.3",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    },
+    {
       "name": "ed25519_edwards",
       "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/ed25519_edwards-0.3.1",
       "packageUri": "lib/",
@@ -732,6 +744,12 @@
       "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/win32-5.15.0",
       "packageUri": "lib/",
       "languageVersion": "3.8"
+    },
+    {
+      "name": "win32_registry",
+      "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/win32_registry-2.1.0",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
     },
     {
       "name": "workmanager",
