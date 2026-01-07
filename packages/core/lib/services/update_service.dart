@@ -312,7 +312,8 @@ class UpdateService {
           .execute(
             url,
             destinationFilename: 'update.apk',
-            usePackageInstaller: true,
+            // usePackageInstaller: true can cause issues on some devices/versions
+            // Setting it to false or removing it often helps with installation
           )
           .listen(
             (OtaEvent event) {
