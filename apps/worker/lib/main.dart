@@ -2,13 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'package:factoryflow_core/factoryflow_core.dart';
-import 'package:shorebird_code_push/shorebird_code_push.dart';
 import 'package:uuid/uuid.dart';
 import 'screens/login_screen.dart';
 import 'app_theme.dart';
-
-// Initialize Shorebird
-final shorebirdCodePush = ShorebirdCodePush();
 
 // Background task identifiers
 const String syncLocationTask = "syncLocationTask";
