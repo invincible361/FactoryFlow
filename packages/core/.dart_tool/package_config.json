@@ -578,12 +578,6 @@
       "languageVersion": "3.3"
     },
     {
-      "name": "shorebird_code_push",
-      "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/shorebird_code_push-1.1.6",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
       "name": "sky_engine",
       "rootUri": "file:///opt/homebrew/share/flutter/bin/cache/pkg/sky_engine",
       "packageUri": "lib/",

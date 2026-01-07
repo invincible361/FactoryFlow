@@ -21,7 +21,6 @@
         "path_provider",
         "permission_handler",
         "shared_preferences",
-        "shorebird_code_push",
         "supabase_flutter",
         "url_launcher",
         "uuid",
@@ -55,14 +54,6 @@
         "stream_channel",
         "test_api",
         "vector_math"
-      ]
-    },
-    {
-      "name": "shorebird_code_push",
-      "version": "1.1.6",
-      "dependencies": [
-        "ffi",
-        "meta"
       ]
     },
     {
@@ -363,11 +354,6 @@
       ]
     },
     {
-      "name": "ffi",
-      "version": "2.1.4",
-      "dependencies": []
-    },
-    {
       "name": "permission_handler_platform_interface",
       "version": "4.3.0",
       "dependencies": [
@@ -535,6 +521,11 @@
       "dependencies": [
         "ffi"
       ]
+    },
+    {
+      "name": "ffi",
+      "version": "2.1.4",
+      "dependencies": []
     },
     {
       "name": "plugin_platform_interface",

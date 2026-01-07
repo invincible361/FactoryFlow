@@ -1,11 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:factoryflow_core/factoryflow_core.dart';
-import 'package:shorebird_code_push/shorebird_code_push.dart';
 import 'screens/login_screen.dart';
-
-// Initialize Shorebird
-final shorebirdCodePush = ShorebirdCodePush();
 
 void main() async {
   try {
