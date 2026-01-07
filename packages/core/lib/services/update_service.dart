@@ -114,6 +114,32 @@ class UpdateService {
     return false;
   }
 
+  static bool isMajorOrMinorUpdate(String current, String latest) {
+    try {
+      String cleanCurrent = current.split('+')[0];
+      String cleanLatest = latest.split('+')[0];
+
+      List<int> currentParts = cleanCurrent
+          .split('.')
+          .map((s) => int.tryParse(s) ?? 0)
+          .toList();
+      List<int> latestParts = cleanLatest
+          .split('.')
+          .map((s) => int.tryParse(s) ?? 0)
+          .toList();
+
+      // Compare Major (index 0) and Minor (index 1)
+      for (int i = 0; i < 2; i++) {
+        int vCurrent = i < currentParts.length ? currentParts[i] : 0;
+        int vLatest = i < latestParts.length ? latestParts[i] : 0;
+        if (vLatest > vCurrent) return true;
+      }
+    } catch (e) {
+      debugPrint('Error comparing major/minor versions: $e');
+    }
+    return false;
+  }
+
   static Future<void> checkForUpdates(
     BuildContext context,
     String appType,
@@ -127,6 +153,8 @@ class UpdateService {
     debugPrint('UpdateService: Checking for updates for $appType...');
 
     // 1. First, check for Shorebird patches (Code Push)
+    // This is the preferred way for small fixes as it doesn't close the app
+    bool shorebirdHandled = false;
     try {
       final isShorebirdAvailable = await _shorebirdCodePush
           .isShorebirdAvailable();
@@ -151,23 +179,17 @@ class UpdateService {
           }
 
           await _shorebirdCodePush.downloadUpdateIfAvailable();
-          debugPrint(
-            'UpdateService: Shorebird patch downloaded. It will apply on next restart.',
-          );
+          debugPrint('UpdateService: Shorebird patch downloaded.');
+          shorebirdHandled = true;
 
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text(
-                  'Update downloaded! It will be applied when you restart the app.',
-                ),
+                content: Text('Update ready! It will apply on next restart.'),
                 duration: Duration(seconds: 3),
               ),
             );
           }
-          // After a patch is handled, we still check for full APK updates
-        } else {
-          debugPrint('UpdateService: No new Shorebird patch available.');
         }
       }
     } catch (e) {
@@ -175,6 +197,7 @@ class UpdateService {
     }
 
     // 2. Check for Full APK Updates (OTA)
+    // ONLY prompt for full APK if it's a major/minor version change OR shorebird isn't available
     final data = await fetchVersionData(appType);
     if (data != null) {
       final latestVersion = data['latest_version'];
@@ -186,30 +209,30 @@ class UpdateService {
 
       debugPrint('UpdateService: Current Version: [$currentVersion]');
       debugPrint('UpdateService: Latest Version: [$latestVersion]');
-      debugPrint('UpdateService: App Type: [$appType]');
 
       if (isNewerVersion(currentVersion, latestVersion)) {
-        debugPrint(
-          'UpdateService: New version available! Checking if dialog already showing...',
-        );
-        if (_isDialogShowing) {
-          debugPrint(
-            'UpdateService: Dialog already showing, skipping duplicate.',
-          );
-          return;
-        }
+        // Decide if we should show the full APK update dialog
+        // We only show it if:
+        // 1. It's a major or minor version change (e.g. 1.0.x -> 1.1.x)
+        // 2. OR Shorebird failed to handle it
+        bool shouldShowDialog =
+            isMajorOrMinorUpdate(currentVersion, latestVersion) ||
+            !shorebirdHandled;
 
-        if (context.mounted) {
-          _isDialogShowing = true;
-          _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
+        if (shouldShowDialog) {
+          debugPrint('UpdateService: Showing full APK update dialog...');
+          if (_isDialogShowing) return;
+
+          if (context.mounted) {
+            _isDialogShowing = true;
+            _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
+          }
+        } else {
+          debugPrint(
+            'UpdateService: Patch version change handled by Shorebird or skipped for now.',
+          );
         }
-      } else {
-        debugPrint(
-          'UpdateService: App is up to date (Current: $currentVersion, Latest: $latestVersion).',
-        );
       }
-    } else {
-      debugPrint('UpdateService: Failed to fetch version data for $appType.');
     }
   }
 
