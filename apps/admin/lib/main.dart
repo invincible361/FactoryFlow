@@ -93,6 +93,11 @@ class _AdminAppState extends State<AdminApp> {
 
   @override
   Widget build(BuildContext context) {
+    // Check for updates on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkForUpdates(context, 'admin');
+    });
+
     return ThemeController(
       themeMode: _themeMode,
       isDarkMode: _isDarkMode,

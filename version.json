@@ -1,17 +1,17 @@
 {
   "admin": {
-    "latest_version": "1.0.7",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/admin-v1.0.7/Admin_v1.0.7.apk",
+    "latest_version": "1.0.8",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/admin-v1.0.8/Admin_v1.0.8.apk",
     "force_update": true
   },
   "supervisor": {
-    "latest_version": "1.1.7",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/supervisor-v1.1.7/Supervisor_v1.1.7.apk",
+    "latest_version": "1.1.8",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/supervisor-v1.1.8/Supervisor_v1.1.8.apk",
     "force_update": true
   },
   "worker": {
-    "latest_version": "1.2.7",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/worker-v1.2.7/Worker_v1.2.7.apk",
+    "latest_version": "1.2.8",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/worker-v1.2.8/Worker_v1.2.8.apk",
     "force_update": true
   }
 }

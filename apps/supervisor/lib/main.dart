@@ -93,6 +93,11 @@ class _SupervisorAppState extends State<SupervisorApp> {
 
   @override
   Widget build(BuildContext context) {
+    // Check for updates on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkForUpdates(context, 'supervisor');
+    });
+
     return ThemeController(
       themeMode: _themeMode,
       isDarkMode: _isDarkMode,

@@ -426,6 +426,11 @@ class _WorkerAppState extends State<WorkerApp> {
 
   @override
   Widget build(BuildContext context) {
+    // Check for updates on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.checkForUpdates(context, 'worker');
+    });
+
     return ThemeController(
       themeMode: _themeMode,
       isDarkMode: _isDarkMode,

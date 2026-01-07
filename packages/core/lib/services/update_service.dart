@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:ota_update/ota_update.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class UpdateService {
   // Actual GitHub username and repository name
@@ -59,7 +60,11 @@ class UpdateService {
         debugPrint(
           'UpdateService: [DEBUG] Successfully fetched root data: $data',
         );
-        return data;
+        // Root version.json has appType keys (admin, supervisor, worker)
+        if (data is Map<String, dynamic> && data.containsKey(cleanAppType)) {
+          return data[cleanAppType] as Map<String, dynamic>;
+        }
+        return data as Map<String, dynamic>;
       }
 
       debugPrint('UpdateService: [DEBUG] All fetch attempts failed.');
@@ -182,12 +187,12 @@ class UpdateService {
     showDialog(
       context: context,
       barrierDismissible: !forceUpdate,
-      builder: (context) => WillPopScope(
-        onWillPop: () async {
-          if (!forceUpdate) {
+      builder: (context) => PopScope(
+        canPop: !forceUpdate,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop && !forceUpdate) {
             _isDialogShowing = false;
           }
-          return !forceUpdate;
         },
         child: AlertDialog(
           title: const Text('Update Available'),
@@ -259,14 +264,7 @@ class UpdateService {
         if (!finalInstallStatus.isGranted) {
           debugPrint('UpdateService: Install permission denied.');
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Please allow "Install unknown apps" permission to update.',
-                ),
-                duration: Duration(seconds: 5),
-              ),
-            );
+            _showInstallPermissionDialog(context, url);
           }
           _isDialogShowing = false;
           return;
@@ -296,19 +294,69 @@ class UpdateService {
                 Text(status),
               ],
             ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  if (await canLaunchUrl(Uri.parse(url))) {
+                    await launchUrl(
+                      Uri.parse(url),
+                      mode: LaunchMode.externalApplication,
+                    );
+                  }
+                },
+                child: const Text('Download in Browser'),
+              ),
+            ],
           );
         },
       ),
     );
 
     try {
+      // Follow redirects to get the final direct download link
+      // This is crucial for GitHub releases as they redirect to objects.githubusercontent.com
+      String directUrl = url;
+      try {
+        final client = http.Client();
+        // Use GET instead of HEAD because some servers (like GitHub) might
+        // handle redirects differently or block HEAD requests for binaries
+        final request = http.Request('GET', Uri.parse(url))
+          ..followRedirects = true;
+
+        // We only need the headers to find the final URL, so we can close the stream early
+        final streamedResponse = await client.send(request);
+
+        // The final URL after all redirects is stored in the request.url of the response
+        if (streamedResponse.request != null) {
+          directUrl = streamedResponse.request!.url.toString();
+        }
+
+        // IMPORTANT: Close the stream to avoid hanging or memory leaks
+        // Since we only want the URL, we don't need to read the body
+        await streamedResponse.stream.listen((_) {}).cancel();
+
+        debugPrint('UpdateService: Direct URL resolved to: $directUrl');
+
+        // Final sanity check: if the URL doesn't look like an APK and we are on GitHub,
+        // it might have failed to resolve properly
+        if (!directUrl.toLowerCase().contains('.apk') &&
+            directUrl.contains('github.com')) {
+          debugPrint(
+            'UpdateService: Warning: Resolved URL does not contain .apk extension',
+          );
+        }
+      } catch (e) {
+        debugPrint(
+          'UpdateService: Error resolving direct URL, using original: $e',
+        );
+      }
+
+      // Use a unique filename for each download to avoid issues with old/corrupted files
+      final downloadId = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'update_$downloadId.apk';
+
       OtaUpdate()
-          .execute(
-            url,
-            destinationFilename: 'update.apk',
-            // usePackageInstaller: true can cause issues on some devices/versions
-            // Setting it to false or removing it often helps with installation
-          )
+          .execute(directUrl, destinationFilename: fileName)
           .listen(
             (OtaEvent event) {
               setDialogState(() {
@@ -319,6 +367,18 @@ class UpdateService {
                     break;
                   case OtaStatus.INSTALLING:
                     status = 'Installing update...';
+                    break;
+                  case OtaStatus.ALREADY_RUNNING_ERROR:
+                    status = 'An update is already in progress';
+                    break;
+                  case OtaStatus.DOWNLOAD_ERROR:
+                    status = 'Download failed. Check internet.';
+                    break;
+                  case OtaStatus.CHECKSUM_ERROR:
+                    status = 'Update file corrupted (Checksum error)';
+                    break;
+                  case OtaStatus.INTERNAL_ERROR:
+                    status = 'Internal update error';
                     break;
                   default:
                     if (event.status.toString().contains('ERROR')) {
@@ -334,6 +394,16 @@ class UpdateService {
               if (event.status != OtaStatus.DOWNLOADING &&
                   event.status != OtaStatus.INSTALLING) {
                 _isDialogShowing = false; // Reset flag
+
+                // If it failed, show browser option more prominently
+                if (event.status.toString().contains('ERROR')) {
+                  _showErrorDialog(
+                    context,
+                    url,
+                    "Update failed: ${event.status}",
+                  );
+                }
+
                 Future.delayed(const Duration(seconds: 2), () {
                   if (Navigator.canPop(context)) {
                     Navigator.pop(context);
@@ -347,9 +417,7 @@ class UpdateService {
               if (Navigator.canPop(context)) {
                 Navigator.pop(context);
               }
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(SnackBar(content: Text('Update failed: $e')));
+              _showErrorDialog(context, url, 'Update failed: $e');
             },
           );
     } catch (e) {
@@ -358,6 +426,80 @@ class UpdateService {
       if (Navigator.canPop(context)) {
         Navigator.pop(context);
       }
+      _showErrorDialog(context, url, 'Error: $e');
     }
+  }
+
+  static void _showInstallPermissionDialog(BuildContext context, String url) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permission Required'),
+        content: const Text(
+          'Please allow "Install unknown apps" permission to update the app automatically. Alternatively, you can download it manually.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              if (await canLaunchUrl(Uri.parse(url))) {
+                await launchUrl(
+                  Uri.parse(url),
+                  mode: LaunchMode.externalApplication,
+                );
+              }
+            },
+            child: const Text('Download Manually'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static void _showErrorDialog(
+    BuildContext context,
+    String url,
+    String message,
+  ) {
+    if (!context.mounted) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Update Error'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(message),
+            const SizedBox(height: 10),
+            const Text(
+              'You can try downloading the update manually via browser.',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              if (await canLaunchUrl(Uri.parse(url))) {
+                await launchUrl(
+                  Uri.parse(url),
+                  mode: LaunchMode.externalApplication,
+                );
+              }
+            },
+            child: const Text('Open Browser'),
+          ),
+        ],
+      ),
+    );
   }
 }
