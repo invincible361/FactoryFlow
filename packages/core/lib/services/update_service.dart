@@ -6,7 +6,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:ota_update/ota_update.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shorebird_code_push/shorebird_code_push.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 class UpdateService {
@@ -16,9 +15,6 @@ class UpdateService {
 
   // Flag to prevent multiple dialogs
   static bool _isDialogShowing = false;
-
-  // Shorebird instance
-  static final _shorebirdCodePush = ShorebirdCodePush();
 
   static Future<Map<String, dynamic>?> fetchVersionData(String appType) async {
     try {
@@ -152,52 +148,7 @@ class UpdateService {
 
     debugPrint('UpdateService: Checking for updates for $appType...');
 
-    // 1. First, check for Shorebird patches (Code Push)
-    // This is the preferred way for small fixes as it doesn't close the app
-    bool shorebirdHandled = false;
-    try {
-      final isShorebirdAvailable = await _shorebirdCodePush
-          .isShorebirdAvailable();
-      if (isShorebirdAvailable) {
-        debugPrint(
-          'UpdateService: Shorebird is available, checking for patches...',
-        );
-        final isNewPatchAvailable = await _shorebirdCodePush
-            .isNewPatchAvailableForDownload();
-
-        if (isNewPatchAvailable) {
-          debugPrint(
-            'UpdateService: New Shorebird patch available! Downloading...',
-          );
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Downloading background optimization...'),
-                duration: Duration(seconds: 2),
-              ),
-            );
-          }
-
-          await _shorebirdCodePush.downloadUpdateIfAvailable();
-          debugPrint('UpdateService: Shorebird patch downloaded.');
-          shorebirdHandled = true;
-
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Update ready! It will apply on next restart.'),
-                duration: Duration(seconds: 3),
-              ),
-            );
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('UpdateService: Shorebird check error: $e');
-    }
-
-    // 2. Check for Full APK Updates (OTA)
-    // ONLY prompt for full APK if it's a major/minor version change OR shorebird isn't available
+    // Check for Full APK Updates (OTA)
     final data = await fetchVersionData(appType);
     if (data != null) {
       final latestVersion = data['latest_version'];
@@ -211,26 +162,12 @@ class UpdateService {
       debugPrint('UpdateService: Latest Version: [$latestVersion]');
 
       if (isNewerVersion(currentVersion, latestVersion)) {
-        // Decide if we should show the full APK update dialog
-        // We only show it if:
-        // 1. It's a major or minor version change (e.g. 1.0.x -> 1.1.x)
-        // 2. OR Shorebird failed to handle it
-        bool shouldShowDialog =
-            isMajorOrMinorUpdate(currentVersion, latestVersion) ||
-            !shorebirdHandled;
+        debugPrint('UpdateService: Showing full APK update dialog...');
+        if (_isDialogShowing) return;
 
-        if (shouldShowDialog) {
-          debugPrint('UpdateService: Showing full APK update dialog...');
-          if (_isDialogShowing) return;
-
-          if (context.mounted) {
-            _isDialogShowing = true;
-            _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
-          }
-        } else {
-          debugPrint(
-            'UpdateService: Patch version change handled by Shorebird or skipped for now.',
-          );
+        if (context.mounted) {
+          _isDialogShowing = true;
+          _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
         }
       }
     }
