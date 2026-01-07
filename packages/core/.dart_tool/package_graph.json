@@ -16,6 +16,7 @@
         "http",
         "intl",
         "local_auth",
+        "ota_update",
         "path_provider",
         "shared_preferences",
         "supabase_flutter",
@@ -51,6 +52,13 @@
         "stream_channel",
         "test_api",
         "vector_math"
+      ]
+    },
+    {
+      "name": "ota_update",
+      "version": "7.1.0",
+      "dependencies": [
+        "flutter"
       ]
     },
     {

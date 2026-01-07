@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
+import 'package:ota_update/ota_update.dart';
 
 class UpdateService {
   // Actual GitHub username and repository name
@@ -132,16 +132,82 @@ class UpdateService {
               child: const Text('Later'),
             ),
           ElevatedButton(
-            onPressed: () async {
-              final uri = Uri.parse(url);
-              if (await canLaunchUrl(uri)) {
-                await launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
+            onPressed: () {
+              Navigator.pop(context);
+              _startOtaUpdate(context, url);
             },
             child: const Text('Update Now'),
           ),
         ],
       ),
     );
+  }
+
+  static void _startOtaUpdate(BuildContext context, String url) {
+    late StateSetter setDialogState;
+    double progress = 0;
+    String status = 'Starting download...';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          setDialogState = setState;
+          return AlertDialog(
+            title: const Text('Updating App'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LinearProgressIndicator(value: progress / 100),
+                const SizedBox(height: 20),
+                Text(status),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    try {
+      OtaUpdate()
+          .execute(
+            url,
+            destinationFilename: 'update.apk',
+            usePackageInstaller: true,
+          )
+          .listen((OtaEvent event) {
+            setDialogState(() {
+              switch (event.status) {
+                case OtaStatus.DOWNLOADING:
+                  status = 'Downloading: ${event.value}%';
+                  progress = double.tryParse(event.value!) ?? 0;
+                  break;
+                case OtaStatus.INSTALLING:
+                  status = 'Installing update...';
+                  break;
+                default:
+                  if (event.status.toString().contains('ERROR')) {
+                    status = 'Update failed: ${event.status}';
+                  } else {
+                    status = 'Status: ${event.status}';
+                  }
+                  break;
+              }
+            });
+
+            // Close dialog on completion or error (except downloading/installing)
+            if (event.status != OtaStatus.DOWNLOADING &&
+                event.status != OtaStatus.INSTALLING) {
+              Future.delayed(const Duration(seconds: 2), () {
+                if (Navigator.canPop(context)) {
+                  Navigator.pop(context);
+                }
+              });
+            }
+          });
+    } catch (e) {
+      debugPrint('OTA Update Error: $e');
+    }
   }
 }

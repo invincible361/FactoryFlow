@@ -380,6 +380,12 @@
       "languageVersion": "3.2"
     },
     {
+      "name": "ota_update",
+      "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/ota_update-7.1.0",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    },
+    {
       "name": "package_info_plus",
       "rootUri": "file:///Users/adityajain/.pub-cache/hosted/pub.dev/package_info_plus-8.3.1",
       "packageUri": "lib/",
