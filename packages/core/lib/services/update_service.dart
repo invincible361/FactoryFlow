@@ -30,32 +30,42 @@ class UpdateService {
           'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/apps/$cleanAppType/version.json?t=$timestamp';
 
       debugPrint(
-        'UpdateService: Fetching version data for [$cleanAppType] from: $versionUrl',
+        'UpdateService: [DEBUG] Attempting to fetch version data for [$cleanAppType]',
       );
+      debugPrint('UpdateService: [DEBUG] Primary URL: $versionUrl');
+
       var response = await http.get(Uri.parse(versionUrl));
       debugPrint(
-        'UpdateService: Response status code for [$cleanAppType]: ${response.statusCode}',
+        'UpdateService: [DEBUG] Primary fetch status code: ${response.statusCode}',
       );
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        debugPrint('UpdateService: Successfully fetched data: $data');
+        debugPrint('UpdateService: [DEBUG] Successfully fetched data: $data');
         return data;
       }
 
       // If specific app fails, try the root fallback
       debugPrint(
-        'UpdateService: [$cleanAppType] specific fetch failed (${response.statusCode}), trying root fallback...',
+        'UpdateService: [DEBUG] [$cleanAppType] specific fetch failed, trying root fallback...',
       );
       versionUrl =
           'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/version.json?t=$timestamp';
+      debugPrint('UpdateService: [DEBUG] Fallback URL: $versionUrl');
       response = await http.get(Uri.parse(versionUrl));
+      debugPrint(
+        'UpdateService: [DEBUG] Fallback fetch status code: ${response.statusCode}',
+      );
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        debugPrint('UpdateService: Successfully fetched root data: $data');
+        debugPrint(
+          'UpdateService: [DEBUG] Successfully fetched root data: $data',
+        );
         return data;
       }
+
+      debugPrint('UpdateService: [DEBUG] All fetch attempts failed.');
     } catch (e) {
       debugPrint('UpdateService: Error fetching version data: $e');
     }
