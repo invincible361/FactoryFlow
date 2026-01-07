@@ -24,6 +24,8 @@ dependencies:
   flutter_animate: ^4.5.2
   local_auth: ^2.3.0
   ota_update: ^7.1.0
+  permission_handler: ^12.0.1
+  shorebird_code_push: ^1.1.2
 
 dev_dependencies:
   flutter_test:
