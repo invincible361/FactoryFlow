@@ -5692,6 +5692,42 @@ class _EmployeesTabState extends State<EmployeesTab> {
     }
   }
 
+  Future<Map<String, dynamic>?> _getWorkerStatus(String workerId) async {
+    try {
+      // 1. Get location status
+      final boundaryEvent = await _supabase
+          .from('worker_boundary_events')
+          .select()
+          .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle();
+
+      final isInside = boundaryEvent == null ||
+          (boundaryEvent['is_inside'] ?? (boundaryEvent['type'] != 'exit'));
+
+      // 2. Get active production log
+      final activeLog = await _supabase
+          .from('production_logs')
+          .select('*, items(name), machines(name)')
+          .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
+          .filter('end_time', 'is', null)
+          .order('start_time', ascending: false)
+          .limit(1)
+          .maybeSingle();
+
+      return {
+        'is_inside': isInside,
+        'active_log': activeLog,
+      };
+    } catch (e) {
+      debugPrint('Error getting worker status: $e');
+      return null;
+    }
+  }
+
   String? _getFirstNotEmpty(Map<String, dynamic> data, List<String> keys) {
     for (var key in keys) {
       final val = data[key]?.toString();
@@ -6517,17 +6553,82 @@ class _EmployeesTabState extends State<EmployeesTab> {
                             : null,
                       ),
                     ),
-                    title: Text(
-                      employee['name'] ?? 'No Name',
-                      style: TextStyle(
-                        color: textColor,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                      ),
+                    title: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            employee['name'] ?? 'No Name',
+                            style: TextStyle(
+                              color: textColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ),
+                        FutureBuilder<Map<String, dynamic>?>(
+                          future: _getWorkerStatus(employee['id']),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState ==
+                                ConnectionState.waiting) {
+                              return const SizedBox(
+                                width: 8,
+                                height: 8,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                      Colors.grey),
+                                ),
+                              );
+                            }
+                            final status = snapshot.data;
+                            final isInside = status?['is_inside'] ?? false;
+                            return Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isInside ? Colors.green : Colors.grey,
+                              ),
+                            );
+                          },
+                        ),
+                      ],
                     ),
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        const SizedBox(height: 4),
+                        FutureBuilder<Map<String, dynamic>?>(
+                          future: _getWorkerStatus(employee['id']),
+                          builder: (context, snapshot) {
+                            final status = snapshot.data;
+                            final activeLog = status?['active_log'];
+                            if (activeLog == null) {
+                              return Text(
+                                'Idle',
+                                style: TextStyle(
+                                  color: subTextColor.withValues(alpha: 0.5),
+                                  fontSize: 12,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              );
+                            }
+                            final itemName =
+                                activeLog['items']?['name'] ?? 'Unknown Item';
+                            final machineName = activeLog['machines']
+                                    ?['name'] ??
+                                'Unknown Machine';
+                            return Text(
+                              'Working on $itemName at $machineName',
+                              style: const TextStyle(
+                                color: Color(0xFFA9DFD8),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            );
+                          },
+                        ),
                         const SizedBox(height: 4),
                         Row(
                           children: [

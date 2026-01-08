@@ -45,10 +45,6 @@ class LogService {
           'item_id': log.itemId,
           'operation': log.operation,
           'quantity': log.quantity,
-          // Let backend handle timestamp and created_at via DEFAULT NOW()
-          // Only send start_time/end_time if they are explicitly provided and not for real-time events
-          // But per user instruction: "Flutter should NOT send timestamps for arrival time, production start, production end."
-          // We'll omit them here to let backend be the truth.
           'latitude': log.latitude,
           'longitude': log.longitude,
           'shift_name': log.shiftName,
@@ -59,6 +55,17 @@ class LogService {
           'created_by_supervisor': log.createdBySupervisor,
           'supervisor_id': log.supervisorId,
         };
+
+        if (log.startTime != null) {
+          payload['start_time'] = log.startTime?.toUtc().toIso8601String();
+        }
+        if (log.endTime != null) {
+          payload['end_time'] = log.endTime?.toUtc().toIso8601String();
+        }
+        if (log.timestamp != null) {
+          payload['timestamp'] = log.timestamp?.toUtc().toIso8601String();
+        }
+
         payloads.add(payload);
       }
 

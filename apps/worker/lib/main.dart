@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'package:factoryflow_core/factoryflow_core.dart';
 import 'package:uuid/uuid.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'screens/login_screen.dart';
 import 'app_theme.dart';
 
@@ -333,8 +334,21 @@ Future<void> _showNotification(String title, String body) async {
 void main() async {
   try {
     WidgetsFlutterBinding.ensureInitialized();
+
+    // Initialize Firebase
+    try {
+      await Firebase.initializeApp();
+      debugPrint('Firebase initialized successfully');
+    } catch (e) {
+      debugPrint('Firebase initialization failed: $e');
+      // Continue even if Firebase fails, as local notifications still work
+    }
+
     await SupabaseService.initialize();
     await NotificationService.initialize();
+
+    // Request notification permissions early
+    await NotificationService.requestPermissions();
 
     // Initialize Workmanager
     if (!kIsWeb) {

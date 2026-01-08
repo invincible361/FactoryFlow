@@ -1,16 +1,17 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _notificationsPlugin =
       FlutterLocalNotificationsPlugin();
+  static final FirebaseMessaging _firebaseMessaging =
+      FirebaseMessaging.instance;
 
   static Future<void> initialize() async {
     if (kIsWeb) return;
 
-    // Use a try-catch and check kIsWeb again just to be safe,
-    // although kIsWeb should be enough to skip Platform calls.
     try {
       if (!(Platform.isAndroid ||
           Platform.isIOS ||
@@ -19,6 +20,7 @@ class NotificationService {
         return;
       }
 
+      // Initialize Local Notifications
       const androidInit = AndroidInitializationSettings('ic_notification');
       const iosInit = DarwinInitializationSettings(
         requestAlertPermission: true,
@@ -31,10 +33,14 @@ class NotificationService {
         macOS: iosInit,
       );
 
-      await _notificationsPlugin.initialize(initSettings);
+      await _notificationsPlugin.initialize(
+        initSettings,
+        onDidReceiveNotificationResponse: (details) {
+          debugPrint('Notification tapped: ${details.payload}');
+        },
+      );
 
       if (Platform.isAndroid) {
-        // Create notification channel
         const channel = AndroidNotificationChannel(
           'factory_flow_channel',
           'FactoryFlow Notifications',
@@ -48,8 +54,58 @@ class NotificationService {
             >()
             ?.createNotificationChannel(channel);
       }
+
+      // Initialize Firebase Messaging for remote notifications
+      await _setupFirebaseMessaging();
     } catch (e) {
       debugPrint('NotificationService initialization error: $e');
+    }
+  }
+
+  // Top-level or static background message handler
+  @pragma('vm:entry-point')
+  static Future<void> _firebaseMessagingBackgroundHandler(
+    RemoteMessage message,
+  ) async {
+    // If you're going to use other Firebase services in the background, such as Firestore,
+    // make sure you call `Firebase.initializeApp()` before using other Firebase services.
+    debugPrint("Handling a background message: ${message.messageId}");
+  }
+
+  static Future<void> _setupFirebaseMessaging() async {
+    // Set background message handler
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+    // Handling foreground messages
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      debugPrint('Got a message whilst in the foreground!');
+      debugPrint('Message data: ${message.data}');
+
+      if (message.notification != null) {
+        debugPrint(
+          'Message also contained a notification: ${message.notification?.title}',
+        );
+        showNotification(
+          id: message.hashCode,
+          title: message.notification?.title ?? 'New Notification',
+          body: message.notification?.body ?? '',
+          payload: message.data.toString(),
+        );
+      }
+    });
+
+    // Handling notification clicks when app is in background but not terminated
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      debugPrint('A new onMessageOpenedApp event was published!');
+    });
+  }
+
+  static Future<String?> getFCMToken() async {
+    try {
+      return await _firebaseMessaging.getToken();
+    } catch (e) {
+      debugPrint('Error getting FCM token: $e');
+      return null;
     }
   }
 
@@ -57,6 +113,22 @@ class NotificationService {
     if (kIsWeb) return;
 
     try {
+      // Request Firebase Messaging permissions
+      NotificationSettings settings = await _firebaseMessaging
+          .requestPermission(
+            alert: true,
+            announcement: false,
+            badge: true,
+            carPlay: false,
+            criticalAlert: false,
+            provisional: false,
+            sound: true,
+          );
+      debugPrint(
+        'User granted Firebase permission: ${settings.authorizationStatus}',
+      );
+
+      // Request Local Notification permissions
       if (Platform.isAndroid) {
         await _notificationsPlugin
             .resolvePlatformSpecificImplementation<

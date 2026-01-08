@@ -268,6 +268,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   }
 
   void _subscribeToAssignments() {
+    debugPrint(
+      'Subscribing to work assignments for worker: ${widget.employee.id}',
+    );
     _assignmentSubscription = Supabase.instance.client
         .channel('public:work_assignments:worker_id=${widget.employee.id}')
         .onPostgresChanges(
@@ -280,17 +283,32 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             value: widget.employee.id,
           ),
           callback: (payload) {
-            debugPrint('New assignment received: ${payload.newRecord}');
+            debugPrint(
+              'New assignment received via Realtime: ${payload.newRecord}',
+            );
             _fetchAssignments();
+
+            final assignment = payload.newRecord;
+            final assignmentId =
+                assignment['id']?.toString() ??
+                DateTime.now().millisecondsSinceEpoch.toString();
+            // Use a unique but stable notification ID
+            final notificationId = assignmentId.hashCode;
+
             NotificationService.showNotification(
-              id: DateTime.now().millisecond,
+              id: notificationId,
               title: "New Work Assigned",
               body:
                   "A supervisor has assigned new work to you. Check the 'Pending Assignments' section.",
             );
           },
         )
-        .subscribe();
+        .subscribe((status, error) {
+          if (error != null) {
+            debugPrint('Realtime subscription error: $error');
+          }
+          debugPrint('Realtime subscription status: $status');
+        });
   }
 
   void _applyAssignment(Map<String, dynamic> assignment) {
@@ -865,7 +883,8 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           itemId: _selectedItem!.id,
           operation: _selectedOperation!,
           quantity: 0,
-          // Omit timestamp and startTime to let backend handle it
+          startTime: _startTime,
+          timestamp: _startTime,
           latitude: _currentPosition?.latitude ?? 0.0,
           longitude: _currentPosition?.longitude ?? 0.0,
           shiftName: _selectedShift ?? _getShiftName(_startTime!),
@@ -1035,7 +1054,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         itemId: _selectedItem?.id ?? 'N/A',
         operation: _selectedOperation ?? 'N/A',
         quantity: 0,
-        // Omit timestamp, startTime, endTime to let backend handle it
+        startTime: _startTime,
+        endTime: endTime,
+        timestamp: endTime,
         latitude: _currentPosition?.latitude ?? 0.0,
         longitude: _currentPosition?.longitude ?? 0.0,
         shiftName: _selectedShift ?? 'N/A',
@@ -1538,7 +1559,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           itemId: _selectedItem!.id,
           operation: _selectedOperation!,
           quantity: 0, // Don't register work
-          // Omit timestamp, startTime, endTime to let backend handle it
+          startTime: _startTime,
+          endTime: endTime,
+          timestamp: endTime,
           latitude: position.latitude,
           longitude: position.longitude,
           shiftName:
@@ -1597,7 +1620,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         itemId: _selectedItem!.id,
         operation: _selectedOperation!,
         quantity: quantity,
-        // Omit timestamp, startTime, endTime to let backend handle it
+        startTime: _startTime,
+        endTime: endTime,
+        timestamp: endTime,
         latitude: position.latitude,
         longitude: position.longitude,
         shiftName:
@@ -1617,7 +1642,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           itemId: extraData['itemId'],
           operation: extraData['operation'],
           quantity: extraData['quantity'],
-          // Omit timestamp, startTime, endTime to let backend handle it
+          startTime: _startTime,
+          endTime: endTime,
+          timestamp: endTime,
           latitude: position.latitude,
           longitude: position.longitude,
           shiftName:

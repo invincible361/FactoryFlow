@@ -132,6 +132,16 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final employee = Employee.fromJson(empResp);
 
+      // Update FCM token for the worker
+      try {
+        final fcmToken = await NotificationService.getFCMToken();
+        if (fcmToken != null) {
+          await SupabaseService.updateWorkerFCMToken(employee.id, fcmToken);
+        }
+      } catch (e) {
+        debugPrint('Error updating FCM token during login: $e');
+      }
+
       // Force an entry log on login if inside
       if (isInside) {
         try {
