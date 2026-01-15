@@ -1,19 +1,19 @@
 {
   "admin": {
     "latest_version": "1.0.12",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12-unified/admin.apk",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12/admin.apk",
     "force_update": true,
     "release_notes": "Reliability fix for the update system. Please update now."
   },
   "supervisor": {
     "latest_version": "1.1.12",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12-unified/supervisor.apk",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12/supervisor.apk",
     "force_update": true,
     "release_notes": "Reliability fix for the update system. Please update now."
   },
   "worker": {
     "latest_version": "1.2.12",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12-unified/worker.apk",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12/worker.apk",
     "force_update": true,
     "release_notes": "Reliability fix for the update system. Please update now."
   }
