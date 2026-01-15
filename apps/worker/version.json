@@ -1,5 +1,9 @@
 {
-  "latest_version": "1.2.10",
-  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.2.10-worker/factoryflow_worker_v1.2.10.apk",
-  "force_update": false
+  "latest_version": "1.2.11",
+  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.2.11-worker/worker.apk",
+  "force_update": false,
+  "release_notes": "Reliability fixes for update system",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Android)"
+  }
 }

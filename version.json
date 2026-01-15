@@ -10,9 +10,12 @@
   },
   "supervisor": {
     "latest_version": "1.1.11",
-    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.1.11-supervisor/factoryflow_supervisor_v1.1.11.apk",
+    "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.1.11-supervisor/supervisor.apk",
     "force_update": false,
-    "release_notes": "Reliability fixes for update system"
+    "release_notes": "Reliability fixes for update system",
+    "headers": {
+      "User-Agent": "Mozilla/5.0 (Android)"
+    }
   },
   "worker": {
     "latest_version": "1.2.11",

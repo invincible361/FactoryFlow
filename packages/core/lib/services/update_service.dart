@@ -143,37 +143,8 @@ class UpdateService {
     BuildContext context,
     String appType,
   ) async {
-    // Don't check for updates on web
-    if (kIsWeb) {
-      debugPrint('UpdateService: Skipping update check on web.');
-      return;
-    }
-
-    debugPrint('UpdateService: Checking for updates for $appType...');
-
-    // Check for Full APK Updates (OTA)
-    final data = await fetchVersionData(appType);
-    if (data != null) {
-      final latestVersion = data['latest_version'];
-      final apkUrl = data['apk_url'];
-      final forceUpdate = data['force_update'] ?? false;
-
-      final packageInfo = await getPackageInfo();
-      final currentVersion = packageInfo.version;
-
-      debugPrint('UpdateService: Current Version: [$currentVersion]');
-      debugPrint('UpdateService: Latest Version: [$latestVersion]');
-
-      if (isNewerVersion(currentVersion, latestVersion)) {
-        debugPrint('UpdateService: Showing full APK update dialog...');
-        if (_isDialogShowing) return;
-
-        if (context.mounted) {
-          _isDialogShowing = true;
-          _showUpdateDialog(context, latestVersion, apkUrl, forceUpdate);
-        }
-      }
-    }
+    // Deprecated in favor of VersionService.checkForUpdate
+    return;
   }
 
   static void _showUpdateDialog(

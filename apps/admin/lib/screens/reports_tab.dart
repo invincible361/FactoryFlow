@@ -5,6 +5,8 @@ import 'package:factoryflow_core/factoryflow_core.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:excel/excel.dart' as xl;
 import 'package:share_plus/share_plus.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
 
 class ReportsTab extends StatefulWidget {
   final String organizationCode;
@@ -27,6 +29,38 @@ class _ReportsTabState extends State<ReportsTab> {
     start: TimeUtils.nowIst().subtract(const Duration(days: 7)),
     end: TimeUtils.nowIst(),
   );
+
+  List<Map<String, dynamic>> _productionSummary = [];
+  bool _isLoadingViz = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchVizData();
+  }
+
+  Future<void> _fetchVizData() async {
+    if (!mounted) return;
+    setState(() => _isLoadingViz = true);
+    try {
+      final response = await _supabase
+          .from('production_logs')
+          .select('quantity, created_at, operation, machine_id, item_id')
+          .eq('organization_code', widget.organizationCode)
+          .gte('created_at', _selectedDateRange.start.toIso8601String())
+          .lte('created_at', _selectedDateRange.end.toIso8601String());
+
+      if (mounted) {
+        setState(() {
+          _productionSummary = List<Map<String, dynamic>>.from(response);
+          _isLoadingViz = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching viz data: $e');
+      if (mounted) setState(() => _isLoadingViz = false);
+    }
+  }
 
   final List<Map<String, dynamic>> _reportTypes = [
     {
@@ -319,7 +353,407 @@ class _ReportsTabState extends State<ReportsTab> {
     );
     if (picked != null) {
       setState(() => _selectedDateRange = picked);
+      _fetchVizData();
     }
+  }
+
+  Widget _buildVisualisationSection() {
+    final textColor = widget.isDarkMode ? Colors.white : Colors.black87;
+    final secondaryTextColor =
+        widget.isDarkMode ? Colors.white70 : Colors.black54;
+
+    if (_isLoadingViz) {
+      return const SizedBox(
+        height: 180,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_productionSummary.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.insights_rounded, color: Colors.tealAccent, size: 20),
+            const SizedBox(width: 8),
+            Text(
+              'Visual Insights',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: textColor,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          height: 200,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: [
+              _buildSmallChartCard(
+                title: 'Production Trend',
+                chart: _buildLineChart(isSmall: true),
+                onTap: () => _showEnlargedChart(
+                  title: 'Production Trend',
+                  chart: _buildLineChart(isSmall: false),
+                ),
+              ),
+              const SizedBox(width: 16),
+              _buildSmallChartCard(
+                title: 'Operation Split',
+                chart: _buildBarChart(
+                  data: _getProductionByOperation(),
+                  isSmall: true,
+                ),
+                onTap: () => _showEnlargedChart(
+                  title: 'Operation Split',
+                  chart: _buildBarChart(
+                    data: _getProductionByOperation(),
+                    isSmall: false,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              _buildSmallChartCard(
+                title: 'Machine Usage',
+                chart: _buildBarChart(
+                  data: _getProductionByMachine(),
+                  isSmall: true,
+                ),
+                onTap: () => _showEnlargedChart(
+                  title: 'Machine Usage',
+                  chart: _buildBarChart(
+                    data: _getProductionByMachine(),
+                    isSmall: false,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              _buildSmallChartCard(
+                title: 'Item Distribution',
+                chart: _buildBarChart(
+                  data: _getProductionByItem(),
+                  isSmall: true,
+                ),
+                onTap: () => _showEnlargedChart(
+                  title: 'Item Distribution',
+                  chart: _buildBarChart(
+                    data: _getProductionByItem(),
+                    isSmall: false,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              _buildSmallChartCard(
+                title: 'Daily Output',
+                chart: _buildPieChart(isSmall: true),
+                onTap: () => _showEnlargedChart(
+                  title: 'Daily Output',
+                  chart: _buildPieChart(isSmall: false),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _buildSmallChartCard({
+    required String title,
+    required Widget chart,
+    required VoidCallback onTap,
+  }) {
+    final cardColor =
+        widget.isDarkMode ? const Color(0xFF21222D) : Colors.white;
+    final textColor = widget.isDarkMode ? Colors.white : Colors.black87;
+
+    return Container(
+      width: 280,
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.fromBorderSide(
+          BorderSide(
+            color: widget.isDarkMode ? Colors.white10 : Colors.black12,
+          ),
+        ),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: textColor,
+                    ),
+                  ),
+                  const Icon(Icons.fullscreen_rounded,
+                      size: 18, color: Colors.tealAccent),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(child: chart),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showEnlargedChart({required String title, required Widget chart}) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor:
+            widget.isDarkMode ? const Color(0xFF171821) : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          width: MediaQuery.of(context).size.width * 0.8,
+          height: MediaQuery.of(context).size.height * 0.7,
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: widget.isDarkMode ? Colors.white : Colors.black87,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 32),
+              Expanded(child: chart),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLineChart({required bool isSmall}) {
+    final data = _getProductionByDay();
+    if (data.isEmpty) return const Center(child: Text('No data'));
+
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(show: !isSmall),
+        titlesData: FlTitlesData(
+          show: !isSmall,
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, meta) {
+                if (value.toInt() >= 0 && value.toInt() < data.length) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text(
+                      DateFormat('MM/dd').format(data[value.toInt()].date),
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+          ),
+          leftTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: true, reservedSize: 40),
+          ),
+          rightTitles:
+              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles:
+              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(show: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: data.asMap().entries.map((e) {
+              return FlSpot(e.key.toDouble(), e.value.quantity.toDouble());
+            }).toList(),
+            isCurved: true,
+            color: Colors.tealAccent,
+            barWidth: isSmall ? 2 : 4,
+            isStrokeCapRound: true,
+            dotData: FlDotData(show: !isSmall),
+            belowBarData: BarAreaData(
+              show: true,
+              color: Colors.tealAccent.withValues(alpha: 0.1),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBarChart({
+    required List<({String name, int quantity})> data,
+    required bool isSmall,
+  }) {
+    if (data.isEmpty) return const Center(child: Text('No data'));
+
+    return BarChart(
+      BarChartData(
+        gridData: FlGridData(show: false),
+        titlesData: FlTitlesData(
+          show: !isSmall,
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, meta) {
+                if (value.toInt() >= 0 && value.toInt() < data.length) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Text(
+                      data[value.toInt()].name,
+                      style: const TextStyle(fontSize: 10),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+          ),
+          leftTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: true, reservedSize: 40),
+          ),
+          rightTitles:
+              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles:
+              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(show: false),
+        barGroups: data.asMap().entries.map((e) {
+          return BarChartGroupData(
+            x: e.key,
+            barRods: [
+              BarChartRodData(
+                toY: e.value.quantity.toDouble(),
+                color: Colors.tealAccent,
+                width: isSmall ? 8 : 16,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ],
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildPieChart({required bool isSmall}) {
+    final data = _getProductionByOperation();
+    if (data.isEmpty) return const Center(child: Text('No data'));
+
+    final total = data.fold<double>(0, (sum, item) => sum + item.quantity);
+    final colors = [
+      Colors.tealAccent,
+      Colors.blueAccent,
+      Colors.purpleAccent,
+      Colors.orangeAccent,
+      Colors.redAccent,
+    ];
+
+    return PieChart(
+      PieChartData(
+        sectionsSpace: 2,
+        centerSpaceRadius: isSmall ? 20 : 60,
+        sections: data.asMap().entries.map((e) {
+          final percentage = (e.value.quantity / total) * 100;
+          return PieChartSectionData(
+            color: colors[e.key % colors.length],
+            value: e.value.quantity.toDouble(),
+            title: isSmall ? '' : '${percentage.toStringAsFixed(1)}%',
+            radius: isSmall ? 30 : 100,
+            titleStyle: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  List<({DateTime date, int quantity})> _getProductionByDay() {
+    final Map<DateTime, int> grouped = {};
+    for (final log in _productionSummary) {
+      final date = DateTime.parse(log['created_at']);
+      final day = DateTime(date.year, date.month, date.day);
+      grouped[day] = (grouped[day] ?? 0) + (log['quantity'] as int? ?? 0);
+    }
+    final sortedKeys = grouped.keys.toList()..sort();
+    return sortedKeys.map((k) => (date: k, quantity: grouped[k]!)).toList();
+  }
+
+  List<({String name, int quantity})> _getProductionByOperation() {
+    final Map<String, int> grouped = {};
+    for (final log in _productionSummary) {
+      final op = log['operation']?.toString() ?? 'Unknown';
+      grouped[op] = (grouped[op] ?? 0) + (log['quantity'] as int? ?? 0);
+    }
+    final sortedEntries = grouped.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return sortedEntries
+        .take(5)
+        .map((e) => (name: e.key, quantity: e.value))
+        .toList();
+  }
+
+  List<({String name, int quantity})> _getProductionByMachine() {
+    final Map<String, int> grouped = {};
+    for (final log in _productionSummary) {
+      final machine = log['machine_id']?.toString() ?? 'Unknown';
+      grouped[machine] =
+          (grouped[machine] ?? 0) + (log['quantity'] as int? ?? 0);
+    }
+    final sortedEntries = grouped.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return sortedEntries
+        .take(5)
+        .map((e) => (name: e.key, quantity: e.value))
+        .toList();
+  }
+
+  List<({String name, int quantity})> _getProductionByItem() {
+    final Map<String, int> grouped = {};
+    for (final log in _productionSummary) {
+      final item = log['item_id']?.toString() ?? 'Unknown';
+      grouped[item] = (grouped[item] ?? 0) + (log['quantity'] as int? ?? 0);
+    }
+    final sortedEntries = grouped.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return sortedEntries
+        .take(5)
+        .map((e) => (name: e.key, quantity: e.value))
+        .toList();
   }
 
   @override
@@ -376,6 +810,7 @@ class _ReportsTabState extends State<ReportsTab> {
             ],
           ),
           const SizedBox(height: 24),
+          _buildVisualisationSection(),
           Expanded(
             child: GridView.builder(
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(

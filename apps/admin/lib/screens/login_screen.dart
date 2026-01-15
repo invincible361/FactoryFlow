@@ -23,10 +23,6 @@ class _LoginScreenState extends State<LoginScreen> {
   void initState() {
     super.initState();
     _fetchAppVersion();
-    // Check for updates on startup
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService.checkForUpdates(context, 'admin');
-    });
   }
 
   Future<void> _fetchAppVersion() async {
