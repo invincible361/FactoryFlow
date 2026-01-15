@@ -19,7 +19,6 @@
         "http",
         "intl",
         "local_auth",
-        "ota_update",
         "package_info_plus",
         "path_provider",
         "permission_handler",
@@ -114,13 +113,6 @@
         "permission_handler_html",
         "permission_handler_platform_interface",
         "permission_handler_windows"
-      ]
-    },
-    {
-      "name": "ota_update",
-      "version": "7.1.0",
-      "dependencies": [
-        "flutter"
       ]
     },
     {

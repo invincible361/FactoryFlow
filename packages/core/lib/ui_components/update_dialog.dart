@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:ota_update/ota_update.dart';
 import '../services/version_service.dart';
 
 class UpdateDialog extends StatefulWidget {
@@ -23,32 +22,22 @@ class UpdateDialog extends StatefulWidget {
 }
 
 class _UpdateDialogState extends State<UpdateDialog> {
-  OtaEvent? _otaEvent;
-  bool _isDownloading = false;
+  bool _isLaunching = false;
 
-  void _startUpdate() {
+  Future<void> _startUpdate() async {
     setState(() {
-      _isDownloading = true;
+      _isLaunching = true;
     });
 
-    VersionService.updateApp(widget.apkUrl, headers: widget.headers).listen(
-      (event) {
-        setState(() {
-          _otaEvent = event;
-        });
-      },
-      onError: (e) {
-        debugPrint('Update error: $e');
-        setState(() {
-          _isDownloading = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to download update. Please try again.'),
-          ),
-        );
-      },
-    );
+    await VersionService.launchUpdateUrl(widget.apkUrl);
+
+    if (mounted && !widget.isForceUpdate) {
+      Navigator.of(context).pop();
+    } else if (mounted) {
+      setState(() {
+        _isLaunching = false;
+      });
+    }
   }
 
   @override
@@ -86,54 +75,39 @@ class _UpdateDialogState extends State<UpdateDialog> {
               Text(widget.releaseNotes),
               const SizedBox(height: 16),
             ],
-            if (_isDownloading) ...[
-              LinearProgressIndicator(
-                value:
-                    _otaEvent != null &&
-                        _otaEvent!.value != null &&
-                        _otaEvent!.value!.isNotEmpty
-                    ? (double.tryParse(_otaEvent!.value!) ?? 0) / 100
-                    : null,
-                backgroundColor: Colors.blue.withValues(alpha: 0.1),
-                valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
-              ),
+            if (_isLaunching) ...[
+              const Center(child: CircularProgressIndicator()),
               const SizedBox(height: 8),
-              Center(
-                child: Text(
-                  _otaEvent?.status == OtaStatus.DOWNLOADING
-                      ? 'Downloading: ${_otaEvent?.value}%'
-                      : _otaEvent?.status == OtaStatus.INSTALLING
-                      ? 'Preparing to install...'
-                      : 'Starting download...',
-                  style: theme.textTheme.bodySmall,
-                ),
-              ),
+              const Center(child: Text('Opening browser...')),
             ] else
               Text(
                 widget.isForceUpdate
                     ? 'This update is required to continue using the app.'
-                    : 'Would you like to update now?',
-                style: theme.textTheme.bodyMedium,
+                    : 'Would you like to download the update now?',
+                style: TextStyle(
+                  color: isDark ? Colors.white60 : Colors.black45,
+                ),
               ),
           ],
         ),
-        actions: _isDownloading
-            ? []
-            : [
-                if (!widget.isForceUpdate)
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('SKIP'),
-                  ),
-                ElevatedButton(
-                  onPressed: _startUpdate,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('UPDATE NOW'),
-                ),
-              ],
+        actions: [
+          if (!widget.isForceUpdate && !_isLaunching)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Later'),
+            ),
+          ElevatedButton(
+            onPressed: _isLaunching ? null : _startUpdate,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: Text(_isLaunching ? 'Opening...' : 'Download Now'),
+          ),
+        ],
       ),
     );
   }

@@ -1,5 +1,5 @@
 {
-  "latest_version": "1.0.8",
-  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/admin-v1.0.8/Admin_v1.0.8.apk",
-  "force_update": true
+  "latest_version": "1.0.10",
+  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.0.10-admin/factoryflow_admin_v1.0.10.apk",
+  "force_update": false
 }
