@@ -1,9 +1,6 @@
 {
   "latest_version": "1.0.11",
-  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.0.11-admin/admin.apk",
+  "apk_url": "https://raw.githubusercontent.com/invincible361/FactoryFlow/main/dist/admin.apk",
   "force_update": false,
-  "release_notes": "Reliability fixes for update system",
-  "headers": {
-    "User-Agent": "Mozilla/5.0 (Android)"
-  }
+  "release_notes": "Reliability fixes for update system"
 }
