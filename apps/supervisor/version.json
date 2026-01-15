@@ -1,6 +1,6 @@
 {
-  "latest_version": "1.1.11",
-  "apk_url": "https://raw.githubusercontent.com/invincible361/FactoryFlow/main/dist/supervisor.apk",
-  "force_update": false,
-  "release_notes": "Reliability fixes for update system"
+  "latest_version": "1.1.12",
+  "apk_url": "https://raw.githubusercontent.com/invincible361/FactoryFlow/release/supervisor.apk",
+  "force_update": true,
+  "release_notes": "Critical update system fix. Please install this version."
 }
