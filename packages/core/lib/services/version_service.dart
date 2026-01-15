@@ -1,15 +1,37 @@
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+import 'update_service.dart';
 
 class VersionService {
-  static const String _tableName = 'app_versions';
-
   /// Checks if an update is available for the given app type (worker, admin, supervisor)
-  /// Now defaults to returning null as we are moving to GitHub-based versioning via UpdateService
+  /// Uses UpdateService to fetch version data from GitHub.
   static Future<Map<String, dynamic>?> checkForUpdate(String appType) async {
+    try {
+      final versionData = await UpdateService.fetchVersionData(appType);
+      if (versionData == null) return null;
+
+      final packageInfo = await UpdateService.getPackageInfo();
+      final currentVersion = packageInfo.version;
+      final latestVersion = versionData['latest_version'] ?? '';
+
+      debugPrint(
+        'VersionService: Checking update for $appType. Current: $currentVersion, Latest: $latestVersion',
+      );
+
+      if (UpdateService.isNewerVersion(currentVersion, latestVersion)) {
+        return {
+          'latestVersion': latestVersion,
+          'apkUrl': versionData['apk_url'],
+          'isForceUpdate': versionData['force_update'] ?? false,
+          'releaseNotes':
+              versionData['release_notes'] ?? 'A new update is available.',
+          'headers': versionData['headers'],
+        };
+      }
+    } catch (e) {
+      debugPrint('VersionService: Error checking for update: $e');
+    }
     return null;
   }
 
