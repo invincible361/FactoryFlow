@@ -353,8 +353,7 @@ class UpdateService {
       }
 
       // Use a unique filename for each download to avoid issues with old/corrupted files
-      final downloadId = TimeUtils.nowUtc().millisecondsSinceEpoch;
-      final fileName = 'update_$downloadId.apk';
+      final fileName = 'factoryflow_${DateTime.now().millisecondsSinceEpoch}.apk';
 
       OtaUpdate()
           .execute(directUrl, destinationFilename: fileName)
