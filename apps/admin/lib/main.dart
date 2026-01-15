@@ -165,6 +165,7 @@ class _InitializerState extends State<Initializer> {
           apkUrl: updateInfo['apkUrl'],
           isForceUpdate: updateInfo['isForceUpdate'],
           releaseNotes: updateInfo['releaseNotes'],
+          headers: updateInfo['headers'],
         ),
       );
     }

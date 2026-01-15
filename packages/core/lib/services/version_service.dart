@@ -29,6 +29,10 @@ class VersionService {
       final apkUrl = response['apk_url'] as String;
       final isForceUpdate = response['is_force_update'] as bool? ?? false;
       final releaseNotes = response['release_notes'] as String? ?? '';
+      final headersRaw = response['headers'] as Map<String, dynamic>? ?? {};
+      final headers = headersRaw.map(
+        (key, value) => MapEntry(key, value.toString()),
+      );
 
       final isGreater = _isVersionGreater(latestVersion, currentVersion);
 
@@ -39,6 +43,7 @@ class VersionService {
           'apkUrl': apkUrl,
           'isForceUpdate': isForceUpdate,
           'releaseNotes': releaseNotes,
+          'headers': headers,
         };
       }
     } catch (e) {
@@ -48,11 +53,15 @@ class VersionService {
   }
 
   /// Triggers the OTA update flow (Android only)
-  static Stream<OtaEvent> updateApp(String url) {
+  static Stream<OtaEvent> updateApp(
+    String url, {
+    Map<String, String>? headers,
+  }) {
     try {
       return OtaUpdate().execute(
         url,
         destinationFilename: 'factoryflow_update.apk',
+        headers: headers ?? {},
       );
     } catch (e) {
       debugPrint('OTA Update Error: $e');

@@ -41,6 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
           apkUrl: updateInfo['apkUrl'],
           isForceUpdate: updateInfo['isForceUpdate'],
           releaseNotes: updateInfo['releaseNotes'],
+          headers: updateInfo['headers'],
         ),
       );
     }

@@ -7,6 +7,7 @@ class UpdateDialog extends StatefulWidget {
   final String apkUrl;
   final bool isForceUpdate;
   final String releaseNotes;
+  final Map<String, String>? headers;
 
   const UpdateDialog({
     super.key,
@@ -14,6 +15,7 @@ class UpdateDialog extends StatefulWidget {
     required this.apkUrl,
     required this.isForceUpdate,
     required this.releaseNotes,
+    this.headers,
   });
 
   @override
@@ -29,7 +31,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
       _isDownloading = true;
     });
 
-    VersionService.updateApp(widget.apkUrl).listen(
+    VersionService.updateApp(widget.apkUrl, headers: widget.headers).listen(
       (event) {
         setState(() {
           _otaEvent = event;
