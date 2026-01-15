@@ -1,5 +1,22 @@
--- Update app versions in Supabase
--- This table is used by VersionService to check for updates
+-- Ensure unique constraint and headers column exist before inserting
+DO $$ 
+BEGIN 
+    -- Add unique constraint if missing
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'app_versions_app_type_version_key'
+    ) THEN 
+        ALTER TABLE public.app_versions ADD CONSTRAINT app_versions_app_type_version_key UNIQUE (app_type, version);
+    END IF;
+
+    -- Add headers column if missing
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'app_versions' AND column_name = 'headers'
+    ) THEN 
+        ALTER TABLE public.app_versions ADD COLUMN headers JSONB DEFAULT '{}'::jsonb;
+    END IF;
+END $$;
 
 -- Admin App
 INSERT INTO public.app_versions (app_type, version, apk_url, is_force_update, release_notes, headers)
