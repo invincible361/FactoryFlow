@@ -11,7 +11,7 @@ export 'models/employee.dart';
 export 'models/item.dart';
 export 'models/machine.dart';
 export 'models/production_log.dart';
-export 'models/worker_boundary_event.dart';
+export 'models/work_abandonment_event.dart';
 export 'models/theme_mode.dart';
 
 export 'services/attendance_service.dart';
@@ -30,5 +30,5 @@ export 'widgets/app_sidebar.dart';
 export 'widgets/attendance_sidebar_item.dart';
 export 'widgets/theme_controller.dart';
 export 'widgets/modern_login_screen.dart';
-export 'widgets/out_of_bounds_tab.dart';
-export 'widgets/geofence_tab.dart';
+export 'widgets/work_abandonment_tab.dart';
+export 'widgets/gate_activity_tab.dart';

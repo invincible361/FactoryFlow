@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart' as uuid;
 import 'package:factoryflow_core/factoryflow_core.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -58,7 +57,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
   // Notifiers for lag optimization
   final ValueNotifier<DateTime> _currentTimeNotifier = ValueNotifier<DateTime>(
-    DateTime.now(),
+    TimeUtils.nowIst(),
   );
   final ValueNotifier<Duration> _elapsedTimeNotifier = ValueNotifier<Duration>(
     Duration.zero,
@@ -190,7 +189,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
   Future<void> _fetchTodayExtraUnits() async {
     try {
-      final now = DateTime.now();
+      final now = TimeUtils.nowUtc();
       final dayFrom = DateTime(now.year, now.month, now.day);
       final response = await Supabase.instance.client
           .from('production_logs')
@@ -230,9 +229,9 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         timer.cancel();
         return;
       }
-      _currentTimeNotifier.value = DateTime.now();
+      _currentTimeNotifier.value = TimeUtils.nowIst();
       if (_isTimerRunning && _startTime != null) {
-        _elapsed = DateTime.now().difference(_startTime!);
+        _elapsed = TimeUtils.nowUtc().difference(_startTime!.toUtc());
         _elapsedTimeNotifier.value = _elapsed;
 
         // Explicitly trigger a rebuild of the current frame if it's not happening
@@ -291,7 +290,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             final assignment = payload.newRecord;
             final assignmentId =
                 assignment['id']?.toString() ??
-                DateTime.now().millisecondsSinceEpoch.toString();
+                TimeUtils.nowUtc().millisecondsSinceEpoch.toString();
             // Use a unique but stable notification ID
             final notificationId = assignmentId.hashCode;
 
@@ -320,6 +319,16 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         _selectedItem = _items.firstWhere((i) => i.id == assignment['item_id']);
         _selectedOperation = assignment['operation'];
         _activeAssignmentId = assignment['id'].toString();
+
+        // Auto-set shift based on current time
+        final detectedShift = _findShiftByTime(TimeUtils.nowIst());
+        if (detectedShift.isNotEmpty) {
+          _selectedShift = detectedShift['name'];
+        } else {
+          // Fallback or keep existing selection
+          _selectedShift ??= 'General';
+        }
+
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('Assignment applied')));
@@ -412,7 +421,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     setState(() {
       _isTimerRunning = true;
       if (_startTime != null) {
-        _elapsed = DateTime.now().difference(_startTime!);
+        _elapsed = TimeUtils.nowUtc().difference(_startTime!.toUtc());
         _elapsedTimeNotifier.value = _elapsed;
       }
     });
@@ -696,7 +705,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     if (isTimerRunning) {
       await NotificationService.showNotification(
-        id: DateTime.now().millisecond,
+        id: TimeUtils.nowUtc().millisecond,
         title: "Production Still Running",
         body:
             "Your production timer is still active. Please remember to update or close your production when finished.",
@@ -708,39 +717,72 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     if (!_isTimerRunning || _selectedShift == null) return;
 
     try {
-      final now = DateTime.now();
+      final now = TimeUtils.nowIst();
       final shift = _shifts.firstWhere((s) => s['name'] == _selectedShift);
-      final endTimeStr = shift['end_time'] as String;
-      final format = DateFormat('hh:mm a');
-      final endDt = format.parse(endTimeStr);
+      final startDt = TimeUtils.parseShiftTime(shift['start_time']);
+      final endDt = TimeUtils.parseShiftTime(shift['end_time']);
 
-      DateTime shiftEndToday = DateTime(
+      if (startDt == null || endDt == null) return;
+
+      DateTime startToday = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        startDt.hour,
+        startDt.minute,
+      );
+      DateTime endToday = DateTime(
         now.year,
         now.month,
         now.day,
         endDt.hour,
         endDt.minute,
       );
-
-      final startDt = format.parse(shift['start_time'] as String);
+      DateTime effectiveEnd;
       if (endDt.isBefore(startDt)) {
-        if (now.hour >= startDt.hour) {
-          shiftEndToday = shiftEndToday.add(const Duration(days: 1));
+        if (!now.isBefore(startToday)) {
+          effectiveEnd = endToday.add(const Duration(days: 1));
+        } else if (now.isBefore(endToday)) {
+          effectiveEnd = endToday;
+        } else {
+          final diffToStart = startToday.difference(now);
+          if (diffToStart.inMinutes > 0 && diffToStart.inMinutes <= 15) {
+            await NotificationService.showNotification(
+              id: TimeUtils.nowUtc().millisecond,
+              title: "Shift Starting Soon",
+              body:
+                  "Your shift ($_selectedShift) starts in ${diffToStart.inMinutes} minutes.",
+            );
+          }
+          return;
         }
+      } else {
+        if (now.isBefore(startToday)) {
+          final diffToStart = startToday.difference(now);
+          if (diffToStart.inMinutes > 0 && diffToStart.inMinutes <= 15) {
+            await NotificationService.showNotification(
+              id: TimeUtils.nowUtc().millisecond,
+              title: "Shift Starting Soon",
+              body:
+                  "Your shift ($_selectedShift) starts in ${diffToStart.inMinutes} minutes.",
+            );
+          }
+          return;
+        }
+        effectiveEnd = endToday;
       }
-
-      final diff = shiftEndToday.difference(now);
+      final diff = effectiveEnd.difference(now);
 
       if (diff.inMinutes > 0 && diff.inMinutes <= 15) {
         await NotificationService.showNotification(
-          id: DateTime.now().millisecond,
+          id: TimeUtils.nowUtc().millisecond,
           title: "Shift Ending Soon",
           body:
               "Your shift ($_selectedShift) ends in ${diff.inMinutes} minutes. Please update and close your production tasks.",
         );
       } else if (diff.isNegative) {
         await NotificationService.showNotification(
-          id: DateTime.now().millisecond,
+          id: TimeUtils.nowUtc().millisecond,
           title: "Shift Ended",
           body:
               "Your shift ($_selectedShift) has ended, but production is still running. Please close your production tasks.",
@@ -814,7 +856,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     setState(() {
       _isTimerRunning = true;
-      _startTime = DateTime.now();
+      _startTime = TimeUtils.nowUtc();
       _elapsed = Duration.zero;
       _currentLogId = logId;
     });
@@ -838,7 +880,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     // Trigger notification for production start
     await NotificationService.showNotification(
-      id: DateTime.now().millisecond,
+      id: TimeUtils.nowUtc().millisecond,
       title: "Production Started",
       body:
           "You have started production on ${_selectedMachine!.name} for ${_selectedItem!.name} (${_selectedOperation!}).",
@@ -846,54 +888,43 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
 
     // Save initial log for "In" time visibility
     try {
-      // Update assignment status if exists
+      // 0. ENFORCE ONE ACTIVE TASK: Close any existing active tasks for this worker
+      await Supabase.instance.client
+          .from('production_logs')
+          .update({'is_active': false})
+          .eq('worker_id', widget.employee.id)
+          .eq('is_active', true);
+
+      // 1. Update assignment status if exists
       if (_activeAssignmentId != null) {
         await Supabase.instance.client
             .from('work_assignments')
             .update({
               'status': 'started',
-              'updated_at': DateTime.now().toUtc().toIso8601String(),
+              // updated_at handled by DB now()
             })
             .eq('id', _activeAssignmentId!);
       }
 
-      // Use RPC to let backend handle start_time and timestamp
-      try {
-        await Supabase.instance.client.rpc(
-          'log_production_start',
-          params: {
-            'p_id': logId,
-            'p_worker_id': widget.employee.id,
-            'p_machine_id': _selectedMachine!.id,
-            'p_item_id': _selectedItem!.id,
-            'p_operation': _selectedOperation!,
-            'p_lat': _currentPosition?.latitude ?? 0.0,
-            'p_lng': _currentPosition?.longitude ?? 0.0,
-            'p_org_code': widget.employee.organizationCode,
-            'p_shift_name': _selectedShift ?? _getShiftName(_startTime!),
-          },
-        );
-      } catch (e) {
-        debugPrint('Error saving initial log via RPC: $e');
-        // Fallback to LogService if RPC fails
-        final initialLog = ProductionLog(
+      // Use LogService to let backend handle start_time and timestamp
+      await LogService().startProductionLog(
+        ProductionLog(
           id: logId,
           employeeId: widget.employee.id,
           machineId: _selectedMachine!.id,
           itemId: _selectedItem!.id,
           operation: _selectedOperation!,
           quantity: 0,
-          startTime: _startTime,
-          timestamp: _startTime,
+          startTime: null, // Let DB handle time
+          timestamp: null, // Let DB handle time
           latitude: _currentPosition?.latitude ?? 0.0,
           longitude: _currentPosition?.longitude ?? 0.0,
           shiftName: _selectedShift ?? _getShiftName(_startTime!),
           performanceDiff: 0,
           organizationCode: widget.employee.organizationCode,
           remarks: null,
-        );
-        await LogService().addLog(initialLog);
-      }
+        ),
+      );
     } catch (e) {
       debugPrint('Error saving initial log: $e');
     }
@@ -902,41 +933,32 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   }
 
   String _getShiftName(DateTime time) {
-    // We will now try to fetch the actual shift name from the database based on the time
-    // If not found, we fallback to the default logic
-    final minutes = time.hour * 60 + time.minute;
-
     for (final shift in _shifts) {
-      try {
-        final startStr = shift['start_time'] as String;
-        final endStr = shift['end_time'] as String;
+      final startDt = TimeUtils.parseShiftTime(shift['start_time']);
+      final endDt = TimeUtils.parseShiftTime(shift['end_time']);
 
-        // Parse "hh:mm a" format
-        final format = DateFormat('hh:mm a');
-        final startDt = format.parse(startStr);
-        final endDt = format.parse(endStr);
-
+      if (startDt != null && endDt != null) {
         final startMinutes = startDt.hour * 60 + startDt.minute;
         final endMinutes = endDt.hour * 60 + endDt.minute;
+        final minutes = time.hour * 60 + time.minute;
 
         if (startMinutes < endMinutes) {
           if (minutes >= startMinutes && minutes < endMinutes) {
-            return "${shift['name']} ($startStr - $endStr)";
+            return "${shift['name']} (${shift['start_time']} - ${shift['end_time']})";
           }
         } else {
           // Crosses midnight
           if (minutes >= startMinutes || minutes < endMinutes) {
-            return "${shift['name']} ($startStr - $endStr)";
+            return "${shift['name']} (${shift['start_time']} - ${shift['end_time']})";
           }
         }
-      } catch (e) {
-        debugPrint('Error parsing shift time: $e');
       }
     }
 
     // Fallback logic
-    final dayStart = 7 * 60 + 30; // 450
-    final dayEnd = 19 * 60 + 30; // 1170
+    final minutes = time.hour * 60 + time.minute;
+    final dayStart = 7 * 60 + 30; // 07:30 AM
+    final dayEnd = 19 * 60 + 30; // 07:30 PM
 
     if (minutes >= dayStart && minutes < dayEnd) {
       return 'Day Shift (07:30 AM - 07:30 PM)';
@@ -946,16 +968,14 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   }
 
   Map<String, dynamic> _findShiftByTime(DateTime time) {
-    final minutes = time.hour * 60 + time.minute;
     for (final shift in _shifts) {
-      try {
-        final startStr = shift['start_time'] as String;
-        final endStr = shift['end_time'] as String;
-        final format = DateFormat('hh:mm a');
-        final startDt = format.parse(startStr);
-        final endDt = format.parse(endStr);
+      final startDt = TimeUtils.parseShiftTime(shift['start_time']);
+      final endDt = TimeUtils.parseShiftTime(shift['end_time']);
+
+      if (startDt != null && endDt != null) {
         final startMinutes = startDt.hour * 60 + startDt.minute;
         final endMinutes = endDt.hour * 60 + endDt.minute;
+        final minutes = time.hour * 60 + time.minute;
 
         if (startMinutes < endMinutes) {
           if (minutes >= startMinutes && minutes < endMinutes) {
@@ -967,8 +987,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
             return shift;
           }
         }
-      } catch (e) {
-        debugPrint('Error parsing shift for lookup: $e');
       }
     }
     return <String, dynamic>{};
@@ -1012,7 +1030,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   }
 
   void _stopTimerAndMarkAbsent() async {
-    final endTime = DateTime.now();
+    final endTime = TimeUtils.nowUtc();
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1043,29 +1061,41 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       _isTimerRunning = false;
       _uiUpdateTimer?.cancel();
 
-      // 2. Add production log with remark
-      final logId = const uuid.Uuid().v4();
+      // 2. Finish the log via LogService (let backend handle end_time)
       final remark = 'left factory after starting work';
-
-      final log = ProductionLog(
-        id: logId,
-        employeeId: widget.employee.id,
-        machineId: _selectedMachine?.id ?? 'N/A',
-        itemId: _selectedItem?.id ?? 'N/A',
-        operation: _selectedOperation ?? 'N/A',
-        quantity: 0,
-        startTime: _startTime,
-        endTime: endTime,
-        timestamp: endTime,
-        latitude: _currentPosition?.latitude ?? 0.0,
-        longitude: _currentPosition?.longitude ?? 0.0,
-        shiftName: _selectedShift ?? 'N/A',
-        performanceDiff: 0,
-        organizationCode: widget.employee.organizationCode,
-        remarks: remark,
-      );
-
-      await LogService().addLog(log);
+      if (_currentLogId != null) {
+        try {
+          await LogService().finishProductionLog(
+            id: _currentLogId!,
+            quantity: 0,
+            performanceDiff: 0,
+            latitude: _currentPosition?.latitude ?? 0.0,
+            longitude: _currentPosition?.longitude ?? 0.0,
+            remarks: remark,
+          );
+        } catch (e) {
+          debugPrint('Error finishing log in markAbsent: $e');
+          // Fallback to client-side log creation if RPC fails
+          final log = ProductionLog(
+            id: _currentLogId!,
+            employeeId: widget.employee.id,
+            machineId: _selectedMachine?.id ?? 'N/A',
+            itemId: _selectedItem?.id ?? 'N/A',
+            operation: _selectedOperation ?? 'N/A',
+            quantity: 0,
+            startTime: _startTime,
+            endTime: endTime,
+            timestamp: endTime,
+            latitude: _currentPosition?.latitude ?? 0.0,
+            longitude: _currentPosition?.longitude ?? 0.0,
+            shiftName: _selectedShift ?? 'N/A',
+            performanceDiff: 0,
+            organizationCode: widget.employee.organizationCode,
+            remarks: remark,
+          );
+          await LogService().addLog(log);
+        }
+      }
 
       // 3. Update Attendance to Absent
       await AttendanceService().updateAttendance(
@@ -1127,7 +1157,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       return;
     }
 
-    final endTime = DateTime.now();
+    final endTime = TimeUtils.nowUtc();
 
     final qtyControllers = <TextEditingController>[];
     final remarksControllers = <TextEditingController>[];
@@ -1545,33 +1575,45 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       // CHECK BOUNDARY BEFORE SAVING
       if (_isInside == false) {
         // Worker is outside, mark absent and cancel registration
-        final logId =
-            (_currentLogId != null && !_currentLogId!.startsWith('log_'))
-            ? _currentLogId!
-            : const uuid.Uuid().v4();
-
         final remark = 'left factory after starting work';
 
-        final log = ProductionLog(
-          id: logId,
-          employeeId: widget.employee.id,
-          machineId: _selectedMachine!.id,
-          itemId: _selectedItem!.id,
-          operation: _selectedOperation!,
-          quantity: 0, // Don't register work
-          startTime: _startTime,
-          endTime: endTime,
-          timestamp: endTime,
-          latitude: position.latitude,
-          longitude: position.longitude,
-          shiftName:
-              _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
-          performanceDiff: 0,
-          organizationCode: widget.employee.organizationCode,
-          remarks: remark,
-        );
-
-        await LogService().addLog(log);
+        if (_currentLogId != null) {
+          try {
+            await LogService().finishProductionLog(
+              id: _currentLogId!,
+              quantity: 0,
+              performanceDiff: 0,
+              latitude: position.latitude,
+              longitude: position.longitude,
+              remarks: remark,
+            );
+          } catch (e) {
+            debugPrint('Error finishing log in boundary check: $e');
+            // Fallback
+            final log = ProductionLog(
+              id: _currentLogId!,
+              employeeId: widget.employee.id,
+              machineId: _selectedMachine!.id,
+              itemId: _selectedItem!.id,
+              operation: _selectedOperation!,
+              quantity: 0,
+              startTime: _startTime,
+              endTime: endTime,
+              timestamp: endTime,
+              latitude: position.latitude,
+              longitude: position.longitude,
+              shiftName:
+                  _selectedShift ??
+                  _getShiftName(
+                    TimeUtils.parseToLocal(_startTime ?? TimeUtils.nowUtc()),
+                  ),
+              performanceDiff: 0,
+              organizationCode: widget.employee.organizationCode,
+              remarks: remark,
+            );
+            await LogService().addLog(log);
+          }
+        }
 
         // Update Attendance to Absent
         await _attendanceService.updateAttendance(
@@ -1626,11 +1668,15 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
         latitude: position.latitude,
         longitude: position.longitude,
         shiftName:
-            _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
+            _selectedShift ??
+            _getShiftName(
+              TimeUtils.parseToLocal(_startTime ?? TimeUtils.nowUtc()),
+            ),
         performanceDiff: performanceDiff,
         organizationCode: widget.employee.organizationCode,
         remarks: remarks.isNotEmpty ? remarks : null,
       );
+      // Ensure we explicitly set is_active to false in the database via the service or RPC
       allLogs.add(baseLog);
 
       // 2. Prepare Extra Logs
@@ -1648,7 +1694,10 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           latitude: position.latitude,
           longitude: position.longitude,
           shiftName:
-              _selectedShift ?? _getShiftName(_startTime ?? DateTime.now()),
+              _selectedShift ??
+              _getShiftName(
+                TimeUtils.parseToLocal(_startTime ?? TimeUtils.nowUtc()),
+              ),
           performanceDiff: 0,
           organizationCode: widget.employee.organizationCode,
           remarks: extraData['remarks'],
@@ -1657,16 +1706,15 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
       }
 
       // 3. Save All Logs Bulk
-      // For the base log, use RPC to let backend handle end_time
+      // For the base log, use LogService to let backend handle end_time
       try {
-        await Supabase.instance.client.rpc(
-          'log_production_end',
-          params: {
-            'p_id': baseLog.id,
-            'p_quantity': baseLog.quantity,
-            'p_remarks': baseLog.remarks,
-            'p_performance_diff': baseLog.performanceDiff,
-          },
+        await LogService().finishProductionLog(
+          id: baseLog.id,
+          quantity: baseLog.quantity,
+          performanceDiff: baseLog.performanceDiff,
+          latitude: baseLog.latitude,
+          longitude: baseLog.longitude,
+          remarks: baseLog.remarks,
         );
 
         // Save extra logs normally (they don't have start/end times usually, just a timestamp)
@@ -1674,7 +1722,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
           await LogService().addLogs(allLogs.sublist(1));
         }
       } catch (e) {
-        debugPrint('Error saving final log via RPC: $e');
+        debugPrint('Error saving final log via finishProductionLog: $e');
         // Fallback to LogService
         await LogService().addLogs(allLogs);
       }
@@ -1686,7 +1734,7 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
               .from('work_assignments')
               .update({
                 'status': 'completed',
-                'updated_at': DateTime.now().toUtc().toIso8601String(),
+                // updated_at handled by DB
               })
               .eq('id', _activeAssignmentId!);
         } catch (e) {
@@ -1813,63 +1861,51 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
   String _getShiftTimeLeft() {
     if (_selectedShift == null) return '';
     try {
-      final now = DateTime.now();
+      final now = TimeUtils.nowIst();
       final shift = _shifts.firstWhere((s) => s['name'] == _selectedShift);
-      final startStr = shift['start_time'] as String;
-      final endStr = shift['end_time'] as String;
-      final format = DateFormat('hh:mm a');
-      final startDt = format.parse(startStr);
-      final endDt = format.parse(endStr);
+      final startDt = TimeUtils.parseShiftTime(shift['start_time']);
+      final endDt = TimeUtils.parseShiftTime(shift['end_time']);
 
-      DateTime shiftStart = DateTime(
+      if (startDt == null || endDt == null) return '';
+
+      DateTime shiftStartToday = DateTime(
         now.year,
         now.month,
         now.day,
         startDt.hour,
         startDt.minute,
       );
-      DateTime shiftEnd = DateTime(
+      DateTime shiftEndToday = DateTime(
         now.year,
         now.month,
         now.day,
         endDt.hour,
         endDt.minute,
       );
+      DateTime effectiveEnd;
 
       if (endDt.isBefore(startDt)) {
-        // Night shift crossing midnight
-        if (now.hour >= startDt.hour) {
-          // We are in the evening part of the shift
-          shiftEnd = shiftEnd.add(const Duration(days: 1));
-        } else if (now.hour < endDt.hour ||
-            (now.hour == endDt.hour && now.minute < endDt.minute)) {
-          // We are in the morning part of the shift
-          // shiftEnd is already today, which is correct
+        if (!now.isBefore(shiftStartToday)) {
+          effectiveEnd = shiftEndToday.add(const Duration(days: 1));
+        } else if (now.isBefore(shiftEndToday)) {
+          effectiveEnd = shiftEndToday;
         } else {
-          // It's after the shift ended in the morning but before it starts in the evening
-          final shiftStartToday = DateTime(
-            now.year,
-            now.month,
-            now.day,
-            startDt.hour,
-            startDt.minute,
-          );
           final diffToStart = shiftStartToday.difference(now);
           final hours = diffToStart.inHours;
           final minutes = diffToStart.inMinutes % 60;
           return 'Starts in $hours hrs $minutes mins';
         }
       } else {
-        // Regular day shift
-        if (now.isBefore(shiftStart)) {
-          final diff = shiftStart.difference(now);
+        if (now.isBefore(shiftStartToday)) {
+          final diff = shiftStartToday.difference(now);
           final hours = diff.inHours;
           final minutes = diff.inMinutes % 60;
           return 'Starts in $hours hrs $minutes mins';
         }
+        effectiveEnd = shiftEndToday;
       }
 
-      final diff = shiftEnd.difference(now);
+      final diff = effectiveEnd.difference(now);
       if (diff.isNegative) {
         return 'Shift Ended';
       }
@@ -2849,59 +2885,58 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                                               width: 180,
                                               child: Builder(
                                                 builder: (context) {
-                                                  final now = DateTime.now();
+                                                  final now =
+                                                      TimeUtils.nowIst();
                                                   final shift =
                                                       _findShiftByTime(now);
                                                   double progress = 0.0;
                                                   if (shift.isNotEmpty) {
                                                     try {
-                                                      final format = DateFormat(
-                                                        'hh:mm a',
-                                                      );
-                                                      final startDt = format
-                                                          .parse(
+                                                      final startDt =
+                                                          TimeUtils.parseShiftTime(
                                                             shift['start_time'],
                                                           );
-                                                      final endDt = format
-                                                          .parse(
+                                                      final endDt =
+                                                          TimeUtils.parseShiftTime(
                                                             shift['end_time'],
                                                           );
 
-                                                      final startMinutes =
-                                                          startDt.hour * 60 +
-                                                          startDt.minute;
-                                                      var endMinutes =
-                                                          endDt.hour * 60 +
-                                                          endDt.minute;
-                                                      final nowMinutes =
-                                                          now.hour * 60 +
-                                                          now.minute;
+                                                      if (startDt != null &&
+                                                          endDt != null) {
+                                                        final startMinutes =
+                                                            startDt.hour * 60 +
+                                                            startDt.minute;
+                                                        var endMinutes =
+                                                            endDt.hour * 60 +
+                                                            endDt.minute;
+                                                        final nowMinutes =
+                                                            now.hour * 60 +
+                                                            now.minute;
 
-                                                      if (endMinutes <
-                                                          startMinutes) {
-                                                        // Crosses midnight
-                                                        endMinutes += 24 * 60;
+                                                        if (endMinutes <
+                                                            startMinutes) {
+                                                          // Crosses midnight
+                                                          endMinutes += 24 * 60;
+                                                        }
+
+                                                        var currentMinutes =
+                                                            nowMinutes;
+                                                        if (currentMinutes <
+                                                                startMinutes &&
+                                                            endMinutes >
+                                                                24 * 60) {
+                                                          currentMinutes +=
+                                                              24 * 60;
+                                                        }
+
+                                                        progress =
+                                                            (currentMinutes -
+                                                                startMinutes) /
+                                                            (endMinutes -
+                                                                startMinutes);
+                                                        progress = progress
+                                                            .clamp(0.0, 1.0);
                                                       }
-
-                                                      var currentMinutes =
-                                                          nowMinutes;
-                                                      if (currentMinutes <
-                                                              startMinutes &&
-                                                          endMinutes >
-                                                              24 * 60) {
-                                                        currentMinutes +=
-                                                            24 * 60;
-                                                      }
-
-                                                      progress =
-                                                          (currentMinutes -
-                                                              startMinutes) /
-                                                          (endMinutes -
-                                                              startMinutes);
-                                                      progress = progress.clamp(
-                                                        0.0,
-                                                        1.0,
-                                                      );
                                                     } catch (e) {
                                                       progress = 0.5;
                                                     }
@@ -2996,58 +3031,60 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
                                                 const SizedBox(width: 8),
                                                 Builder(
                                                   builder: (context) {
-                                                    final now = DateTime.now();
+                                                    final now =
+                                                        TimeUtils.nowIst();
                                                     final shift =
                                                         _findShiftByTime(now);
                                                     String progressText =
                                                         'Target Progress: 70%';
                                                     if (shift.isNotEmpty) {
                                                       try {
-                                                        final format =
-                                                            DateFormat(
-                                                              'hh:mm a',
-                                                            );
-                                                        final startDt = format
-                                                            .parse(
+                                                        final startDt =
+                                                            TimeUtils.parseShiftTime(
                                                               shift['start_time'],
                                                             );
-                                                        final endDt = format
-                                                            .parse(
+                                                        final endDt =
+                                                            TimeUtils.parseShiftTime(
                                                               shift['end_time'],
                                                             );
 
-                                                        final startMinutes =
-                                                            startDt.hour * 60 +
-                                                            startDt.minute;
-                                                        var endMinutes =
-                                                            endDt.hour * 60 +
-                                                            endDt.minute;
-                                                        final nowMinutes =
-                                                            now.hour * 60 +
-                                                            now.minute;
+                                                        if (startDt != null &&
+                                                            endDt != null) {
+                                                          final startMinutes =
+                                                              startDt.hour *
+                                                                  60 +
+                                                              startDt.minute;
+                                                          var endMinutes =
+                                                              endDt.hour * 60 +
+                                                              endDt.minute;
+                                                          final nowMinutes =
+                                                              now.hour * 60 +
+                                                              now.minute;
 
-                                                        if (endMinutes <
-                                                            startMinutes) {
-                                                          endMinutes += 24 * 60;
+                                                          if (endMinutes <
+                                                              startMinutes) {
+                                                            endMinutes +=
+                                                                24 * 60;
+                                                          }
+
+                                                          var currentMinutes =
+                                                              nowMinutes;
+                                                          if (currentMinutes <
+                                                                  startMinutes &&
+                                                              endMinutes >
+                                                                  24 * 60) {
+                                                            currentMinutes +=
+                                                                24 * 60;
+                                                          }
+
+                                                          final progress =
+                                                              (currentMinutes -
+                                                                  startMinutes) /
+                                                              (endMinutes -
+                                                                  startMinutes);
+                                                          progressText =
+                                                              'Shift Progress: ${(progress.clamp(0.0, 1.0) * 100).toInt()}%';
                                                         }
-
-                                                        var currentMinutes =
-                                                            nowMinutes;
-                                                        if (currentMinutes <
-                                                                startMinutes &&
-                                                            endMinutes >
-                                                                24 * 60) {
-                                                          currentMinutes +=
-                                                              24 * 60;
-                                                        }
-
-                                                        final progress =
-                                                            (currentMinutes -
-                                                                startMinutes) /
-                                                            (endMinutes -
-                                                                startMinutes);
-                                                        progressText =
-                                                            'Shift Progress: ${(progress.clamp(0.0, 1.0) * 100).toInt()}%';
                                                       } catch (_) {}
                                                     }
                                                     return Text(

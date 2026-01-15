@@ -8,6 +8,7 @@ import 'package:ota_update/ota_update.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../utils/time_utils.dart';
 
 class UpdateService {
   // Actual GitHub username and repository name
@@ -22,7 +23,7 @@ class UpdateService {
       // Clean appType to ensure no leading/trailing spaces
       final cleanAppType = appType.trim().toLowerCase();
 
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final timestamp = TimeUtils.nowUtc().millisecondsSinceEpoch;
       // Use the specific path structure: apps/[appType]/version.json
       String versionUrl =
           'https://raw.githubusercontent.com/$_repoOwner/$_repoName/main/apps/$cleanAppType/version.json?t=$timestamp';
@@ -352,7 +353,7 @@ class UpdateService {
       }
 
       // Use a unique filename for each download to avoid issues with old/corrupted files
-      final downloadId = DateTime.now().millisecondsSinceEpoch;
+      final downloadId = TimeUtils.nowUtc().millisecondsSinceEpoch;
       final fileName = 'update_$downloadId.apk';
 
       OtaUpdate()

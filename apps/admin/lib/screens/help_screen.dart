@@ -45,7 +45,7 @@ class HelpScreen extends StatelessWidget {
             ),
             _buildFeatureCard(
               'Organization Settings',
-              'Configure your factory location, geofence radius, and basic information in the Settings tab.',
+              'Configure your factory location, gate activity radius, and basic information in the Settings tab.',
               Icons.business_outlined,
               Colors.orange,
               isDarkMode,
@@ -80,7 +80,7 @@ class HelpScreen extends StatelessWidget {
             ),
             _buildFeatureCard(
               'Security & Logs',
-              'Monitor system logs, including out-of-bounds alerts and login history, to ensure operational security.',
+              'Monitor system logs, including work abandonment alerts and login history, to ensure operational security.',
               Icons.security_outlined,
               Colors.indigo,
               isDarkMode,

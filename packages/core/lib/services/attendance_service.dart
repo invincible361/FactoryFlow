@@ -16,7 +16,7 @@ class AttendanceService {
   ) async {
     try {
       // We need to check both today and yesterday (for night shifts)
-      final now = DateTime.now();
+      final now = TimeUtils.nowIst();
       final todayStr = DateFormat('yyyy-MM-dd').format(now);
       final yesterdayStr = DateFormat(
         'yyyy-MM-dd',
@@ -58,6 +58,24 @@ class AttendanceService {
     }
   }
 
+  DateTime? _parseShiftTime(String? timeStr) {
+    if (timeStr == null || timeStr.isEmpty) return null;
+    final formats = [
+      DateFormat("hh:mm a"),
+      DateFormat("h:mm a"),
+      DateFormat("HH:mm"),
+      DateFormat("H:mm"),
+      DateFormat("HH:mm:ss"),
+    ];
+
+    for (var fmt in formats) {
+      try {
+        return fmt.parse(timeStr.trim());
+      } catch (_) {}
+    }
+    return null;
+  }
+
   Map<String, dynamic> findShiftByTime(
     DateTime time,
     List<Map<String, dynamic>> shifts,
@@ -65,22 +83,22 @@ class AttendanceService {
     final minutes = time.hour * 60 + time.minute;
     for (final shift in shifts) {
       try {
-        final startStr = shift['start_time'] as String;
-        final endStr = shift['end_time'] as String;
-        final format = DateFormat('hh:mm a');
-        final startDt = format.parse(startStr);
-        final endDt = format.parse(endStr);
-        final startMinutes = startDt.hour * 60 + startDt.minute;
-        final endMinutes = endDt.hour * 60 + endDt.minute;
+        final startDt = _parseShiftTime(shift['start_time']);
+        final endDt = _parseShiftTime(shift['end_time']);
 
-        if (startMinutes < endMinutes) {
-          if (minutes >= startMinutes && minutes < endMinutes) {
-            return shift;
-          }
-        } else {
-          // Crosses midnight
-          if (minutes >= startMinutes || minutes < endMinutes) {
-            return shift;
+        if (startDt != null && endDt != null) {
+          final startMinutes = startDt.hour * 60 + startDt.minute;
+          final endMinutes = endDt.hour * 60 + endDt.minute;
+
+          if (startMinutes < endMinutes) {
+            if (minutes >= startMinutes && minutes < endMinutes) {
+              return shift;
+            }
+          } else {
+            // Crosses midnight
+            if (minutes >= startMinutes || minutes < endMinutes) {
+              return shift;
+            }
           }
         }
       } catch (e) {
@@ -101,7 +119,7 @@ class AttendanceService {
     String? overrideStatus,
   }) async {
     try {
-      final now = eventTime ?? DateTime.now();
+      final now = eventTime ?? TimeUtils.nowIst();
 
       // Determine shift name strictly
       String targetShiftName = selectedShiftName ?? '';
@@ -128,11 +146,10 @@ class AttendanceService {
       DateTime attendanceDate = now;
       if (shift.isNotEmpty) {
         try {
-          final format = DateFormat('hh:mm a');
-          final startDt = format.parse(shift['start_time']);
-          final endDt = format.parse(shift['end_time']);
+          final startDt = _parseShiftTime(shift['start_time']);
+          final endDt = _parseShiftTime(shift['end_time']);
 
-          if (endDt.isBefore(startDt)) {
+          if (startDt != null && endDt != null && endDt.isBefore(startDt)) {
             // This is a night shift
             if (now.hour < endDt.hour ||
                 (now.hour == endDt.hour && now.minute < endDt.minute)) {
@@ -150,10 +167,9 @@ class AttendanceService {
         DateTime startRef = startTimeRef;
         if (shift.isNotEmpty) {
           try {
-            final format = DateFormat('hh:mm a');
-            final startDt = format.parse(shift['start_time']);
-            final endDt = format.parse(shift['end_time']);
-            if (endDt.isBefore(startDt)) {
+            final startDt = _parseShiftTime(shift['start_time']);
+            final endDt = _parseShiftTime(shift['end_time']);
+            if (startDt != null && endDt != null && endDt.isBefore(startDt)) {
               if (startRef.hour < endDt.hour ||
                   (startRef.hour == endDt.hour &&
                       startRef.minute < endDt.minute)) {
@@ -223,11 +239,8 @@ class AttendanceService {
           }
 
           if (shouldUpdateCheckIn) {
-            // Re-use check_in RPC which handles ON CONFLICT DO NOTHING
-            // but we already know it exists, so we just update check_in manually if needed
-            // or we could create an attendance_update_check_in RPC.
-            // For now, if we want "Backend as Truth", we use NOW()
-            updateData['check_in'] = DateTime.now().toUtc().toIso8601String();
+            // Use backend now() via direct update or RPC
+            updateData['check_in'] = 'now()';
             updateData['status'] = 'On Time';
           }
 
@@ -239,6 +252,21 @@ class AttendanceService {
               .eq('organization_code', organizationCode);
         }
       } else {
+        // PREVENT DUPLICATE CHECK-OUT:
+        // Check if already checked out for this date
+        final existing = await _supabase
+            .from('attendance')
+            .select('check_out')
+            .eq('worker_id', workerId)
+            .eq('date', dateStr)
+            .eq('organization_code', organizationCode)
+            .maybeSingle();
+
+        if (existing != null && existing['check_out'] != null) {
+          debugPrint('Skipping redundant check-out for $dateStr');
+          return;
+        }
+
         // Use RPC for check-out to let backend handle timestamp
         try {
           await _supabase.rpc(
@@ -251,45 +279,47 @@ class AttendanceService {
           );
         } catch (e) {
           debugPrint('Error during attendance_check_out RPC: $e');
-          // Fallback if RPC fails
-          payload['check_out'] = DateTime.now().toUtc().toIso8601String();
+          // Fallback if RPC fails - use backend now()
+          payload['check_out'] = 'now()';
         }
 
         if (shift.isNotEmpty) {
           try {
-            final format = DateFormat('hh:mm a');
-            final shiftEndDt = format.parse(shift['end_time']);
-            final shiftStartDt = format.parse(shift['start_time']);
+            final shiftEndDt = _parseShiftTime(shift['end_time']);
+            final shiftStartDt = _parseShiftTime(shift['start_time']);
 
-            DateTime shiftEndToday = DateTime(
-              now.year,
-              now.month,
-              now.day,
-              shiftEndDt.hour,
-              shiftEndDt.minute,
-            );
+            if (shiftEndDt != null && shiftStartDt != null) {
+              DateTime shiftEndToday = DateTime(
+                now.year,
+                now.month,
+                now.day,
+                shiftEndDt.hour,
+                shiftEndDt.minute,
+              );
 
-            if (shiftEndDt.isBefore(shiftStartDt)) {
-              if (now.hour >= shiftStartDt.hour || now.hour < shiftEndDt.hour) {
-                if (now.hour >= shiftStartDt.hour) {
-                  shiftEndToday = shiftEndToday.add(const Duration(days: 1));
+              if (shiftEndDt.isBefore(shiftStartDt)) {
+                if (now.hour >= shiftStartDt.hour ||
+                    now.hour < shiftEndDt.hour) {
+                  if (now.hour >= shiftStartDt.hour) {
+                    shiftEndToday = shiftEndToday.add(const Duration(days: 1));
+                  }
                 }
               }
+
+              final diffMinutes = now.difference(shiftEndToday).inMinutes;
+              final isEarly = diffMinutes < -15;
+              final isOvertime = diffMinutes > 15;
+
+              payload['is_early_leave'] = isEarly;
+              payload['is_overtime'] = isOvertime;
+              payload['status'] =
+                  overrideStatus ??
+                  ((isEarly && isOvertime)
+                      ? 'Both'
+                      : (isEarly
+                            ? 'Early Leave'
+                            : (isOvertime ? 'Overtime' : 'On Time')));
             }
-
-            final diffMinutes = now.difference(shiftEndToday).inMinutes;
-            final isEarly = diffMinutes < -15;
-            final isOvertime = diffMinutes > 15;
-
-            payload['is_early_leave'] = isEarly;
-            payload['is_overtime'] = isOvertime;
-            payload['status'] =
-                overrideStatus ??
-                ((isEarly && isOvertime)
-                    ? 'Both'
-                    : (isEarly
-                          ? 'Early Leave'
-                          : (isOvertime ? 'Overtime' : 'On Time')));
           } catch (e) {
             debugPrint('Error calculating shift end for attendance: $e');
             if (overrideStatus != null) {

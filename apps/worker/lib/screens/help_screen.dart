@@ -164,7 +164,7 @@ class _HelpScreenState extends State<HelpScreen> {
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Text(
-                                  'Important: Production cannot be logged if you are outside the geofence area.',
+                                  'Important: Production cannot be logged if you are outside the factory premises.',
                                   style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.bold,

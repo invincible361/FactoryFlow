@@ -40,7 +40,7 @@ class HelpScreen extends StatelessWidget {
             const SizedBox(height: 24),
             _buildFeatureCard(
               'Worker Dashboard',
-              'View real-time status of all workers. Green indicates active, and red for out-of-bounds.',
+              'View real-time status of all workers. Green indicates active, and red for work abandonment.',
               Icons.dashboard_outlined,
               Colors.blue,
               isDarkMode,

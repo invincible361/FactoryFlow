@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
@@ -5,41 +6,47 @@ import 'package:url_launcher/url_launcher.dart';
 import '../utils/app_colors.dart';
 import '../utils/time_utils.dart';
 
-class OutOfBoundsTab extends StatefulWidget {
+class WorkAbandonmentTab extends StatefulWidget {
   final String organizationCode;
   final bool isDarkMode;
-  const OutOfBoundsTab({
+  const WorkAbandonmentTab({
     super.key,
     required this.organizationCode,
     required this.isDarkMode,
   });
 
   @override
-  State<OutOfBoundsTab> createState() => _OutOfBoundsTabState();
+  State<WorkAbandonmentTab> createState() => _WorkAbandonmentTabState();
 }
 
-class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
+class _WorkAbandonmentTabState extends State<WorkAbandonmentTab> {
   final _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _events = [];
   bool _isLoading = true;
   RealtimeChannel? _realtimeChannel;
+  Timer? _liveUpdateTimer;
 
   @override
   void initState() {
     super.initState();
     _fetchEvents();
     _setupRealtime();
+    // Refresh UI every minute to update "so far" durations
+    _liveUpdateTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
     _realtimeChannel?.unsubscribe();
+    _liveUpdateTimer?.cancel();
     super.dispose();
   }
 
   void _setupRealtime() {
     _realtimeChannel = _supabase
-        .channel('out_of_bounds_realtime')
+        .channel('work_abandonment_realtime')
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
@@ -69,9 +76,20 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
         .subscribe();
   }
 
+  String _calculateLiveDuration(DateTime exitTime) {
+    final diff = TimeUtils.nowUtc().difference(exitTime.toUtc());
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inHours > 0) {
+      return '${diff.inHours}h ${diff.inMinutes % 60}m (so far)';
+    }
+    return '${diff.inMinutes} mins (so far)';
+  }
+
   Future<void> _fetchEvents() async {
+    if (!mounted) return;
     setState(() => _isLoading = true);
     try {
+      // Fetch with joined worker details
       final response = await _supabase
           .from('production_outofbounds')
           .select('*, workers:worker_id(name, role)')
@@ -82,31 +100,45 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
         final List<Map<String, dynamic>> allEvents =
             List<Map<String, dynamic>>.from(response);
 
-        // Filter out events where the worker's role is not 'worker'
-        // This ensures admins and supervisors don't appear in the Out of Bounds list
-        final filteredEvents = allEvents.where((event) {
-          final worker = event['workers'] as Map<String, dynamic>?;
-          if (worker != null && worker.containsKey('role')) {
-            return worker['role'] == 'worker';
-          }
-          return true; // Keep if role is unknown for safety, though it should be defined
-        }).toList();
+        // Filter and ensure worker_name is present
+        final processedEvents = allEvents
+            .where((event) {
+              final worker = event['workers'] as Map<String, dynamic>?;
+              // Show if it's a worker or if we can't determine role but have a name
+              if (worker != null) {
+                return worker['role'] == 'worker';
+              }
+              // Fallback: if we have worker_name in the record itself, keep it
+              return event['worker_name'] != null;
+            })
+            .map((event) {
+              // Ensure worker_name is populated from join if possible
+              if (event['worker_name'] == null ||
+                  event['worker_name'].toString().isEmpty) {
+                final worker = event['workers'] as Map<String, dynamic>?;
+                if (worker != null) {
+                  event['worker_name'] = worker['name'];
+                }
+              }
+              return event;
+            })
+            .toList();
 
         setState(() {
-          _events = filteredEvents;
+          _events = processedEvents;
           _isLoading = false;
         });
       }
     } catch (e) {
-      debugPrint('Fetch events error: $e');
-      // Fallback without join
+      debugPrint('Error fetching abandonment events: $e');
+      // Simple fallback
       try {
         final simpleResponse = await _supabase
             .from('production_outofbounds')
             .select('*')
             .eq('organization_code', widget.organizationCode)
             .order('exit_time', ascending: false);
-        
+
         if (mounted) {
           setState(() {
             _events = List<Map<String, dynamic>>.from(simpleResponse);
@@ -161,7 +193,7 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
               ),
               const SizedBox(height: 24),
               Text(
-                'No "Out of Bounds" events',
+                'No work abandonment alerts recorded',
                 style: TextStyle(
                   color: textColor,
                   fontSize: 18,
@@ -170,7 +202,7 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
               ),
               const SizedBox(height: 8),
               Text(
-                'All workers are currently within boundaries.',
+                'No active abandonment alerts.',
                 style: TextStyle(color: subTextColor),
               ),
               const SizedBox(height: 32),
@@ -216,13 +248,14 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
           final exitTimeStr = event['exit_time'] ?? event['created_at'];
           final exitTime = exitTimeStr != null
               ? TimeUtils.parseToLocal(exitTimeStr.toString())
-              : DateTime.now();
+              : TimeUtils.nowIst();
 
           final entryTimeStr = event['entry_time'] as String?;
           final entryTime = entryTimeStr != null
               ? TimeUtils.parseToLocal(entryTimeStr)
               : null;
-          final duration = event['duration_minutes'] ?? 'Still Out';
+          final duration =
+              event['duration_minutes'] ?? _calculateLiveDuration(exitTime);
           final isStillOut = entryTime == null;
 
           return Container(
@@ -362,6 +395,31 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
                                       ),
                                     ],
                                   ),
+                                  if (!isStillOut &&
+                                      event['entry_latitude'] != null &&
+                                      event['entry_longitude'] != null) ...[
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.location_on,
+                                          size: 14,
+                                          color: subTextColor,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Expanded(
+                                          child: Text(
+                                            'Return: ${event['entry_latitude']?.toStringAsFixed(4)}, ${event['entry_longitude']?.toStringAsFixed(4)}',
+                                            style: TextStyle(
+                                              color: subTextColor,
+                                              fontSize: 12,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                   const SizedBox(height: 8),
                                   Container(
                                     padding: const EdgeInsets.symmetric(
@@ -378,8 +436,8 @@ class _OutOfBoundsTabState extends State<OutOfBoundsTab> {
                                     ),
                                     child: Text(
                                       isStillOut
-                                          ? 'STILL OUT'
-                                          : 'DURATION: $duration',
+                                          ? 'STILL OUT ($duration)'
+                                          : 'TOTAL DURATION: $duration',
                                       style: TextStyle(
                                         color: isStillOut
                                             ? Colors.redAccent

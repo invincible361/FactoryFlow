@@ -47,5 +47,16 @@
 	<true/>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Biometric authentication for secure login</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>We need your location to track factory entry/exit for production logs even when the app is closed.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>We need your location to verify you are inside the factory.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>We need your location to track factory entry/exit for production logs even when the app is closed.</string>
 </dict>
 </plist>

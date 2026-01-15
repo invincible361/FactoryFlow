@@ -70,6 +70,7 @@ class _LoginScreenState extends State<LoginScreen> {
         'device_name': deviceName,
         'os_version': osVersion,
         'organization_code': organizationCode,
+        'login_time': TimeUtils.nowUtc().toIso8601String(),
       };
       try {
         await Supabase.instance.client.from('owner_logs').insert(payload);
@@ -458,7 +459,7 @@ class _FactoryRegistrationPageState extends State<FactoryRegistrationPage> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Radius defines the geofence around your factory in meters. '
+                  'Radius defines the gate activity area around your factory in meters. '
                   'Set coordinates at the center of your location using "Use Current Location". '
                   'For example, 200 m covers a small campus; 500 m covers a larger area.',
                   style: TextStyle(fontSize: 12, color: Colors.black54),

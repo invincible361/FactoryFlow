@@ -54,8 +54,7 @@ class _NavigationHomeScreenState extends State<NavigationHomeScreen> {
     // Check location immediately
     _performLocationCheck();
 
-    // Check location every 10 seconds as requested
-    _locationTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+    _locationTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
       if (mounted) {
         _performLocationCheck();
       }
@@ -89,6 +88,10 @@ class _NavigationHomeScreenState extends State<NavigationHomeScreen> {
       'worker_name',
       widget.employee.name,
     ); // Store name for background tasks
+    await prefs.setString(
+      'worker_role',
+      widget.employee.role ?? 'worker',
+    ); // Store role to filter abandonment checks
     if (widget.employee.organizationCode != null) {
       await prefs.setString('org_code', widget.employee.organizationCode!);
 
@@ -112,6 +115,10 @@ class _NavigationHomeScreenState extends State<NavigationHomeScreen> {
             );
             await prefs.setDouble(
               'factory_radius',
+              (org['radius_meters'] ?? 500.0) * 1.0,
+            );
+            await prefs.setDouble(
+              'geofence_radius',
               (org['radius_meters'] ?? 500.0) * 1.0,
             );
           }

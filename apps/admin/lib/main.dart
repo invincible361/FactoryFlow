@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:factoryflow_core/factoryflow_core.dart';
+import 'package:factoryflow_core/services/version_service.dart';
+import 'package:factoryflow_core/ui_components/update_dialog.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
@@ -8,6 +10,7 @@ void main() async {
     WidgetsFlutterBinding.ensureInitialized();
     await SupabaseService.initialize();
     await NotificationService.initialize();
+    await TimeUtils.syncServerTime();
     runApp(const AdminApp());
   } catch (e) {
     debugPrint('Initialization error: $e');
@@ -70,7 +73,7 @@ class _AdminAppState extends State<AdminApp> {
         shouldBeDark = true;
         break;
       case AppThemeMode.auto:
-        final hour = DateTime.now().hour;
+        final hour = TimeUtils.nowIst().hour;
         shouldBeDark = !(hour >= 6 && hour < 18);
         break;
     }
@@ -93,11 +96,6 @@ class _AdminAppState extends State<AdminApp> {
 
   @override
   Widget build(BuildContext context) {
-    // Check for updates on startup
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService.checkForUpdates(context, 'admin');
-    });
-
     return ThemeController(
       themeMode: _themeMode,
       isDarkMode: _isDarkMode,
@@ -106,7 +104,7 @@ class _AdminAppState extends State<AdminApp> {
         debugShowCheckedModeBanner: false,
         title: 'Admin App',
         theme: _isDarkMode ? _darkTheme : _lightTheme,
-        home: const LoginScreen(),
+        home: const Initializer(),
       ),
     );
   }
@@ -136,4 +134,44 @@ class _AdminAppState extends State<AdminApp> {
         cardColor: const Color(0xFF21222D),
         useMaterial3: true,
       );
+}
+
+class Initializer extends StatefulWidget {
+  const Initializer({super.key});
+
+  @override
+  State<Initializer> createState() => _InitializerState();
+}
+
+class _InitializerState extends State<Initializer> {
+  @override
+  void initState() {
+    super.initState();
+    _checkForUpdate();
+  }
+
+  Future<void> _checkForUpdate() async {
+    // Wait a bit for the app to settle
+    await Future.delayed(const Duration(seconds: 2));
+    if (!mounted) return;
+
+    final updateInfo = await VersionService.checkForUpdate('admin');
+    if (updateInfo != null && mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: !updateInfo['isForceUpdate'],
+        builder: (context) => UpdateDialog(
+          latestVersion: updateInfo['latestVersion'],
+          apkUrl: updateInfo['apkUrl'],
+          isForceUpdate: updateInfo['isForceUpdate'],
+          releaseNotes: updateInfo['releaseNotes'],
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const LoginScreen();
+  }
 }

@@ -1,0 +1,7 @@
+CREATE OR REPLACE FUNCTION public.get_server_time()
+RETURNS TIMESTAMPTZ
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT NOW();
+$$;

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
+import '../utils/time_utils.dart';
 import '../models/production_log.dart';
 
 class LogService {
@@ -54,6 +56,7 @@ class LogService {
           'is_verified': log.createdBySupervisor == true,
           'created_by_supervisor': log.createdBySupervisor,
           'supervisor_id': log.supervisorId,
+          'is_active': log.endTime == null,
         };
 
         if (log.startTime != null) {
@@ -78,6 +81,108 @@ class LogService {
 
   Future<void> addLog(ProductionLog log) async {
     await addLogs([log]);
+  }
+
+  Future<void> startProductionLog(ProductionLog log) async {
+    final String idToUse = _isValidUuid(log.id) ? log.id : const Uuid().v4();
+    bool rpcOk = false;
+    try {
+      await Supabase.instance.client.rpc(
+        'log_production_start',
+        params: {
+          'p_id': idToUse,
+          'p_worker_id': log.employeeId,
+          'p_machine_id': log.machineId,
+          'p_item_id': log.itemId,
+          'p_operation': log.operation,
+          'p_lat': log.latitude,
+          'p_lng': log.longitude,
+          'p_org_code': log.organizationCode,
+          'p_shift_name': log.shiftName ?? 'General',
+        },
+      );
+      rpcOk = true;
+    } catch (e) {
+      debugPrint('Error starting production log via RPC, will fallback: $e');
+    }
+
+    final payload = {
+      'id': idToUse,
+      'worker_id': log.employeeId,
+      'machine_id': log.machineId,
+      'item_id': log.itemId,
+      'operation': log.operation,
+      'quantity': log.quantity,
+      'latitude': log.latitude,
+      'longitude': log.longitude,
+      'shift_name': log.shiftName ?? 'General',
+      'organization_code': log.organizationCode,
+      'is_active': true,
+      if (!rpcOk) 'start_time': TimeUtils.nowUtc().toIso8601String(),
+      if (!rpcOk) 'timestamp': TimeUtils.nowUtc().toIso8601String(),
+    };
+    try {
+      await Supabase.instance.client.from('production_logs').upsert(payload);
+    } catch (e) {
+      debugPrint('Error upserting production log (fallback): $e');
+      rethrow;
+    }
+
+    _logs.insert(0, log);
+  }
+
+  Future<void> finishProductionLog({
+    required String id,
+    required int quantity,
+    required int performanceDiff,
+    required double latitude,
+    required double longitude,
+    String? remarks,
+  }) async {
+    final String idToUse = _isValidUuid(id) ? id : const Uuid().v4();
+    try {
+      await Supabase.instance.client.rpc(
+        'log_production_end',
+        params: {
+          'p_id': idToUse,
+          'p_quantity': quantity,
+          'p_performance_diff': performanceDiff,
+          'p_remarks': remarks,
+        },
+      );
+      try {
+        await Supabase.instance.client
+            .from('production_logs')
+            .update({
+              'is_active': false,
+              'end_time': TimeUtils.nowUtc().toIso8601String(),
+              'remarks': remarks,
+            })
+            .eq('id', idToUse);
+      } catch (_) {}
+      final index = _logs.indexWhere((l) => l.id == id);
+      if (index != -1) {
+        final oldLog = _logs[index];
+        _logs[index] = ProductionLog(
+          id: idToUse,
+          employeeId: oldLog.employeeId,
+          machineId: oldLog.machineId,
+          itemId: oldLog.itemId,
+          operation: oldLog.operation,
+          quantity: quantity,
+          latitude: latitude,
+          longitude: longitude,
+          shiftName: oldLog.shiftName,
+          performanceDiff: performanceDiff,
+          organizationCode: oldLog.organizationCode,
+          remarks: remarks ?? oldLog.remarks,
+          endTime: TimeUtils.nowUtc(),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error finishing production log: $e');
+      rethrow;
+    }
   }
 
   Future<List<Map<String, dynamic>>> fetchLogsForOrganization({
@@ -142,5 +247,12 @@ class LogService {
         rethrow;
       }
     }
+  }
+
+  bool _isValidUuid(String s) {
+    final r = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+    );
+    return r.hasMatch(s);
   }
 }

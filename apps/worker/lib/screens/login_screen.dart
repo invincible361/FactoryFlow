@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:factoryflow_core/factoryflow_core.dart';
+import 'package:factoryflow_core/services/version_service.dart';
+import 'package:factoryflow_core/ui_components/update_dialog.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:uuid/uuid.dart';
 import '../ui_components/navigation_home_screen.dart';
@@ -24,8 +26,24 @@ class _LoginScreenState extends State<LoginScreen> {
     NotificationService.requestPermissions();
     // Check for updates on startup
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService.checkForUpdates(context, 'worker');
+      _checkForUpdate();
     });
+  }
+
+  Future<void> _checkForUpdate() async {
+    final updateInfo = await VersionService.checkForUpdate('worker');
+    if (updateInfo != null && mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: !updateInfo['isForceUpdate'],
+        builder: (context) => UpdateDialog(
+          latestVersion: updateInfo['latestVersion'],
+          apkUrl: updateInfo['apkUrl'],
+          isForceUpdate: updateInfo['isForceUpdate'],
+          releaseNotes: updateInfo['releaseNotes'],
+        ),
+      );
+    }
   }
 
   Future<void> _fetchAppVersion() async {
@@ -145,6 +163,17 @@ class _LoginScreenState extends State<LoginScreen> {
       // Force an entry log on login if inside
       if (isInside) {
         try {
+          // 1. Sync to gate_events (for attendance and last_boundary_state)
+          await Supabase.instance.client.from('gate_events').insert({
+            'worker_id': employee.id,
+            'organization_code': employee.organizationCode,
+            'event_type': 'entry',
+            'latitude': position.latitude,
+            'longitude': position.longitude,
+            // 'timestamp' omitted to use server-side now()
+          });
+
+          // 2. Sync to worker_boundary_events (legacy compatibility)
           await Supabase.instance.client.from('worker_boundary_events').insert({
             'id': const Uuid().v4(),
             'worker_id': employee.id,
@@ -152,12 +181,10 @@ class _LoginScreenState extends State<LoginScreen> {
             'type': 'entry',
             'latitude': position.latitude,
             'longitude': position.longitude,
-            'entry_latitude': position.latitude,
-            'entry_longitude': position.longitude,
-            'created_at': DateTime.now().toUtc().toIso8601String(),
+            'is_inside': true,
           });
           final prefs = await SharedPreferences.getInstance();
-          await prefs.setBool('was_inside', true);
+          await prefs.setBool('is_inside', true);
         } catch (e) {
           debugPrint('Error logging initial entry: $e');
         }

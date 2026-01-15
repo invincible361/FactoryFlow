@@ -49,6 +49,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   double? _orgLat;
   double? _orgLng;
   double? _orgRadius;
+  final Map<String, Map<String, dynamic>> _workerActivity = {};
 
   @override
   void initState() {
@@ -89,19 +90,25 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             debugPrint('Realtime: production_logs change received');
             _fetchLogs();
             _updateStatus();
+            final wid = _extractWorkerIdFromPayload(payload);
+            if (wid != null) {
+              _refreshWorkerStatusFor(wid);
+            } else {
+              setState(() {});
+            }
           },
         )
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
-          table: 'worker_boundary_events',
+          table: 'workers',
           filter: PostgresChangeFilter(
             type: PostgresChangeFilterType.eq,
             column: 'organization_code',
             value: widget.organizationCode,
           ),
           callback: (payload) {
-            debugPrint('Realtime: worker_boundary_events change received');
+            debugPrint('Realtime: workers change received');
             _updateWorkerLocations();
             _updateStatus();
           },
@@ -135,7 +142,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
 
     // 1. Update Shift
     try {
-      final now = DateTime.now();
+      final now = TimeUtils.nowIst();
       final shiftsResp = await _supabase
           .from('shifts')
           .select()
@@ -312,19 +319,16 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
 
   Future<void> _updateWorkerLocations() async {
     try {
-      final boundaryEvents = await _supabase
-          .from('worker_boundary_events')
-          .select('worker_id, type')
+      final workers = await _supabase
+          .from('workers')
+          .select('worker_id, last_boundary_state')
           .eq('organization_code', widget.organizationCode)
-          .order('created_at', ascending: false)
-          .limit(200);
+          .neq('role', 'supervisor');
 
       final Map<String, bool> locations = {};
-      for (var event in (boundaryEvents as List)) {
-        final id = event['worker_id'].toString();
-        if (!locations.containsKey(id)) {
-          locations[id] = event['type'] != 'exit';
-        }
+      for (var w in (workers as List)) {
+        final id = w['worker_id'].toString();
+        locations[id] = w['last_boundary_state'] == 'inside';
       }
 
       if (mounted) {
@@ -436,6 +440,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
         TextCellValue('Operator Name'),
         TextCellValue('In Time'),
         TextCellValue('Out Time'),
+        TextCellValue('Hours Worked'),
         TextCellValue('Machine'),
         TextCellValue('Item'),
         TextCellValue('Operation'),
@@ -446,18 +451,18 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
       ]);
 
       // Handle Date Range based on report type if not manually set
-      DateTime start = _dateRange?.start ?? DateTime.now();
-      DateTime end = _dateRange?.end ?? DateTime.now();
+      DateTime start = _dateRange?.start ?? TimeUtils.nowIst();
+      DateTime end = _dateRange?.end ?? TimeUtils.nowIst();
 
       if (_dateRange == null) {
         if (_reportType == 'Week') {
-          start = DateTime.now().subtract(const Duration(days: 7));
+          start = TimeUtils.nowIst().subtract(const Duration(days: 7));
         } else if (_reportType == 'Month') {
-          start = DateTime.now().subtract(const Duration(days: 30));
+          start = TimeUtils.nowIst().subtract(const Duration(days: 30));
         } else {
-          start = DateTime.now();
+          start = TimeUtils.nowIst();
         }
-        end = DateTime.now();
+        end = TimeUtils.nowIst();
       }
 
       // Fetch attendance records for the selected date range or today
@@ -492,6 +497,9 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             TextCellValue(workerName),
             TextCellValue(TimeUtils.formatTo12Hour(record['check_in'])),
             TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
+            TextCellValue(
+              _formatHoursWorked(record['check_in'], record['check_out']),
+            ),
             TextCellValue('N/A'),
             TextCellValue('N/A'),
             TextCellValue('N/A'),
@@ -509,6 +517,9 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
               TextCellValue(workerName),
               TextCellValue(TimeUtils.formatTo12Hour(record['check_in'])),
               TextCellValue(TimeUtils.formatTo12Hour(record['check_out'])),
+              TextCellValue(
+                _formatHoursWorked(record['check_in'], record['check_out']),
+              ),
               TextCellValue(log['machine_name'] ?? log['machine_id'] ?? 'N/A'),
               TextCellValue(log['item_name'] ?? log['item_id'] ?? 'N/A'),
               TextCellValue(log['operation'] ?? 'N/A'),
@@ -523,7 +534,9 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
 
       final fileBytes = excel.encode();
       if (fileBytes != null) {
-        final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+        final timestamp = DateFormat(
+          'yyyyMMdd_HHmmss',
+        ).format(TimeUtils.nowIst());
         final fileName = 'Supervisor_Efficiency_Report_$timestamp.xlsx';
 
         if (kIsWeb) {
@@ -557,6 +570,296 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
         setState(() => _isExporting = false);
       }
     }
+  }
+
+  String _formatHoursWorked(dynamic checkIn, dynamic checkOut) {
+    if (checkIn == null || checkOut == null) return '--:--';
+    try {
+      final ci = DateTime.parse(checkIn.toString()).toUtc();
+      final co = DateTime.parse(checkOut.toString()).toUtc();
+      final d = co.difference(ci);
+      if (d.isNegative) return '--:--';
+      final h = d.inHours;
+      final m = d.inMinutes.remainder(60);
+      final hh = h.toString().padLeft(2, '0');
+      final mm = m.toString().padLeft(2, '0');
+      return '$hh:$mm';
+    } catch (_) {
+      return '--:--';
+    }
+  }
+
+  Future<void> _downloadAdvancedReport(String reportType) async {
+    setState(() => _isExporting = true);
+    try {
+      DateTime start = _dateRange?.start ?? TimeUtils.nowIst();
+      DateTime end = _dateRange?.end ?? TimeUtils.nowIst();
+
+      if (_dateRange == null) {
+        if (_reportType == 'Week') {
+          start = TimeUtils.nowIst().subtract(const Duration(days: 7));
+        } else if (_reportType == 'Month') {
+          start = TimeUtils.nowIst().subtract(const Duration(days: 30));
+        } else {
+          start = TimeUtils.nowIst();
+        }
+        end = TimeUtils.nowIst();
+      }
+
+      String csvData;
+      try {
+        final response = await _supabase.functions.invoke(
+          'generate-report',
+          body: {
+            'reportType': reportType,
+            'orgCode': widget.organizationCode,
+            'dateStart': DateFormat('yyyy-MM-dd').format(start),
+            'dateEnd': DateFormat('yyyy-MM-dd').format(end),
+          },
+        );
+
+        if (response.status == 200) {
+          csvData = response.data;
+        } else {
+          throw 'Function error ${response.status}';
+        }
+      } catch (e) {
+        debugPrint('Supervisor report function fallback: $e');
+        csvData = await _generateReportLocally(reportType, start, end);
+      }
+
+      final bytes = Uint8List.fromList(csvData.codeUnits);
+      final timestamp = DateFormat('yyyyMMdd').format(TimeUtils.nowIst());
+      final fileName = '${reportType}_$timestamp.csv';
+
+      if (kIsWeb) {
+        await WebDownloadHelper.download(bytes, fileName, mimeType: 'text/csv');
+      } else {
+        final directory = await getTemporaryDirectory();
+        final file = io.File('${directory.path}/$fileName');
+        await file.writeAsBytes(bytes);
+
+        if (mounted) {
+          await share_plus.Share.shareXFiles([
+            share_plus.XFile(file.path),
+          ], text: 'Advanced Report: $reportType');
+        }
+      }
+    } catch (e) {
+      debugPrint('Advanced report error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Report failed: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isExporting = false);
+      }
+    }
+  }
+
+  Future<String> _generateReportLocally(
+    String reportType,
+    DateTime start,
+    DateTime end,
+  ) async {
+    final startStr = DateFormat('yyyy-MM-dd').format(start);
+    final endStr = DateFormat('yyyy-MM-dd').format(end);
+
+    // For timestamptz queries, convert local range to UTC
+    final startOfDay = DateTime(start.year, start.month, start.day);
+    final endOfDay = DateTime(
+      end.year,
+      end.month,
+      end.day,
+    ).add(const Duration(days: 1));
+    final startUtcIso = startOfDay.toUtc().toIso8601String();
+    final endUtcIso = endOfDay.toUtc().toIso8601String();
+
+    List<Map<String, dynamic>> data = [];
+
+    if (reportType == 'daily_worker_summary' || reportType == 'Day') {
+      final response = await _supabase
+          .from('daily_geofence_summaries')
+          .select("*")
+          .eq("organization_code", widget.organizationCode)
+          .gte("date", startStr)
+          .lte("date", endStr);
+      data = List<Map<String, dynamic>>.from(response);
+    } else if (reportType == 'machine_utilization') {
+      // Calculate from production_logs
+      final response = await _supabase
+          .from('production_logs')
+          .select('*, machines(name)')
+          .eq("organization_code", widget.organizationCode)
+          .gte("created_at", startUtcIso)
+          .lt("created_at", endUtcIso);
+
+      final logs = List<Map<String, dynamic>>.from(response);
+      final Map<String, Map<String, dynamic>> agg = {};
+
+      for (var log in logs) {
+        final machineId = log['machine_id'] ?? 'Unknown';
+        final machineName = log['machines']?['name'] ?? machineId;
+        final qty = (log['quantity'] ?? 0) as int;
+        // Simple utilization proxy: count logs and total quantity
+        if (!agg.containsKey(machineId)) {
+          agg[machineId] = {
+            'machine_id': machineId,
+            'machine_name': machineName,
+            'total_logs': 0,
+            'total_quantity': 0,
+            'last_active': log['created_at'],
+          };
+        }
+        agg[machineId]!['total_logs'] =
+            (agg[machineId]!['total_logs'] as int) + 1;
+        agg[machineId]!['total_quantity'] =
+            (agg[machineId]!['total_quantity'] as int) + qty;
+      }
+      data = agg.values.toList();
+    } else if (reportType == 'production_efficiency') {
+      // Calculate from production_logs
+      // Fetch dictionaries to avoid Postgrest relationship join issues
+      final workersResp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final machinesResp = await _supabase
+          .from('machines')
+          .select('machine_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final itemsResp = await _supabase
+          .from('items')
+          .select('item_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final workerNames = {
+        for (final w in List<Map<String, dynamic>>.from(workersResp))
+          w['worker_id'].toString(): (w['name']?.toString() ?? ''),
+      };
+      final machineNames = {
+        for (final m in List<Map<String, dynamic>>.from(machinesResp))
+          m['machine_id'].toString(): (m['name']?.toString() ?? ''),
+      };
+      final itemNames = {
+        for (final i in List<Map<String, dynamic>>.from(itemsResp))
+          i['item_id'].toString(): (i['name']?.toString() ?? ''),
+      };
+
+      final response = await _supabase
+          .from('production_logs')
+          .select(
+            'id, worker_id, machine_id, item_id, operation, quantity, performance_diff, remarks, created_at',
+          )
+          .eq("organization_code", widget.organizationCode)
+          .gte("created_at", startUtcIso)
+          .lt("created_at", endUtcIso);
+
+      final logs = List<Map<String, dynamic>>.from(response);
+      data = logs.map((log) {
+        return {
+          'log_id': log['id'],
+          'date': log['created_at'],
+          'worker_name':
+              workerNames[log['worker_id']?.toString()] ?? log['worker_id'],
+          'machine_name':
+              machineNames[log['machine_id']?.toString()] ?? log['machine_id'],
+          'item_name': itemNames[log['item_id']?.toString()] ?? log['item_id'],
+          'operation': log['operation'],
+          'quantity': log['quantity'],
+          'performance_diff': log['performance_diff'],
+          'remarks': log['remarks'],
+        };
+      }).toList();
+    } else if (reportType == 'exception_report') {
+      // Exceptions: Low performance (negative diff) or specific remarks
+      final workersResp = await _supabase
+          .from('workers')
+          .select('worker_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final machinesResp = await _supabase
+          .from('machines')
+          .select('machine_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final itemsResp = await _supabase
+          .from('items')
+          .select('item_id, name')
+          .eq('organization_code', widget.organizationCode);
+      final workerNames = {
+        for (final w in List<Map<String, dynamic>>.from(workersResp))
+          w['worker_id'].toString(): (w['name']?.toString() ?? ''),
+      };
+      final machineNames = {
+        for (final m in List<Map<String, dynamic>>.from(machinesResp))
+          m['machine_id'].toString(): (m['name']?.toString() ?? ''),
+      };
+      final itemNames = {
+        for (final i in List<Map<String, dynamic>>.from(itemsResp))
+          i['item_id'].toString(): (i['name']?.toString() ?? ''),
+      };
+
+      final response = await _supabase
+          .from('production_logs')
+          .select(
+            'id, worker_id, machine_id, item_id, quantity, performance_diff, remarks, created_at',
+          )
+          .eq("organization_code", widget.organizationCode)
+          .gte("created_at", startUtcIso)
+          .lt("created_at", endUtcIso)
+          .lt('performance_diff', 0)
+          .order('created_at');
+
+      final logs = List<Map<String, dynamic>>.from(response);
+      data = logs.map((log) {
+        return {
+          'log_id': log['id'],
+          'date': log['created_at'],
+          'worker_name':
+              workerNames[log['worker_id']?.toString()] ?? log['worker_id'],
+          'machine_name':
+              machineNames[log['machine_id']?.toString()] ?? log['machine_id'],
+          'item_name': itemNames[log['item_id']?.toString()] ?? log['item_id'],
+          'target_quantity':
+              (log['quantity'] ?? 0) - (log['performance_diff'] ?? 0),
+          'actual_quantity': log['quantity'],
+          'performance_diff': log['performance_diff'],
+          'remarks': log['remarks'] ?? 'Underperformance',
+        };
+      }).toList();
+    } else {
+      // Default fallback to daily_worker_summary if type is unknown
+      final response = await _supabase
+          .from('daily_geofence_summaries')
+          .select("*")
+          .eq("organization_code", widget.organizationCode)
+          .gte("date", startStr)
+          .lte("date", endStr);
+      data = List<Map<String, dynamic>>.from(response);
+    }
+
+    if (data.isEmpty) {
+      throw Exception("No data found for this period");
+    }
+
+    // Generate CSV
+    final headers = data[0].keys.toList();
+    final csvContent = [
+      headers.join(","),
+      ...data.map(
+        (row) => headers
+            .map((header) {
+              final val = row[header];
+              if (val == null) return "";
+              return val is String
+                  ? '"${val.replaceAll('"', '""')}"'
+                  : val.toString();
+            })
+            .join(","),
+      ),
+    ].join("\n");
+
+    return csvContent;
   }
 
   Future<void> _showWorkerDetailsDialog(
@@ -1028,7 +1331,17 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                               supervisorId: widget.supervisorName,
                             );
 
-                            await LogService().addLog(log);
+                            // Use LogService to let backend handle start_time and timestamp
+                            await LogService().startProductionLog(log);
+                            // And immediately finish it since it's a manual log of completed work
+                            await LogService().finishProductionLog(
+                              id: log.id,
+                              quantity: log.quantity,
+                              performanceDiff: log.performanceDiff,
+                              latitude: log.latitude,
+                              longitude: log.longitude,
+                              remarks: log.remarks,
+                            );
 
                             if (!context.mounted) return;
                             Navigator.pop(ctx);
@@ -1300,20 +1613,18 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
   Future<void> _fetchLogs() async {
     setState(() => _loading = true);
     try {
+      // Show all unverified logs regardless of date to ensure nothing is missed
+      // even if logs are delayed or late.
       var builder = _supabase
           .from('production_logs')
           .select('*, workers:worker_id(name)')
           .eq('organization_code', widget.organizationCode)
-          .or('is_verified.is.false,is_verified.is.null')
-          .gt('quantity', 0);
+          .or('is_verified.is.false,is_verified.is.null');
+
       if (_selectedWorkerId != null) {
         builder = builder.eq('worker_id', _selectedWorkerId!);
       }
-      if (_dateRange != null) {
-        builder = builder
-            .gte('created_at', _dateRange!.start.toIso8601String())
-            .lte('created_at', _dateRange!.end.toIso8601String());
-      }
+
       final response = await builder.order('created_at', ascending: false);
 
       setState(() {
@@ -1327,16 +1638,11 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             .from('production_logs')
             .select()
             .eq('organization_code', widget.organizationCode)
-            .or('is_verified.is.false,is_verified.is.null')
-            .gt('quantity', 0);
+            .or('is_verified.is.false,is_verified.is.null');
         if (_selectedWorkerId != null) {
           builder = builder.eq('worker_id', _selectedWorkerId!);
         }
-        if (_dateRange != null) {
-          builder = builder
-              .gte('created_at', _dateRange!.start.toIso8601String())
-              .lte('created_at', _dateRange!.end.toIso8601String());
-        }
+
         final response = await builder.order('created_at', ascending: false);
         setState(() {
           _logs = List<Map<String, dynamic>>.from(response);
@@ -1349,15 +1655,11 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
               .from('production_logs')
               .select()
               .eq('organization_code', widget.organizationCode)
-              .gt('quantity', 0);
+              .or('is_verified.is.false,is_verified.is.null');
           if (_selectedWorkerId != null) {
             builder = builder.eq('worker_id', _selectedWorkerId!);
           }
-          if (_dateRange != null) {
-            builder = builder
-                .gte('created_at', _dateRange!.start.toIso8601String())
-                .lte('created_at', _dateRange!.end.toIso8601String());
-          }
+
           final response = await builder.order('created_at', ascending: false);
           setState(() {
             _logs = List<Map<String, dynamic>>.from(response);
@@ -1603,7 +1905,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
           ),
           _metricTile(
             'Current Time',
-            DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now()),
+            DateFormat('dd MMM yyyy, hh:mm a').format(TimeUtils.nowIst()),
             Colors.teal.shade50,
             Icons.access_time,
           ),
@@ -1716,10 +2018,10 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                     itemCount: filteredWorkers.length,
                     itemBuilder: (context, index) {
                       final worker = filteredWorkers[index];
+                      final wid = worker['worker_id'].toString();
                       return FutureBuilder<Map<String, dynamic>?>(
-                        future: _getWorkerStatus(
-                          worker['worker_id'].toString(),
-                        ),
+                        future: _getWorkerStatus(wid),
+                        initialData: _workerActivity[wid],
                         builder: (context, snapshot) {
                           final isLoading =
                               snapshot.connectionState ==
@@ -1797,16 +2099,20 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                                   Text(
                                     isInside
                                         ? 'Inside Factory'
-                                        : 'Outside Factory',
+                                        : 'OUTSIDE FACTORY',
                                     style: TextStyle(
                                       color: isInside
                                           ? (isDark
                                                 ? Colors.green[300]
                                                 : Colors.green)
                                           : (isDark
-                                                ? Colors.red[300]
-                                                : Colors.red),
-                                      fontSize: 12,
+                                                ? Colors.red[400]
+                                                : Colors.red[700]),
+                                      fontSize: 13,
+                                      fontWeight: isInside
+                                          ? FontWeight.normal
+                                          : FontWeight.w900,
+                                      letterSpacing: isInside ? 0 : 0.5,
                                     ),
                                   ),
                                   if (isLoading)
@@ -1925,101 +2231,92 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     );
   }
 
+  Future<void> _refreshWorkerStatusFor(String workerId) async {
+    try {
+      final status = await _getWorkerStatus(workerId);
+      if (status != null && mounted) {
+        setState(() {
+          _workerActivity[workerId] = status;
+        });
+      }
+    } catch (_) {}
+  }
+
+  String? _extractWorkerIdFromPayload(dynamic payload) {
+    try {
+      final dynamic n1 = (payload as dynamic).newRecord;
+      if (n1 != null && n1 is Map && n1['worker_id'] != null) {
+        return n1['worker_id'].toString();
+      }
+    } catch (_) {}
+    try {
+      if (payload is Map && payload['new'] is Map) {
+        final n2 = payload['new'] as Map;
+        final wid = n2['worker_id'];
+        if (wid != null) return wid.toString();
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<Map<String, dynamic>?> _getWorkerStatus(String workerId) async {
     try {
       final boundaryEvent = await _supabase
           .from('worker_boundary_events')
           .select()
           .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
           .order('created_at', ascending: false)
           .limit(1)
           .maybeSingle();
 
-      // Use is_inside column if available, fallback to type check
+      // If no boundary event, default to Outside (safer for supervisor app)
       final isInside =
-          boundaryEvent == null ||
+          boundaryEvent != null &&
           (boundaryEvent['is_inside'] ?? (boundaryEvent['type'] != 'exit'));
 
-      Map<String, dynamic>? activeLog;
-      Map<String, dynamic>? pendingAssignment;
-      Map<String, dynamic>? pendingVerification;
+      final activeLog = await _supabase
+          .from('production_logs')
+          .select('*, items(name), machines(name)')
+          .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
+          .eq('is_active', true)
+          .order('start_time', ascending: false)
+          .limit(1)
+          .maybeSingle();
 
-      try {
-        activeLog = await _supabase
-            .from('production_logs')
-            .select('*, items(name), machines(name)')
-            .eq('worker_id', workerId)
-            .eq('organization_code', widget.organizationCode)
-            .filter('end_time', 'is', null)
-            .order('start_time', ascending: false)
-            .limit(1)
-            .maybeSingle();
+      final pendingAssignment = await _supabase
+          .from('work_assignments')
+          .select('*, items(name), machines(name)')
+          .eq('worker_id', workerId)
+          .eq('status', 'pending')
+          .eq('organization_code', widget.organizationCode)
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle();
 
-        pendingAssignment = await _supabase
-            .from('work_assignments')
-            .select('*, items(name), machines(name)')
-            .eq('worker_id', workerId)
-            .eq('status', 'pending')
-            .eq('organization_code', widget.organizationCode)
-            .order('created_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-
-        pendingVerification = await _supabase
-            .from('production_logs')
-            .select('*, items(name), machines(name)')
-            .eq('worker_id', workerId)
-            .eq('organization_code', widget.organizationCode)
-            .or('is_verified.is.false,is_verified.is.null')
-            .not('end_time', 'is', null)
-            .gt('quantity', 0)
-            .order('end_time', ascending: false)
-            .limit(1)
-            .maybeSingle();
-      } catch (e) {
-        debugPrint('Error fetching joined status, falling back to basic: $e');
-        // Fallback to basic select without joins if schema cache is not yet updated
-        activeLog = await _supabase
-            .from('production_logs')
-            .select()
-            .eq('worker_id', workerId)
-            .eq('organization_code', widget.organizationCode)
-            .filter('end_time', 'is', null)
-            .order('start_time', ascending: false)
-            .limit(1)
-            .maybeSingle();
-
-        pendingAssignment = await _supabase
-            .from('work_assignments')
-            .select()
-            .eq('worker_id', workerId)
-            .eq('status', 'pending')
-            .eq('organization_code', widget.organizationCode)
-            .order('created_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-
-        pendingVerification = await _supabase
-            .from('production_logs')
-            .select()
-            .eq('worker_id', workerId)
-            .eq('organization_code', widget.organizationCode)
-            .or('is_verified.is.false,is_verified.is.null')
-            .not('end_time', 'is', null)
-            .gt('quantity', 0)
-            .order('end_time', ascending: false)
-            .limit(1)
-            .maybeSingle();
-      }
+      // 3. Get all pending verifications
+      final pendingVerifications = await _supabase
+          .from('production_logs')
+          .select('*, items(name), machines(name)')
+          .eq('worker_id', workerId)
+          .eq('organization_code', widget.organizationCode)
+          .or('is_verified.is.false,is_verified.is.null')
+          .not('end_time', 'is', null)
+          .gt('quantity', 0)
+          .order('end_time', ascending: false);
 
       String? awaitingVerificationStatus;
-
-      if (pendingVerification != null) {
-        final itemName =
-            pendingVerification['items']?['name'] ??
-            pendingVerification['item_id'];
-        awaitingVerificationStatus =
-            "${pendingVerification['operation']} ($itemName)";
+      if ((pendingVerifications as List).isNotEmpty) {
+        final count = pendingVerifications.length;
+        final latest = pendingVerifications.first;
+        final itemName = latest['items']?['name'] ?? latest['item_id'];
+        if (count > 1) {
+          awaitingVerificationStatus =
+              "${latest['operation']} ($itemName) + ${count - 1} more";
+        } else {
+          awaitingVerificationStatus = "${latest['operation']} ($itemName)";
+        }
       }
 
       String? currentTaskWithDuration;
@@ -2033,24 +2330,23 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             "${activeLog['operation']} ($itemName)${machineName != null ? ' @ $machineName' : ''}";
 
         if (!isInside) {
-          // If worker is outside, we consider them idle even if a log is "active"
-          // unless the log was started very recently (e.g. within 5 mins - maybe they just stepped out)
+          // If worker is outside, we still show the task but with a warning
           final startTime = startTimeStr != null
               ? DateTime.parse(startTimeStr)
               : null;
           final isRecent =
               startTime != null &&
-              DateTime.now().difference(startTime).inMinutes < 5;
+              TimeUtils.nowUtc().difference(startTime.toUtc()).inMinutes < 5;
 
           if (!isRecent) {
-            currentTaskWithDuration = null; // Mark as idle
+            currentTaskWithDuration = "$taskDisplay (OUTSIDE ALERT)";
           } else {
             currentTaskWithDuration = "$taskDisplay (OUTSIDE)";
           }
         } else {
           if (startTimeStr != null) {
             final startTime = DateTime.parse(startTimeStr);
-            final duration = DateTime.now().difference(startTime);
+            final duration = TimeUtils.nowUtc().difference(startTime.toUtc());
 
             // If log is older than 12 hours, consider it stale/idle
             if (duration.inHours < 12) {
@@ -2110,7 +2406,7 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                 IconData icon = Icons.notifications;
                 Color color = Colors.blue;
 
-                if (type == 'out_of_bounds') {
+                if (type == 'work_abandonment') {
                   icon = Icons.warning_amber_rounded;
                   color = Colors.red;
                 } else if (type == 'return') {
@@ -2165,12 +2461,106 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
     );
   }
 
+  Widget _buildAdvancedReportsTab() {
+    final isDark = widget.isDarkMode;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Advanced Analytics & Reports',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: isDark ? Colors.white : Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 16),
+          _buildReportCard(
+            title: 'Daily Worker Summary',
+            subtitle:
+                'First entry, last exit, total inside/outside, production time',
+            icon: Icons.person_search,
+            reportType: 'daily_geofence_summaries',
+          ),
+          _buildReportCard(
+            title: 'Machine Utilization',
+            subtitle: 'Running time, idle time, and operator count per machine',
+            icon: Icons.precision_manufacturing,
+            reportType: 'machine_utilization',
+          ),
+          _buildReportCard(
+            title: 'Production Efficiency',
+            subtitle:
+                'Actual output vs target, output/hour, supervisor corrections',
+            icon: Icons.speed,
+            reportType: 'production_efficiency',
+          ),
+          _buildReportCard(
+            title: 'Exception Reporting',
+            subtitle:
+                'Late arrivals, long outside durations, production spikes',
+            icon: Icons.warning_amber,
+            reportType: 'exception_report',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReportCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required String reportType,
+  }) {
+    final isDark = widget.isDarkMode;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: isDark ? Colors.grey[900] : Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      elevation: 2,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: CircleAvatar(
+          backgroundColor: AppColors.getAccent(isDark).withValues(alpha: 0.1),
+          child: Icon(icon, color: AppColors.getAccent(isDark)),
+        ),
+        title: Text(
+          title,
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: isDark ? Colors.white : Colors.black87,
+          ),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(
+            fontSize: 12,
+            color: isDark ? Colors.grey[400] : Colors.grey[600],
+          ),
+        ),
+        trailing: _isExporting
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : IconButton(
+                icon: Icon(Icons.download, color: AppColors.getAccent(isDark)),
+                onPressed: () => _downloadAdvancedReport(reportType),
+              ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final themeController = ThemeController.of(context);
     final isDark = themeController?.isDarkMode ?? widget.isDarkMode;
     return DefaultTabController(
-      length: 5,
+      length: 6,
       child: Scaffold(
         backgroundColor: isDark ? const Color(0xFF121212) : Colors.grey[50],
         appBar: AppBar(
@@ -2262,11 +2652,12 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                 icon: Icon(Icons.check_circle_outline),
               ),
               Tab(text: 'Workers', icon: Icon(Icons.people_outline)),
-              Tab(text: 'Geofence', icon: Icon(Icons.security_rounded)),
+              Tab(text: 'Gate Activity', icon: Icon(Icons.security_rounded)),
               Tab(
-                text: 'Out of Bounds',
+                text: 'Work Abandonment',
                 icon: Icon(Icons.location_on_outlined),
               ),
+              Tab(text: 'Reports', icon: Icon(Icons.analytics_outlined)),
               Tab(
                 text: 'Alerts',
                 icon: Icon(Icons.notifications_active_outlined),
@@ -2288,6 +2679,126 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
             ).pushNamedAndRemoveUntil('/', (route) => false);
           },
           additionalItems: [
+            Theme(
+              data: Theme.of(
+                context,
+              ).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                leading: Icon(
+                  Icons.dashboard_customize_outlined,
+                  color: isDark ? Colors.blue[300] : Colors.blue,
+                ),
+                title: Text(
+                  'Quick Navigation',
+                  style: TextStyle(
+                    color: isDark ? Colors.white : Colors.black87,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                iconColor: isDark ? Colors.blue[300] : Colors.blue,
+                collapsedIconColor: isDark
+                    ? Colors.white70
+                    : Colors.black.withValues(alpha: 0.6),
+                children: [
+                  ListTile(
+                    leading: Icon(
+                      Icons.check_circle_outline,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Verifications',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(0);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.people_outline,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Workers',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(1);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.security_rounded,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Gate Activity',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(2);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.location_on_outlined,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Work Abandonment',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(3);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.analytics_outlined,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Reports',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(4);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.notifications_active_outlined,
+                      color: isDark ? Colors.blue[300] : Colors.blue,
+                    ),
+                    title: Text(
+                      'Alerts',
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      DefaultTabController.of(context).animateTo(5);
+                    },
+                  ),
+                ],
+              ),
+            ),
             ListTile(
               leading: Icon(
                 Icons.help_outline,
@@ -2381,14 +2892,59 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
                                     ),
                                   ),
                                   const SizedBox(height: 4),
+                                  Builder(
+                                    builder: (context) {
+                                      final fmt = DateFormat(
+                                        'dd MMM yyyy, hh:mm a',
+                                      );
+                                      String startStr = '--';
+                                      String submitStr = '--';
+                                      if (log['start_time'] != null) {
+                                        startStr = fmt.format(
+                                          TimeUtils.parseToLocal(
+                                            log['start_time'],
+                                          ),
+                                        );
+                                      } else if (log['created_at'] != null) {
+                                        startStr = fmt.format(
+                                          TimeUtils.parseToLocal(
+                                            log['created_at'],
+                                          ),
+                                        );
+                                      }
+                                      if (log['end_time'] != null) {
+                                        submitStr = fmt.format(
+                                          TimeUtils.parseToLocal(
+                                            log['end_time'],
+                                          ),
+                                        );
+                                      } else if (log['created_at'] != null) {
+                                        submitStr = fmt.format(
+                                          TimeUtils.parseToLocal(
+                                            log['created_at'],
+                                          ),
+                                        );
+                                      }
+                                      return Text(
+                                        'Start: $startStr | Submitted: $submitStr',
+                                        style: TextStyle(
+                                          color: isDark
+                                              ? Colors.blue[200]
+                                              : Colors.blue[800],
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  const SizedBox(height: 2),
                                   Text(
-                                    'Time: ${DateFormat('dd MMM yyyy, hh:mm a').format(TimeUtils.parseToLocal(log['start_time']))}',
+                                    'Shift: ${log['shift_name'] ?? 'N/A'}',
                                     style: TextStyle(
                                       color: isDark
-                                          ? Colors.blue[200]
-                                          : Colors.blue[800],
+                                          ? Colors.white70
+                                          : Colors.black54,
                                       fontSize: 12,
-                                      fontWeight: FontWeight.w500,
                                     ),
                                   ),
                                   if (log['remarks'] != null &&
@@ -2423,14 +2979,15 @@ class _SupervisorDashboardScreenState extends State<SupervisorDashboardScreen> {
               ),
             ),
             _buildWorkerStatusTab(),
-            GeofenceTab(
+            GateActivityTab(
               organizationCode: widget.organizationCode,
               isDarkMode: isDark,
             ),
-            OutOfBoundsTab(
+            WorkAbandonmentTab(
               organizationCode: widget.organizationCode,
               isDarkMode: isDark,
             ),
+            _buildAdvancedReportsTab(),
             _buildNotificationsTab(),
           ],
         ),

@@ -1,6 +1,6 @@
 import '../utils/time_utils.dart';
 
-class WorkerBoundaryEvent {
+class WorkAbandonmentEvent {
   final String id;
   final String workerId;
   final String organizationCode;
@@ -12,7 +12,7 @@ class WorkerBoundaryEvent {
   final double? entryLng;
   final String? durationMinutes;
 
-  WorkerBoundaryEvent({
+  WorkAbandonmentEvent({
     required this.id,
     required this.workerId,
     required this.organizationCode,
@@ -40,8 +40,8 @@ class WorkerBoundaryEvent {
     };
   }
 
-  factory WorkerBoundaryEvent.fromJson(Map<String, dynamic> json) {
-    return WorkerBoundaryEvent(
+  factory WorkAbandonmentEvent.fromJson(Map<String, dynamic> json) {
+    return WorkAbandonmentEvent(
       id: json['id'],
       workerId: json['worker_id'],
       organizationCode: json['organization_code'],

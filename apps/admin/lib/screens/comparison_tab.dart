@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'package:factoryflow_core/factoryflow_core.dart';
-import 'package:intl/intl.dart';
 
 class ComparisonTab extends StatefulWidget {
   final String organizationCode;
@@ -30,8 +29,8 @@ class _ComparisonTabState extends State<ComparisonTab> {
   void initState() {
     super.initState();
     _dateRange = DateTimeRange(
-      start: DateTime.now().subtract(const Duration(days: 7)),
-      end: DateTime.now(),
+      start: TimeUtils.nowIst().subtract(const Duration(days: 7)),
+      end: TimeUtils.nowIst(),
     );
     _fetchWorkers();
     _fetchLogs();
@@ -69,7 +68,7 @@ class _ComparisonTabState extends State<ComparisonTab> {
       var query = _supabase
           .from('production_logs')
           .select(
-              '*, workers:worker_id(name), items:item_id(name), machines:machine_id(name)')
+              '*, workers(name), items(name), machines(name)')
           .eq('organization_code', widget.organizationCode);
 
       if (_selectedWorkerId != null) {
@@ -77,10 +76,20 @@ class _ComparisonTabState extends State<ComparisonTab> {
       }
 
       if (_dateRange != null) {
-        query = query
-            .gte('created_at', _dateRange!.start.toIso8601String())
-            .lte('created_at',
-                _dateRange!.end.add(const Duration(days: 1)).toIso8601String());
+        final startUtc = DateTime(
+          _dateRange!.start.year,
+          _dateRange!.start.month,
+          _dateRange!.start.day,
+        ).toUtc();
+        final endUtc = startUtc.add(Duration(
+          days: _dateRange!.end.difference(_dateRange!.start).inDays + 1,
+        ));
+
+        // Use OR filter to include ALL unverified logs regardless of date,
+        // plus verified logs within the selected date range.
+        query = query.or(
+          'is_verified.is.false,is_verified.is.null,and(created_at.gte.${startUtc.toIso8601String()},created_at.lt.${endUtc.toIso8601String()})',
+        );
       }
 
       final response = await query.order('created_at', ascending: false);
@@ -111,13 +120,19 @@ class _ComparisonTabState extends State<ComparisonTab> {
           }
 
           if (_dateRange != null) {
-            fallbackQuery = fallbackQuery
-                .gte('created_at', _dateRange!.start.toIso8601String())
-                .lte(
-                    'created_at',
-                    _dateRange!.end
-                        .add(const Duration(days: 1))
-                        .toIso8601String());
+            final startUtc = DateTime(
+              _dateRange!.start.year,
+              _dateRange!.start.month,
+              _dateRange!.start.day,
+            ).toUtc();
+            final endUtc = startUtc.add(Duration(
+              days: _dateRange!.end.difference(_dateRange!.start).inDays + 1,
+            ));
+            fallbackQuery =
+                fallbackQuery.gte('created_at', startUtc.toIso8601String()).lt(
+                      'created_at',
+                      endUtc.toIso8601String(),
+                    );
           }
 
           final fallbackResponse =
@@ -214,16 +229,17 @@ class _ComparisonTabState extends State<ComparisonTab> {
             children: [
               Expanded(
                 child: DropdownButtonFormField<String>(
-                  value: _selectedWorkerId,
+                  initialValue: _selectedWorkerId,
                   dropdownColor: cardColor,
                   style: TextStyle(color: textColor),
                   decoration: InputDecoration(
                     labelText: 'Worker',
-                    labelStyle: TextStyle(color: textColor.withOpacity(0.7)),
+                    labelStyle:
+                        TextStyle(color: textColor.withValues(alpha: 0.7)),
                     filled: true,
                     fillColor: widget.isDarkMode
-                        ? Colors.white.withOpacity(0.05)
-                        : Colors.grey.withOpacity(0.1),
+                        ? Colors.white.withValues(alpha: 0.05)
+                        : Colors.grey.withValues(alpha: 0.1),
                     border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide.none),
@@ -249,7 +265,7 @@ class _ComparisonTabState extends State<ComparisonTab> {
                     context: context,
                     initialDateRange: _dateRange,
                     firstDate: DateTime(2020),
-                    lastDate: DateTime.now().add(const Duration(days: 1)),
+                    lastDate: TimeUtils.nowIst().add(const Duration(days: 1)),
                   );
                   if (picked != null) {
                     setState(() => _dateRange = picked);
@@ -262,8 +278,8 @@ class _ComparisonTabState extends State<ComparisonTab> {
                     : '${DateFormat('MMM d').format(_dateRange!.start)} - ${DateFormat('MMM d').format(_dateRange!.end)}'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: widget.isDarkMode
-                      ? Colors.white.withOpacity(0.1)
-                      : Colors.grey.withOpacity(0.2),
+                      ? Colors.white.withValues(alpha: 0.1)
+                      : Colors.grey.withValues(alpha: 0.2),
                   foregroundColor: textColor,
                 ),
               ),
@@ -304,14 +320,14 @@ class _ComparisonTabState extends State<ComparisonTab> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'Date: ${DateFormat('MMM d, yyyy HH:mm').format(DateTime.parse(log['created_at']).toLocal())}',
+                                  'Date: ${TimeUtils.formatFull(log['created_at'])}',
                                   style: TextStyle(
-                                      color: textColor.withOpacity(0.6)),
+                                      color: textColor.withValues(alpha: 0.6)),
                                 ),
                                 Text(
                                   'Machine: ${log['machines']?['name'] ?? 'N/A'}',
                                   style: TextStyle(
-                                      color: textColor.withOpacity(0.6)),
+                                      color: textColor.withValues(alpha: 0.6)),
                                 ),
                               ],
                             ),
@@ -382,15 +398,16 @@ class _ComparisonTabState extends State<ComparisonTab> {
     final textColor = widget.isDarkMode ? Colors.white : Colors.black87;
     return Expanded(
       child: Card(
-        color:
-            widget.isDarkMode ? Colors.white.withOpacity(0.05) : Colors.white,
+        color: widget.isDarkMode
+            ? Colors.white.withValues(alpha: 0.05)
+            : Colors.white,
         child: Padding(
           padding: const EdgeInsets.all(12.0),
           child: Column(
             children: [
               Text(title,
                   style: TextStyle(
-                      fontSize: 10, color: textColor.withOpacity(0.7))),
+                      fontSize: 10, color: textColor.withValues(alpha: 0.7))),
               const SizedBox(height: 4),
               Text(value,
                   style: TextStyle(
