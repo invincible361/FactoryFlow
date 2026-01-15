@@ -219,10 +219,6 @@ class _ProductionEntryScreenState extends State<ProductionEntryScreen>
     _subscribeToAssignments();
     _setupLocationListeners();
     _fetchTodayExtraUnits();
-    // Check for updates
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      UpdateService.checkForUpdates(context, 'worker');
-    });
     // Start a UI update timer to refresh time-based notifiers without full screen setState
     _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {

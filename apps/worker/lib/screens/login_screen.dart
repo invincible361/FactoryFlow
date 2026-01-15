@@ -24,10 +24,6 @@ class _LoginScreenState extends State<LoginScreen> {
     _fetchAppVersion();
     // Request notification permissions on startup
     NotificationService.requestPermissions();
-    // Check for updates on startup
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkForUpdate();
-    });
   }
 
   Future<void> _checkForUpdate() async {
