@@ -1,6 +1,6 @@
 {
   "latest_version": "1.0.12",
-  "apk_url": "https://raw.githubusercontent.com/invincible361/FactoryFlow/release/admin.apk",
+  "apk_url": "https://github.com/invincible361/FactoryFlow/releases/download/v1.x.12-unified/admin.apk",
   "force_update": true,
-  "release_notes": "Critical update system fix. Please install this version."
+  "release_notes": "Reliability fix for the update system. Please update now."
 }
